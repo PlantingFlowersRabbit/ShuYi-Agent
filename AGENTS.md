@@ -2,18 +2,18 @@
 
 ## 目标
 
-NovelVoice-Agent 是一个小说辅助生成故事配音的 agent 项目。v0.11 交付人工主导的人机协作工作台：导入 txt 小说，按中文章节或数字编号章节拆分，维护音色资源库和角色列表，人工确认段落无误后调用小模型做语句划分，再由用户校正角色、音色、情绪、语速、音量和声音模式，最后调用本地 TTS 服务试听或生成音频。
+NovelVoice-Agent 是一个小说辅助生成故事配音的 agent 项目。v0.12 交付人工主导的人机协作工作台：导入 txt 小说，先生成轻量章节目录，选择某个章节后才加载并拆分该章正文，维护音色资源库和角色列表，人工确认段落无误后调用小模型做语句划分，再由用户校正角色、音色、情绪、语速、音量和声音模式，最后调用本地 TTS 服务试听或生成音频。
 
 本仓库的 harness 目标不是一次性自动化全流程，而是让后续 AI worker 能稳定理解项目边界、测试口径、资源来源、模型合约和人机协作流程，避免未来接入更强自动化或 harness 工程时大规模推倒重来。
 
 ## 仓库结构
 
-- `spec/`：当前版本目标、产品范围、架构边界、LLM 语句划分合约和音频合成合约；v0.11 当前目标见 `spec/v0.11-harness.md`。
+- `spec/`：当前版本目标、产品范围、架构边界、LLM 语句划分合约和音频合成合约；v0.12 当前目标见 `spec/v0.12-harness.md`。
 - `assets/`：测试验收素材、素材来源、许可证和资源使用说明。
 - `assets/samples/novels/`：小型小说 txt 样本，用于章节和段落正则测试。
 - `assets/samples/voices/`：小型可再分发参考音频样本，用于 voice cloning 烟测。
 - `backend/`：FastAPI 后端代码目录，包含小说、角色、音色资源、模型配置、语句划分和音频接口边界。
-- `frontend/`：React + Vite + TypeScript 前端代码目录，当前提供 v0.11 三页面工作台。
+- `frontend/`：React + Vite + TypeScript 前端代码目录，当前提供 v0.12 三页面工作台。
 - `scripts/`：后续下载、资源校验、测试辅助脚本目录。
 - `models/`：本地模型说明或 gitignored symlink，不能提交大型模型权重。
 - `outputs/`：合成音频和验收输出目录，默认不提交生成产物。
@@ -24,11 +24,11 @@ NovelVoice-Agent 是一个小说辅助生成故事配音的 agent 项目。v0.11
 
 ## 实现约束
 
-- v0.11 仍是人工主导版本，不实现全自动 harness 编排，不自动批量生成整章音频，不自动替用户确认段落或语句划分。
+- v0.12 仍是人工主导版本，不实现全自动 harness 编排，不自动批量生成整章音频，不自动替用户确认段落或语句划分。
 - 前端默认使用 React + Vite + TypeScript；后端默认使用 Python + FastAPI + uv。
 - 模型调用必须通过 OpenAI-compatible provider registry，不能把 `base_url`、模型名、API key 和超时重试策略散落到 UI 或业务代码里。
 - 语句划分默认 provider 为 SiliconFlow：`base_url="https://api.siliconflow.cn/v1"`，`model="Qwen/Qwen3-8B"`。
-- 未来 harness 自动化 provider 预留 DeepSeek：`base_url="https://api.deepseek.com"`，`model="deepseek-v4-flash"`。v0.11 保留配置与文档接口。
+- 未来 harness 自动化 provider 预留 DeepSeek：`base_url="https://api.deepseek.com"`，`model="deepseek-v4-flash"`。v0.12 保留配置与文档接口。
 - TTS 默认优先使用本地 Qwen3-TTS 服务，服务脚本见 `backend/tts/qwen3_tts_server.py`；模型权重通过本机路径或 gitignored symlink 引用，不提交到仓库。
 - API key 只通过 `.env`、系统环境变量或本地密钥管理注入，禁止写入文档、测试夹具和样例配置。
 - Common Voice 中国大陆中文数据只作为可选本地下载来源记录，不提交原始 clips。

@@ -18,6 +18,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/superpowers/plans/2026-07-29-v0-1-manual-collaboration.md",
         "spec/v0.11-harness.md",
         "docs/development/v0.11-verification.md",
+        "spec/v0.12-harness.md",
+        "docs/development/v0.12-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -32,13 +34,13 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.11" in app
+    assert "NovelVoice-Agent v0.12" in app
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
     assert 'accept=".txt,text/plain"' in app
     assert "上传小说" in app
-    assert "确认划分章节" in app
+    assert "划分章节" in app
     assert "章节列表" in app
     assert "角色列表" in app
     assert "音色选择" in app
@@ -104,6 +106,31 @@ def test_frontend_v0_11_progress_and_large_upload_guardrails():
     assert ".novel-preview" in styles
 
 
+def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
+    """Covers v0.12 lazy chapter loading and split-chapter progress behavior."""
+    app = read("frontend/src/App.tsx")
+    styles = read("frontend/src/styles.css")
+
+    assert "NovelVoice-Agent v0.12" in app
+    assert "划分章节" in app
+    assert "确认划分章节" not in app
+    assert "chapterSplitProgress" in app
+    assert "章节划分进度" in app
+    assert "hasSplitChapters" in app
+    assert "parseChapterIndex" in app
+    assert "extractChapterBody" in app
+    assert "setParagraphs([])" in app
+    assert "请选择左侧章节" in app
+    assert "paragraphsFromChapter(parseChapters(sampleNovel)[0])" not in app
+    assert "setActiveChapterId(parsed[0]?.chapterId" not in app
+    assert "setParagraphs(parsed[0] ? paragraphsFromChapter(parsed[0]) : [])" not in app
+
+    assert "height: calc(100vh - 62px)" in styles
+    assert ".sidebar" in styles and "overflow-y: auto" in styles
+    assert ".main-panel" in styles and "overflow-y: auto" in styles
+    assert "body {" in styles and "overflow: hidden" in styles
+
+
 def test_v0_11_frontend_uses_unitale_style_tokens():
     """Covers v0.11 Unitale-inspired visual direction."""
     styles = read("frontend/src/styles.css")
@@ -136,8 +163,8 @@ def test_default_voice_samples_are_not_three_smoke_placeholder_roles():
 
 
 def test_verification_document_records_real_environment_evidence_requirements():
-    """Covers v0.11 real environment evidence requirements."""
-    verification = read("docs/development/v0.11-verification.md")
+    """Covers v0.12 real environment evidence requirements."""
+    verification = read("docs/development/v0.12-verification.md")
 
     required_evidence_terms = [
         "SiliconFlow",
@@ -147,10 +174,9 @@ def test_verification_document_records_real_environment_evidence_requirements():
         "真实环境",
         "mock 只能用于单元测试",
         "这个地下城长蘑菇了.txt",
-        "年轻男",
-        "御姐音",
-        "播音腔女",
-        "男声旁白",
+        "划分章节",
+        "章节划分进度",
+        "独立",
     ]
     for term in required_evidence_terms:
         assert term in verification

@@ -11,6 +11,7 @@
 body {
   margin: 0;
   background: #f1f5f9;
+  overflow: hidden;
   overflow-x: hidden;
 }
 
@@ -76,7 +77,8 @@ small {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .topbar {
@@ -128,7 +130,9 @@ small {
   grid-template-columns: minmax(300px, 25%) minmax(0, 75%);
   gap: 16px;
   max-width: 100vw;
-  min-height: calc(100vh - 62px);
+  height: calc(100vh - 62px);
+  min-height: 0;
+  overflow: hidden;
   padding: 16px;
 }
 
@@ -143,11 +147,15 @@ small {
   display: grid;
   align-content: start;
   gap: 16px;
-  overflow: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .main-panel {
-  overflow: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .panel,
@@ -352,6 +360,29 @@ small {
 
 .paragraph-card + .paragraph-card {
   margin-top: 12px;
+}
+
+.empty-state {
+  display: grid;
+  place-content: center;
+  min-height: 320px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #64748b;
+  padding: 24px;
+  text-align: center;
+}
+
+.empty-state h2 {
+  margin: 6px 0;
+  color: #334155;
+  font-size: 22px;
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 14px;
 }
 
 .paragraph-toolbar {

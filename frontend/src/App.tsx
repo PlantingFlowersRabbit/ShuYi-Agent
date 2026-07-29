@@ -7,6 +7,8 @@ type Chapter = {
   chapterId: string;
   title: string;
   body: string;
+  bodyStart?: number;
+  bodyEnd?: number;
 };
 
 type ApiChapter = {
@@ -176,6 +178,34 @@ function parseChapters(text: string): Chapter[] {
   });
 }
 
+function parseChapterIndex(text: string): Chapter[] {
+  const headingPattern =
+    /^[ \t]*((?:第[一二三四五六七八九十百千万零〇两\d]+[章节回][^\n\r]*)|(?:\d+[.．、][^\n\r]*))$/gm;
+  const matches = Array.from(text.matchAll(headingPattern));
+  if (matches.length === 0) {
+    const stripped = text.trim();
+    return stripped
+      ? [{ chapterId: "chapter-0001", title: "未分章正文", body: "", bodyStart: 0, bodyEnd: text.length }]
+      : [];
+  }
+  return matches.map((match, index) => {
+    const next = matches[index + 1];
+    return {
+      chapterId: `chapter-${String(index + 1).padStart(4, "0")}`,
+      title: match[1].trim(),
+      body: "",
+      bodyStart: (match.index ?? 0) + match[0].length,
+      bodyEnd: next?.index ?? text.length,
+    };
+  });
+}
+
+function extractChapterBody(text: string, chapter: Chapter): string {
+  if (chapter.body) return chapter.body;
+  const body = text.slice(chapter.bodyStart ?? 0, chapter.bodyEnd ?? text.length);
+  return body.replace(/^-{3,}\s*/, "").trim();
+}
+
 function paragraphsFromChapter(chapter: Chapter): ParagraphModule[] {
   return chapter.body
     .split(/\n\s*\n+/)
@@ -325,11 +355,10 @@ function App() {
   const fullNovelTextRef = useRef(sampleNovel);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState(() => makeNovelPreview(sampleNovel));
-  const [chapters, setChapters] = useState<Chapter[]>(() => parseChapters(sampleNovel));
-  const [activeChapterId, setActiveChapterId] = useState("chapter-0001");
-  const [paragraphs, setParagraphs] = useState<ParagraphModule[]>(() =>
-    paragraphsFromChapter(parseChapters(sampleNovel)[0]),
-  );
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [activeChapterId, setActiveChapterId] = useState("");
+  const [paragraphs, setParagraphs] = useState<ParagraphModule[]>([]);
+  const [hasSplitChapters, setHasSplitChapters] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [voices, setVoices] = useState<VoiceResource[]>(defaultVoices);
   const [roles, setRoles] = useState<RoleCard[]>(() => createDefaultRoles(defaultVoices));
@@ -348,6 +377,7 @@ function App() {
   const [modelConfig, setModelConfig] = useState<ModelConfig>(defaultModelConfig);
   const [apiStatus, setApiStatus] = useState("等待上传小说");
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
   const [segmentationProgress, setSegmentationProgress] = useState(0);
   const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
 
@@ -391,8 +421,9 @@ function App() {
 
   function applyChapters(parsed: Chapter[], status: string) {
     setChapters(parsed);
-    setActiveChapterId(parsed[0]?.chapterId ?? "");
-    setParagraphs(parsed[0] ? paragraphsFromChapter(parsed[0]) : []);
+    setActiveChapterId("");
+    setParagraphs([]);
+    setHasSplitChapters(parsed.length > 0);
     setConfirmed(false);
     setUtterancesByParagraph({});
     setApiStatus(status);
@@ -406,35 +437,37 @@ function App() {
     const text = await file.text();
     fullNovelTextRef.current = text;
     setNovelPreview(makeNovelPreview(text));
+    setChapters([]);
+    setActiveChapterId("");
+    setParagraphs([]);
+    setHasSplitChapters(false);
+    setChapterSplitProgress(0);
+    setSegmentationProgress(0);
+    setVoiceGenerationProgress(0);
     setUploadProgress(62);
-    await importNovelText(text);
+    setApiStatus("小说已上传，仅展示开头预览；点击“划分章节”生成章节目录");
     setUploadProgress(100);
   }
 
-  function confirmChapterSplit() {
-    setUploadProgress(82);
-    applyChapters(parseChapters(fullNovelTextRef.current), "章节已确认划分，可以选择章节继续校对段落");
-    setUploadProgress(100);
+  function splitChapters() {
+    setChapterSplitProgress(12);
+    const parsed = parseChapterIndex(fullNovelTextRef.current);
+    setChapterSplitProgress(76);
+    applyChapters(parsed, "章节目录已划分；选择左侧章节后才加载该章正文");
+    setChapterSplitProgress(100);
   }
 
   async function selectChapter(chapterId: string) {
     const chapter = chapters.find((item) => item.chapterId === chapterId);
     if (!chapter) return;
     setActiveChapterId(chapterId);
-    try {
-      const data = await requestJson<{
-        paragraphs: ApiParagraph[];
-        can_segment: boolean;
-      }>(`/api/chapters/${chapterId}`);
-      setParagraphs(data.paragraphs.map(fromApiParagraph));
-      setConfirmed(data.can_segment);
-      setApiStatus("章节已从后端载入");
-    } catch (error) {
-      setParagraphs(paragraphsFromChapter(chapter));
-      setConfirmed(false);
-      setApiStatus(`后端章节载入失败，已使用本地预览：${String(error)}`);
-    }
+    const body = extractChapterBody(fullNovelTextRef.current, chapter);
+    setParagraphs(paragraphsFromChapter({ ...chapter, body }));
+    setConfirmed(false);
     setUtterancesByParagraph({});
+    setSegmentationProgress(0);
+    setVoiceGenerationProgress(0);
+    setApiStatus(`已加载章节：${chapter.title}`);
   }
 
   async function syncParagraph(paragraphId: string, payload: Record<string, unknown>) {
@@ -698,7 +731,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.11 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.12 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -706,8 +739,8 @@ function App() {
               <button className="tool-button sky" type="button" onClick={() => fileInputRef.current?.click()}>
                 上传小说
               </button>
-              <button className="tool-button amber" type="button" onClick={confirmChapterSplit}>
-                确认划分章节
+              <button className="tool-button amber" type="button" onClick={splitChapters}>
+                划分章节
               </button>
             </div>
             <input
@@ -719,6 +752,7 @@ function App() {
               onChange={handleTxtFile}
             />
             <ProgressBar label="上传小说进度" value={uploadProgress} />
+            <ProgressBar label="章节划分进度" value={chapterSplitProgress} />
             <ProgressBar label="语句划分进度" value={segmentationProgress} />
             <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
             <div className="novel-preview" aria-label="小说开头预览">
@@ -786,43 +820,57 @@ function App() {
         </aside>
 
         <section className="main-panel">
-          <header className="chapter-header">
-            <div>
+          {!hasSplitChapters ? (
+            <div className="empty-state">
               <div className="section-title">当前章节</div>
-              <h2>{activeChapter?.title ?? "未选择章节"}</h2>
+              <h2>尚未划分章节</h2>
+              <p>上传小说后点击左侧“划分章节”，右侧暂不渲染具体章节内容。</p>
             </div>
-            <div className="gate">
-              <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
-                确认无误
-              </button>
-              <button className="tool-button purple" type="button" onClick={() => void runSegmentation()} disabled={!confirmed}>
-                语句划分
-              </button>
-              <span>{confirmed ? "已确认，可以执行语句划分" : "确认前不能执行语句划分"}</span>
+          ) : !activeChapter ? (
+            <div className="empty-state">
+              <div className="section-title">当前章节</div>
+              <h2>请选择左侧章节</h2>
+              <p>选择某个章节后，才会加载并拆分这一章的正文。</p>
             </div>
-          </header>
-
-          <section className="paragraph-stack">
-            {visibleParagraphs.map((paragraph) => (
-              <article className="paragraph-card" key={paragraph.paragraphId}>
-                <div className="paragraph-toolbar">
-                  <strong>{paragraph.paragraphId}</strong>
-                  <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { collapsed: !paragraph.collapsed })}>
-                    {paragraph.collapsed ? "展开" : "折叠"}
-                  </button>
-                  <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { deleted: true })}>
-                    删除
-                  </button>
+          ) : (
+            <>
+              <header className="chapter-header">
+                <div>
+                  <div className="section-title">当前章节</div>
+                  <h2>{activeChapter.title}</h2>
                 </div>
-                {!paragraph.collapsed && (
-                  <textarea
-                    value={paragraph.text}
-                    onChange={(event) => updateParagraph(paragraph.paragraphId, { text: event.target.value })}
-                  />
-                )}
-                <div className="paragraph-utterances" aria-label={`${paragraph.paragraphId} 子语句`}>
-                  {(utterancesByParagraph[paragraph.paragraphId] ?? []).map((utterance) => (
-                    <article className="utterance-card" key={utterance.utteranceId}>
+                <div className="gate">
+                  <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
+                    确认无误
+                  </button>
+                  <button className="tool-button purple" type="button" onClick={() => void runSegmentation()} disabled={!confirmed}>
+                    语句划分
+                  </button>
+                  <span>{confirmed ? "已确认，可以执行语句划分" : "确认前不能执行语句划分"}</span>
+                </div>
+              </header>
+
+              <section className="paragraph-stack">
+                {visibleParagraphs.map((paragraph) => (
+                  <article className="paragraph-card" key={paragraph.paragraphId}>
+                    <div className="paragraph-toolbar">
+                      <strong>{paragraph.paragraphId}</strong>
+                      <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { collapsed: !paragraph.collapsed })}>
+                        {paragraph.collapsed ? "展开" : "折叠"}
+                      </button>
+                      <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { deleted: true })}>
+                        删除
+                      </button>
+                    </div>
+                    {!paragraph.collapsed && (
+                      <textarea
+                        value={paragraph.text}
+                        onChange={(event) => updateParagraph(paragraph.paragraphId, { text: event.target.value })}
+                      />
+                    )}
+                    <div className="paragraph-utterances" aria-label={`${paragraph.paragraphId} 子语句`}>
+                      {(utterancesByParagraph[paragraph.paragraphId] ?? []).map((utterance) => (
+                        <article className="utterance-card" key={utterance.utteranceId}>
                       <input
                         value={utterance.text}
                         onChange={(event) =>
@@ -902,7 +950,9 @@ function App() {
                 </div>
               </article>
             ))}
-          </section>
+              </section>
+            </>
+          )}
         </section>
       </main>
     );
@@ -1169,7 +1219,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.11</h1>
+        <h1>NovelVoice-Agent v0.12</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],
