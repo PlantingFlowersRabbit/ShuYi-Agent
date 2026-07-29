@@ -1,0 +1,209 @@
+:root {
+  color: #1f2933;
+  background: #f6f7f9;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #b8c1cc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #18212f;
+  cursor: pointer;
+  padding: 8px 10px;
+}
+
+button:disabled {
+  color: #8c98a8;
+  cursor: not-allowed;
+  background: #eceff3;
+}
+
+textarea,
+input,
+select {
+  width: 100%;
+  border: 1px solid #c7d0da;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #17202d;
+  padding: 8px;
+}
+
+textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+.workbench {
+  display: grid;
+  grid-template-columns: minmax(280px, 25%) minmax(0, 75%);
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid #d6dbe2;
+  background: #ffffff;
+  padding: 18px;
+  overflow: auto;
+}
+
+.main-panel {
+  padding: 22px;
+  overflow: auto;
+}
+
+.panel,
+.paragraph-card,
+.utterance-card {
+  border: 1px solid #dbe1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.panel + .panel,
+.paragraph-card + .paragraph-card,
+.utterance-card + .utterance-card {
+  margin-top: 14px;
+}
+
+.section-title {
+  color: #415064;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  margin-bottom: 8px;
+}
+
+.chapter-list {
+  display: grid;
+  gap: 8px;
+}
+
+.chapter-list button {
+  text-align: left;
+}
+
+.chapter-list .active {
+  border-color: #2f6fed;
+  color: #174ea6;
+}
+
+.role-card {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #e4e8ee;
+  padding-top: 12px;
+}
+
+.role-card + .role-card {
+  margin-top: 12px;
+}
+
+.role-card small {
+  color: #6b7788;
+}
+
+.chapter-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.chapter-header h2 {
+  margin: 0;
+}
+
+.gate {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.gate span {
+  color: #5b6878;
+  font-size: 13px;
+}
+
+.paragraph-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.paragraph-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.paragraph-toolbar strong {
+  margin-right: auto;
+}
+
+.utterance-editor {
+  margin-top: 22px;
+}
+
+.utterance-card {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) minmax(120px, 1fr) minmax(140px, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.utterance-card textarea {
+  min-height: 48px;
+}
+
+.audio-preview {
+  grid-column: 1 / -1;
+  border: 1px dashed #98a6b8;
+  border-radius: 6px;
+  padding: 10px;
+  color: #334155;
+  background: #f8fafc;
+}
+
+@media (max-width: 900px) {
+  .workbench {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #d6dbe2;
+  }
+
+  .chapter-header {
+    display: grid;
+  }
+
+  .gate {
+    justify-content: flex-start;
+  }
+
+  .utterance-card {
+    grid-template-columns: 1fr;
+  }
+}

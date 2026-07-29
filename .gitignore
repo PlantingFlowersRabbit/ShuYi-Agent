@@ -1,0 +1,44 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python / uv
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Frontend
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local models and large generated outputs
+models/**/*
+!models/README.md
+outputs/**/*
+!outputs/README.md
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+
+# Generated audio and temporary media
+*.wav
+*.mp3
+*.flac
+*.ogg
+!assets/samples/voices/*.wav
+!assets/samples/voices/*.mp3
+!assets/samples/voices/*.flac
+!assets/samples/voices/*.ogg
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

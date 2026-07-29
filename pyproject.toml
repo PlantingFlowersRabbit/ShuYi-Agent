@@ -1,0 +1,26 @@
+[project]
+name = "novelvoice-agent"
+version = "0.1.0"
+description = "Harness-first novel dubbing assistant for manual human-agent collaboration."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.8",
+]
+backend = [
+  "fastapi>=0.115",
+  "httpx>=0.27",
+  "uvicorn[standard]>=0.30",
+]
+tts = [
+  "soundfile>=0.12",
+  "torch>=2.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

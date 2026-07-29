@@ -1,0 +1,76 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-07-29",
+  "resources": [
+    {
+      "id": "novel-hongloumeng-pg24264-excerpt",
+      "type": "novel_text",
+      "local_path": "assets/samples/novels/hongloumeng_pg24264_excerpt.txt",
+      "source_url": "https://www.gutenberg.org/ebooks/24264",
+      "download_url": "https://www.gutenberg.org/files/24264/24264-0.txt",
+      "source_project": "Project Gutenberg",
+      "original_filename": "24264-0.txt",
+      "license": "Project Gutenberg License; public domain in the United States",
+      "can_redistribute": true,
+      "clip_range_seconds": null,
+      "transcript": null,
+      "intended_role": "chapter-and-paragraph-regex-test",
+      "notes": "Excerpt from first chapters, truncated for a compact parser fixture."
+    },
+    {
+      "id": "voice-cmn-qixinxieli-canonni-cc0",
+      "type": "voice_reference",
+      "local_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
+      "transcript_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0.txt",
+      "source_url": "https://commons.wikimedia.org/wiki/File:LL-Q9192_(cmn)-CanonNi-%E9%BD%90%E5%BF%83%E5%8D%8F%E5%8A%9B.wav",
+      "download_url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/LL-Q9192_(cmn)-CanonNi-%E9%BD%90%E5%BF%83%E5%8D%8F%E5%8A%9B.wav",
+      "source_project": "Wikimedia Commons / Lingua Libre",
+      "original_filename": "LL-Q9192_(cmn)-CanonNi-齐心协力.wav",
+      "author": "CanonNi",
+      "license": "CC0 1.0 Universal Public Domain Dedication",
+      "can_redistribute": true,
+      "clip_range_seconds": [0.0, 1.378667],
+      "transcript": "齐心协力",
+      "intended_role": "raw-cc0-mandarin-reference",
+      "notes": "Short original CC0 Mandarin audio. Useful for license and decode checks; too short for final cloning quality."
+    },
+    {
+      "id": "voice-cmn-qixinxieli-canonni-cc0-loop20s",
+      "type": "voice_reference",
+      "local_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0_loop20s.wav",
+      "transcript_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0_loop20s.txt",
+      "source_url": "https://commons.wikimedia.org/wiki/File:LL-Q9192_(cmn)-CanonNi-%E9%BD%90%E5%BF%83%E5%8D%8F%E5%8A%9B.wav",
+      "download_url": "derived-from-local-cc0-source",
+      "source_project": "Wikimedia Commons / Lingua Libre",
+      "original_filename": "cmn_qixinxieli_canonni_cc0.wav",
+      "author": "CanonNi; derived locally with ffmpeg stream loop",
+      "license": "CC0 1.0 Universal Public Domain Dedication",
+      "can_redistribute": true,
+      "clip_range_seconds": [0.0, 20.0],
+      "transcript": "齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。齐心协力。",
+      "intended_role": "narrator-male-female-smoke-test-placeholder",
+      "notes": "Looped test fixture for local TTS API smoke tests. It is not a natural 20-second performance and must be replaced for quality evaluation."
+    }
+  ],
+  "optional_sources_not_committed": [
+    {
+      "id": "mozilla-common-voice-zh-cn",
+      "type": "voice_dataset",
+      "source_url": "https://mozilladatacollective.com/datasets/cmqim47x700tunq074za20dq1",
+      "source_project": "Mozilla Common Voice",
+      "license": "CC0; source page also forbids re-hosting/re-sharing the dataset",
+      "can_redistribute": false,
+      "reason_not_committed": "Do not commit original clips because the dataset page forbids re-hosting, resale, or re-sharing."
+    },
+    {
+      "id": "librivox-three-chinese-classics",
+      "type": "voice_dataset",
+      "source_url": "https://librivox.org/three-chinese-classics-by-confucius-and-laozi/",
+      "source_project": "LibriVox / Internet Archive",
+      "license": "Public domain in the United States",
+      "can_redistribute": true,
+      "reason_not_committed": "Archive.org download failed in this environment; keep as a future optional source for longer natural Chinese readings."
+    }
+  ]
+}
+
