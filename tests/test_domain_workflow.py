@@ -492,19 +492,32 @@ def test_fastapi_v0_11_generated_voice_and_model_config_boundaries():
     config_response = client.get("/api/model-config")
     assert config_response.status_code == 200
     config = config_response.json()["config"]
-    assert config["llm"]["api_key_env"] == "SILICONFLOW_API_KEY"
-    assert "api_key" not in config["llm"]
+    assert config["llm"]["base_url"] == "https://api.siliconflow.cn/v1"
+    assert config["llm"]["model"] == "Qwen/Qwen3-8B"
+    assert config["llm"]["api_key"] == ""
     assert config["tts"]["base_url"] == "http://127.0.0.1:7811"
+    assert config["tts"]["model_path"] == ""
 
     patched = client.patch(
         "/api/model-config",
         json={
-            "llm": {"model": "Qwen/Qwen3-8B", "timeout_seconds": 90},
-            "tts": {"base_url": "http://127.0.0.1:7811", "provider": "local-qwen3-tts"},
+            "llm": {
+                "base_url": "https://api.example.test/v1",
+                "model": "remote-test-model",
+                "api_key": "test-placeholder-key",
+            },
+            "tts": {
+                "base_url": "http://127.0.0.1:7811",
+                "model_path": "/models/qwen3-tts",
+            },
         },
     )
     assert patched.status_code == 200
-    assert patched.json()["config"]["llm"]["timeout_seconds"] == 90
+    updated = patched.json()["config"]
+    assert updated["llm"]["base_url"] == "https://api.example.test/v1"
+    assert updated["llm"]["model"] == "remote-test-model"
+    assert updated["llm"]["api_key"] == "test-placeholder-key"
+    assert updated["tts"]["model_path"] == "/models/qwen3-tts"
 
 
 def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkeypatch):
@@ -673,3 +686,36 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
     assert data["audio_url"] == "/outputs/audio/vj-0001.wav"
     assert data["duration_seconds"] == 0.75
     assert calls[0]["request"]["input"] == "待合成文本"
+
+
+def test_fastapi_tts_endpoint_returns_substitute_audio_when_local_service_is_down(tmp_path):
+    """Covers v0.13 graceful audio generation fallback for a missing local TTS service."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    def unavailable_service(request, *, output_path, service_base_url=None):
+        raise TTSServiceError("local Qwen3-TTS request failed: <urlopen error [Errno 61] Connection refused>")
+
+    with (
+        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "synthesize_local_qwen3", unavailable_service),
+    ):
+        client = TestClient(create_app())
+        response = client.post(
+            "/api/utterances/p-0001-u-001/speech",
+            json={
+                "role_id": "narrator",
+                "text": "待合成文本",
+                "voice_mode": "voice_cloning",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["voice_job"]["status"] == "substitute"
+    assert "Qwen3-TTS" in data["voice_job"]["error"]
+    assert data["audio_url"] == "/outputs/audio/vj-0001.wav"
+    assert validate_wav_duration(tmp_path / "vj-0001.wav") == 0.75

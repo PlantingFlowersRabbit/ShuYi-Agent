@@ -180,6 +180,13 @@ small {
   font-weight: 700;
 }
 
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .toolbar-row,
 .gate,
 .paragraph-toolbar,
@@ -229,6 +236,11 @@ small {
 .paragraph-toolbar button {
   background: #f8fafc;
   color: #334155;
+}
+
+.icon-button {
+  min-width: 34px;
+  padding-inline: 10px;
 }
 
 .hidden-input {
@@ -363,9 +375,12 @@ small {
 }
 
 .empty-state {
-  display: grid;
-  place-content: center;
+  display: flex;
+  min-width: 0;
   min-height: 320px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   border: 1px dashed #cbd5e1;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.72);
@@ -381,8 +396,12 @@ small {
 }
 
 .empty-state p {
-  margin: 0;
+  width: 100%;
+  max-width: min(100%, 560px);
+  margin: 0 auto;
   font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .paragraph-toolbar {
@@ -411,7 +430,7 @@ small {
   padding: 10px;
 }
 
-.utterance-card textarea,
+.utterance-card .utterance-wide,
 .utterance-card output,
 .utterance-card audio {
   grid-column: 1 / -1;
@@ -433,7 +452,12 @@ small {
 .library-page,
 .model-page {
   display: grid;
+  align-content: start;
   gap: 16px;
+  height: calc(100vh - 62px);
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 16px;
 }
 
@@ -487,6 +511,11 @@ label {
 
   .utterance-card {
     grid-template-columns: 1fr;
+  }
+
+  .empty-state p {
+    max-width: 260px;
+    word-break: break-all;
   }
 
   .topbar {

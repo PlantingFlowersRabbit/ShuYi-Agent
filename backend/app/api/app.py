@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import wave
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -54,20 +55,13 @@ def _default_model_config() -> dict[str, Any]:
     siliconflow = providers["siliconflow-qwen3-8b"]
     return {
         "llm": {
-            "provider": siliconflow["name"],
             "base_url": siliconflow["base_url"],
             "model": siliconflow["model"],
-            "api_key_env": siliconflow["api_key_env"],
-            "timeout_seconds": siliconflow["timeout_seconds"],
-            "max_retries": siliconflow["max_retries"],
-            "extra_body": siliconflow["extra_body"],
+            "api_key": "",
         },
         "tts": {
-            "provider": "local-qwen3-tts",
             "base_url": os.environ.get("QWEN3_TTS_BASE_URL", "http://127.0.0.1:7811"),
-            "model_path_env": "QWEN3_TTS_MODEL_PATH",
-            "device_env": "QWEN3_TTS_DEVICE",
-            "timeout_seconds": 120,
+            "model_path": os.environ.get("QWEN3_TTS_MODEL_PATH", ""),
         },
     }
 
@@ -96,7 +90,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.11 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.13 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
     voices = VoiceResourceCollection(default_voice_resources(REAL_VOICE_ROOT))
@@ -289,10 +283,18 @@ def create_app() -> FastAPI:
     @app.patch("/api/model-config")
     async def update_model_config(payload: dict[str, Any]) -> dict[str, Any]:
         config = _state(app)["model_config"]
-        for section in ("llm", "tts"):
-            if isinstance(payload.get(section), dict):
-                sanitized = {key: value for key, value in payload[section].items() if key != "api_key"}
-                config[section] = {**config[section], **sanitized}
+        if isinstance(payload.get("llm"), dict):
+            llm_updates = {
+                key: value
+                for key, value in payload["llm"].items()
+                if key in {"base_url", "model", "api_key"}
+            }
+            config["llm"] = {**config["llm"], **llm_updates}
+        if isinstance(payload.get("tts"), dict):
+            tts_updates = {
+                key: value for key, value in payload["tts"].items() if key in {"base_url", "model_path"}
+            }
+            config["tts"] = {**config["tts"], **tts_updates}
         return {"config": config}
 
     @app.post("/api/utterances/{utterance_id}/speech")
@@ -332,15 +334,21 @@ def create_app() -> FastAPI:
         try:
             duration_seconds = synthesize_local_qwen3(request, output_path=output_path)
         except TTSServiceError as exc:
-            failed_job = VoiceJob(
+            duration_seconds = _write_substitute_wav(output_path)
+            substitute_job = VoiceJob(
                 **{
                     **job.to_dict(),
-                    "status": "failed",
-                    "error": str(exc),
+                    "status": "substitute",
+                    "error": f"本地 Qwen3-TTS 不可用，已生成本地可播放占位音频：{exc}",
                 }
             )
-            _state(app)["voice_jobs"][job_id] = failed_job
-            raise HTTPException(status_code=502, detail=failed_job.to_dict()) from exc
+            _state(app)["voice_jobs"][job_id] = substitute_job
+            return {
+                "voice_job": substitute_job.to_dict(),
+                "audio_url": f"/outputs/audio/{job_id}.wav",
+                "duration_seconds": duration_seconds,
+                "warning": "local TTS service unavailable; returned a deterministic substitute wav",
+            }
 
         _state(app)["voice_jobs"][job_id] = job
         return {
@@ -350,6 +358,17 @@ def create_app() -> FastAPI:
         }
 
     return app
+
+
+def _write_substitute_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> float:
+    frame_count = int(duration_seconds * sample_rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"\x00\x00" * frame_count)
+    return duration_seconds
 
 
 def _find_workbench_for_paragraph(app: FastAPI, paragraph_id: str) -> ChapterWorkbench:

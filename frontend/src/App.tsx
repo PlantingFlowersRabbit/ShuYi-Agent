@@ -60,6 +60,17 @@ type RoleCard = {
   designPrompt: string;
 };
 
+type ApiRoleCard = {
+  role_id: string;
+  name: string;
+  description: string;
+  voice_mode: VoiceMode;
+  voice_resource_id: string | null;
+  reference_audio_path: string | null;
+  reference_text: string | null;
+  design_prompt: string | null;
+};
+
 type UtteranceDraft = {
   utteranceId: string;
   paragraphId: string;
@@ -78,19 +89,13 @@ type UtteranceDraft = {
 
 type ModelConfig = {
   llm: {
-    provider: string;
     base_url: string;
     model: string;
-    api_key_env: string;
-    timeout_seconds: number;
-    max_retries: number;
+    api_key: string;
   };
   tts: {
-    provider: string;
     base_url: string;
-    model_path_env: string;
-    device_env: string;
-    timeout_seconds: number;
+    model_path: string;
   };
 };
 
@@ -132,19 +137,13 @@ const defaultVoices: VoiceResource[] = [
 
 const defaultModelConfig: ModelConfig = {
   llm: {
-    provider: "siliconflow-qwen3-8b",
     base_url: "https://api.siliconflow.cn/v1",
     model: "Qwen/Qwen3-8B",
-    api_key_env: "SILICONFLOW_API_KEY",
-    timeout_seconds: 60,
-    max_retries: 2,
+    api_key: "",
   },
   tts: {
-    provider: "local-qwen3-tts",
     base_url: "http://127.0.0.1:7811",
-    model_path_env: "QWEN3_TTS_MODEL_PATH",
-    device_env: "QWEN3_TTS_DEVICE",
-    timeout_seconds: 120,
+    model_path: "",
   },
 };
 
@@ -246,6 +245,19 @@ function fromApiVoice(voice: ApiVoiceResource): VoiceResource {
   };
 }
 
+function fromApiRole(role: ApiRoleCard): RoleCard {
+  return {
+    roleId: role.role_id,
+    name: role.name,
+    description: role.description,
+    voiceMode: role.voice_mode,
+    voiceResourceId: role.voice_resource_id ?? "",
+    referenceAudioPath: role.reference_audio_path ?? "",
+    referenceText: role.reference_text ?? "",
+    designPrompt: role.design_prompt ?? "",
+  };
+}
+
 function toApiVoice(voice: Partial<VoiceResource>): Record<string, unknown> {
   return {
     voice_id: voice.voiceId,
@@ -330,8 +342,64 @@ function makeUtteranceDraft(paragraph: ParagraphModule, roles: RoleCard[]): Utte
     emotion: "neutral",
     speed: 1,
     volume: 1,
-    designPrompt: role.designPrompt,
-    audioStatus: "尚未试听",
+    designPrompt: "",
+    audioStatus: "尚未生成",
+  };
+}
+
+function splitIntoSubSentences(text: string): string[] {
+  const sentenceEnders = new Set(["。", "！", "？", "!", "?", "；", ";"]);
+  const closingMarks = new Set(["”", "’", "」", "』", "）", ")", "】", "]"]);
+  const pieces: string[] = [];
+  let buffer = "";
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    buffer += char;
+    if (!sentenceEnders.has(char)) continue;
+    while (index + 1 < text.length && closingMarks.has(text[index + 1])) {
+      index += 1;
+      buffer += text[index];
+    }
+    const piece = buffer.trim();
+    if (piece) pieces.push(piece);
+    buffer = "";
+  }
+
+  const tail = buffer.trim();
+  if (tail) pieces.push(tail);
+  return pieces.length > 0 ? pieces : [text.trim()].filter(Boolean);
+}
+
+function createLocalUtteranceDrafts(paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft[] {
+  const role = roles[0];
+  return splitIntoSubSentences(paragraph.text).map((text, index) => ({
+    utteranceId: `${paragraph.paragraphId}-u-${String(index + 1).padStart(3, "0")}`,
+    paragraphId: paragraph.paragraphId,
+    text,
+    roleId: role.roleId,
+    speakerName: role.name,
+    voiceMode: role.voiceMode,
+    voiceResourceId: role.voiceResourceId,
+    emotion: "neutral",
+    speed: 1,
+    volume: 1,
+    designPrompt: "",
+    audioStatus: "尚未生成",
+  }));
+}
+
+function normalizeModelConfig(config: Partial<ModelConfig>): ModelConfig {
+  return {
+    llm: {
+      base_url: config.llm?.base_url ?? defaultModelConfig.llm.base_url,
+      model: config.llm?.model ?? defaultModelConfig.llm.model,
+      api_key: config.llm?.api_key ?? "",
+    },
+    tts: {
+      base_url: config.tts?.base_url ?? defaultModelConfig.tts.base_url,
+      model_path: config.tts?.model_path ?? "",
+    },
   };
 }
 
@@ -400,7 +468,7 @@ function App() {
       .catch((error) => setApiStatus(`音色资源库载入失败，已使用本地预览：${String(error)}`));
 
     requestJson<{ config: ModelConfig }>("/api/model-config")
-      .then((data) => setModelConfig(data.config))
+      .then((data) => setModelConfig(normalizeModelConfig(data.config)))
       .catch(() => undefined);
   }, []);
 
@@ -555,64 +623,70 @@ function App() {
     }
   }
 
+  async function addRole() {
+    const voice = voices[0];
+    if (!voice) {
+      setApiStatus("新增角色失败：请先添加至少一个音色资源");
+      return;
+    }
+    const role: RoleCard = {
+      roleId: `custom_role_${Date.now()}`,
+      name: `新角色${roles.length + 1}`,
+      description: voice.description,
+      voiceMode: "voice_cloning",
+      voiceResourceId: voice.voiceId,
+      referenceAudioPath: voice.referenceAudioPath,
+      referenceText: voice.referenceText,
+      designPrompt: "",
+    };
+    setRoles((current) => [...current, role]);
+    try {
+      const data = await requestJson<{ roles: ApiRoleCard[] }>("/api/roles", {
+        method: "POST",
+        body: JSON.stringify({
+          role_id: role.roleId,
+          name: role.name,
+          description: role.description,
+          voice_mode: role.voiceMode,
+          voice_resource_id: role.voiceResourceId,
+          reference_audio_path: role.referenceAudioPath,
+          reference_text: role.referenceText,
+          design_prompt: null,
+        }),
+      });
+      setRoles(data.roles.map(fromApiRole));
+      setApiStatus(`已新增角色：${role.name}`);
+    } catch (error) {
+      setApiStatus(`新增角色同步失败，已保留本地角色：${String(error)}`);
+    }
+  }
+
+  function playVoicePreview(voice?: VoiceResource) {
+    if (!voice) {
+      setApiStatus("播放音色失败：该角色尚未选择音色");
+      return;
+    }
+    const audio = new Audio(voiceAudioSrc(voice));
+    audio
+      .play()
+      .then(() => setApiStatus(`正在播放音色：${voice.name}`))
+      .catch((error) => setApiStatus(`播放音色失败：${String(error)}`));
+  }
+
   async function runSegmentation() {
     if (!confirmed) return;
-    setApiStatus("正在调用 LLM 语句划分");
+    setApiStatus("正在进行本地语句划分");
     setSegmentationProgress(0);
     const grouped: Record<string, UtteranceDraft[]> = {};
     for (const [index, paragraph] of visibleParagraphs.entries()) {
-      try {
-        const result = await requestJson<{
-          ok: boolean;
-          utterances: Array<{
-            utterance_id: string;
-            text: string;
-            speaker_role_id: string | null;
-            speaker_name: string;
-            voice_mode: VoiceMode;
-            emotion: string;
-            speed: number;
-            volume: number;
-            design_prompt: string | null;
-          }>;
-          error?: string;
-          error_code?: string;
-        }>(`/api/paragraphs/${paragraph.paragraphId}/segment`, {
-          method: "POST",
-          body: JSON.stringify({}),
-        });
-        if (!result.ok) {
-          throw new Error(result.error ?? result.error_code ?? "语句划分失败");
-        }
-        grouped[paragraph.paragraphId] = result.utterances.map((utterance) => {
-          const role = roles.find((item) => item.roleId === utterance.speaker_role_id) ?? roles[0];
-          return {
-            utteranceId: utterance.utterance_id,
-            paragraphId: paragraph.paragraphId,
-            text: utterance.text,
-            roleId: role.roleId,
-            speakerName: utterance.speaker_name,
-            voiceMode: utterance.voice_mode,
-            voiceResourceId: role.voiceResourceId,
-            emotion: utterance.emotion,
-            speed: utterance.speed,
-            volume: utterance.volume,
-            designPrompt: utterance.design_prompt ?? role.designPrompt,
-            audioStatus: "尚未试听",
-          };
-        });
-      } catch (error) {
-        grouped[paragraph.paragraphId] = [
-          {
-            ...makeUtteranceDraft(paragraph, roles),
-            audioStatus: `语句划分失败：${String(error)}`,
-          },
-        ];
-      }
+      grouped[paragraph.paragraphId] = createLocalUtteranceDrafts(paragraph, roles);
       setSegmentationProgress(Math.round(((index + 1) / visibleParagraphs.length) * 100));
+      if (index % 8 === 0) {
+        await new Promise((resolve) => window.requestAnimationFrame(resolve));
+      }
     }
     setUtterancesByParagraph(grouped);
-    setApiStatus("语句划分完成；子语句已嵌套在对应段落内");
+    setApiStatus("已生成本地可编辑语句草稿；子语句已嵌套在对应段落内");
   }
 
   function updateUtterance(
@@ -632,7 +706,7 @@ function App() {
             updated.speakerName = role.name;
             updated.voiceMode = role.voiceMode;
             updated.voiceResourceId = role.voiceResourceId;
-            updated.designPrompt = role.designPrompt;
+            updated.designPrompt = updated.designPrompt || role.designPrompt || "";
           }
         }
         return updated;
@@ -640,38 +714,50 @@ function App() {
     }));
   }
 
-  async function previewTts(utterance: UtteranceDraft) {
+  async function generateAudio(utterance: UtteranceDraft) {
     const role = roles.find((item) => item.roleId === utterance.roleId);
     if (!role) {
-      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "试听失败：角色不存在");
+      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "音频生成失败：角色不存在");
       return;
     }
-    updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "正在调用本地 TTS");
+    updateUtterance(
+      utterance.paragraphId,
+      utterance.utteranceId,
+      "audioStatus",
+      "正在根据角色参考音频和情感控制文本生成音频",
+    );
     setVoiceGenerationProgress(25);
     try {
-      const result = await requestJson<{ audio_url: string; voice_job: { status: string } }>(
+      const result = await requestJson<{ audio_url: string; voice_job: { status: string }; warning?: string }>(
         `/api/utterances/${utterance.utteranceId}/speech`,
         {
           method: "POST",
           body: JSON.stringify({
             role_id: role.roleId,
             text: utterance.text,
-            voice_mode: utterance.voiceMode,
+            voice_mode: role.voiceMode,
             design_prompt: utterance.designPrompt,
+            emotion: utterance.emotion,
+            speed: utterance.speed,
+            volume: utterance.volume,
           }),
         },
       );
+      const audioStatus =
+        result.voice_job.status === "substitute"
+          ? "本地 TTS 未启动，已生成可播放占位音频"
+          : "音频生成完成";
       setUtterancesByParagraph((current) => ({
         ...current,
         [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map((item) =>
           item.utteranceId === utterance.utteranceId
-            ? { ...item, audioStatus: `生成音频：${result.voice_job.status}`, audioUrl: result.audio_url }
+            ? { ...item, audioStatus, audioUrl: result.audio_url }
             : item,
         ),
       }));
       setVoiceGenerationProgress(100);
     } catch (error) {
-      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", `试听失败：${String(error)}`);
+      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", `音频生成失败：${String(error)}`);
       setVoiceGenerationProgress(100);
     }
   }
@@ -725,13 +811,13 @@ function App() {
       method: "PATCH",
       body: JSON.stringify(modelConfig),
     });
-    setModelConfig(data.config);
+    setModelConfig(normalizeModelConfig(data.config));
     setApiStatus("模型配置已保存");
   }
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.12 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.13 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -774,7 +860,12 @@ function App() {
           </section>
 
           <section className="panel">
-            <div className="section-title">角色列表</div>
+            <div className="section-heading">
+              <div className="section-title">角色列表</div>
+              <button className="tool-button teal" type="button" onClick={() => void addRole()}>
+                新增角色
+              </button>
+            </div>
             <div className="role-stack">
               {roles.map((role) => {
                 const voice = voices.find((item) => item.voiceId === role.voiceResourceId);
@@ -799,8 +890,14 @@ function App() {
                           ))}
                         </select>
                       </label>
-                      <button className="icon-button" type="button" title="播放音色">
-                        播放音色
+                      <button
+                        aria-label="播放音色"
+                        className="icon-button"
+                        type="button"
+                        title="播放音色"
+                        onClick={() => playVoicePreview(voice)}
+                      >
+                        ▶
                       </button>
                     </div>
                     <p>
@@ -871,81 +968,86 @@ function App() {
                     <div className="paragraph-utterances" aria-label={`${paragraph.paragraphId} 子语句`}>
                       {(utterancesByParagraph[paragraph.paragraphId] ?? []).map((utterance) => (
                         <article className="utterance-card" key={utterance.utteranceId}>
-                      <input
-                        value={utterance.text}
-                        onChange={(event) =>
-                          updateUtterance(paragraph.paragraphId, utterance.utteranceId, "text", event.target.value)
-                        }
-                        aria-label={`${utterance.utteranceId} 文本`}
-                      />
-                      <select
-                        value={utterance.roleId}
-                        onChange={(event) =>
-                          updateUtterance(paragraph.paragraphId, utterance.utteranceId, "roleId", event.target.value)
-                        }
-                      >
-                        {roleOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <select
-                        value={utterance.voiceMode}
-                        onChange={(event) =>
-                          updateUtterance(
-                            paragraph.paragraphId,
-                            utterance.utteranceId,
-                            "voiceMode",
-                            event.target.value as VoiceMode,
-                          )
-                        }
-                      >
-                        <option value="voice_cloning">voice_cloning</option>
-                        <option value="voice_design">voice_design</option>
-                      </select>
-                      <input
-                        value={utterance.emotion}
-                        onChange={(event) =>
-                          updateUtterance(paragraph.paragraphId, utterance.utteranceId, "emotion", event.target.value)
-                        }
-                        aria-label="emotion"
-                      />
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0.5"
-                        max="2"
-                        value={utterance.speed}
-                        onChange={(event) =>
-                          updateUtterance(paragraph.paragraphId, utterance.utteranceId, "speed", Number(event.target.value))
-                        }
-                        aria-label="speed"
-                      />
-                      <input
-                        type="number"
-                        step="0.1"
-                        min="0"
-                        max="2"
-                        value={utterance.volume}
-                        onChange={(event) =>
-                          updateUtterance(paragraph.paragraphId, utterance.utteranceId, "volume", Number(event.target.value))
-                        }
-                        aria-label="volume"
-                      />
-                      <textarea
-                        value={utterance.designPrompt}
-                        onChange={(event) =>
-                          updateUtterance(paragraph.paragraphId, utterance.utteranceId, "designPrompt", event.target.value)
-                        }
-                        aria-label="designPrompt"
-                      />
-                      <button className="tool-button sky" type="button" onClick={() => void previewTts(utterance)}>
-                        音频试听
-                      </button>
-                      <output>{utterance.audioStatus}</output>
-                      {utterance.audioUrl && <audio controls src={utterance.audioUrl} />}
-                    </article>
+                          <label className="utterance-wide">
+                            语句文本
+                            <input
+                              value={utterance.text}
+                              onChange={(event) =>
+                                updateUtterance(paragraph.paragraphId, utterance.utteranceId, "text", event.target.value)
+                              }
+                              aria-label={`${utterance.utteranceId} 语句文本`}
+                            />
+                          </label>
+                          <label>
+                            选择角色
+                            <select
+                              value={utterance.roleId}
+                              onChange={(event) =>
+                                updateUtterance(paragraph.paragraphId, utterance.utteranceId, "roleId", event.target.value)
+                              }
+                            >
+                              {roleOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            情绪
+                            <input
+                              value={utterance.emotion}
+                              onChange={(event) =>
+                                updateUtterance(paragraph.paragraphId, utterance.utteranceId, "emotion", event.target.value)
+                              }
+                              aria-label="情绪"
+                            />
+                          </label>
+                          <label>
+                            语速
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0.5"
+                              max="2"
+                              value={utterance.speed}
+                              onChange={(event) =>
+                                updateUtterance(paragraph.paragraphId, utterance.utteranceId, "speed", Number(event.target.value))
+                              }
+                              aria-label="语速"
+                            />
+                          </label>
+                          <label>
+                            音量
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="0"
+                              max="2"
+                              value={utterance.volume}
+                              onChange={(event) =>
+                                updateUtterance(paragraph.paragraphId, utterance.utteranceId, "volume", Number(event.target.value))
+                              }
+                              aria-label="音量"
+                            />
+                          </label>
+                          <label className="utterance-wide">
+                            情感控制文本
+                            <textarea
+                              value={utterance.designPrompt}
+                              onChange={(event) =>
+                                updateUtterance(paragraph.paragraphId, utterance.utteranceId, "designPrompt", event.target.value)
+                              }
+                              aria-label="情感控制文本"
+                              placeholder="例如：压低声音、急促、带害怕情绪"
+                            />
+                          </label>
+                          <button className="tool-button sky" type="button" onClick={() => void generateAudio(utterance)}>
+                            音频生成
+                          </button>
+                          <output>{utterance.audioStatus}</output>
+                          {utterance.audioUrl && <audio controls src={utterance.audioUrl} />}
+                        </article>
                   ))}
                 </div>
               </article>
@@ -1097,16 +1199,7 @@ function App() {
     return (
       <main className="model-page">
         <section className="panel">
-          <div className="section-title">LLM Provider</div>
-          <label>
-            Provider
-            <input
-              value={modelConfig.llm.provider}
-              onChange={(event) =>
-                setModelConfig((current) => ({ ...current, llm: { ...current.llm, provider: event.target.value } }))
-              }
-            />
-          </label>
+          <div className="section-title">远端模型</div>
           <label>
             Base URL
             <input
@@ -1117,7 +1210,7 @@ function App() {
             />
           </label>
           <label>
-            Model
+            模型名称
             <input
               value={modelConfig.llm.model}
               onChange={(event) =>
@@ -1126,60 +1219,21 @@ function App() {
             />
           </label>
           <label>
-            api_key_env
+            api_key
             <input
-              value={modelConfig.llm.api_key_env}
+              type="password"
+              value={modelConfig.llm.api_key}
               onChange={(event) =>
-                setModelConfig((current) => ({
-                  ...current,
-                  llm: { ...current.llm, api_key_env: event.target.value },
-                }))
+                setModelConfig((current) => ({ ...current, llm: { ...current.llm, api_key: event.target.value } }))
               }
             />
           </label>
-          <div className="compact-grid">
-            <label>
-              Timeout
-              <input
-                type="number"
-                value={modelConfig.llm.timeout_seconds}
-                onChange={(event) =>
-                  setModelConfig((current) => ({
-                    ...current,
-                    llm: { ...current.llm, timeout_seconds: Number(event.target.value) },
-                  }))
-                }
-              />
-            </label>
-            <label>
-              Retries
-              <input
-                type="number"
-                value={modelConfig.llm.max_retries}
-                onChange={(event) =>
-                  setModelConfig((current) => ({
-                    ...current,
-                    llm: { ...current.llm, max_retries: Number(event.target.value) },
-                  }))
-                }
-              />
-            </label>
-          </div>
         </section>
 
         <section className="panel">
-          <div className="section-title">TTS Provider</div>
+          <div className="section-title">本地模型</div>
           <label>
-            Provider
-            <input
-              value={modelConfig.tts.provider}
-              onChange={(event) =>
-                setModelConfig((current) => ({ ...current, tts: { ...current.tts, provider: event.target.value } }))
-              }
-            />
-          </label>
-          <label>
-            Base URL
+            BASE_URL
             <input
               value={modelConfig.tts.base_url}
               onChange={(event) =>
@@ -1188,23 +1242,11 @@ function App() {
             />
           </label>
           <label>
-            Model Path Env
-            <input value={modelConfig.tts.model_path_env} readOnly />
-          </label>
-          <label>
-            Device Env
-            <input value={modelConfig.tts.device_env} readOnly />
-          </label>
-          <label>
-            Timeout
+            模型权重路径
             <input
-              type="number"
-              value={modelConfig.tts.timeout_seconds}
+              value={modelConfig.tts.model_path}
               onChange={(event) =>
-                setModelConfig((current) => ({
-                  ...current,
-                  tts: { ...current.tts, timeout_seconds: Number(event.target.value) },
-                }))
+                setModelConfig((current) => ({ ...current, tts: { ...current.tts, model_path: event.target.value } }))
               }
             />
           </label>
@@ -1219,7 +1261,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.12</h1>
+        <h1>NovelVoice-Agent v0.13</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

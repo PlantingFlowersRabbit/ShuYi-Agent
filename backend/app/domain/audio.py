@@ -47,12 +47,13 @@ def build_tts_request(
         raise ValueError("utterance text is required")
 
     voice_mode = utterance.get("voice_mode") or role.voice_mode
+    emotion_control_text = (utterance.get("design_prompt") or utterance.get("emotion_control_text") or "").strip()
     if voice_mode == "voice_cloning":
         if not role.reference_audio_path:
             raise ValueError("voice cloning requires reference audio")
         if not role.reference_text:
             raise ValueError("voice cloning requires reference text")
-        return {
+        payload = {
             "input": text,
             "audio_sample_path": role.reference_audio_path,
             "ref_text": role.reference_text,
@@ -60,6 +61,9 @@ def build_tts_request(
             "response_format": response_format,
             "x_vector_only": False,
         }
+        if emotion_control_text:
+            payload["emotion_control_text"] = emotion_control_text
+        return payload
 
     if voice_mode == "voice_design":
         design_prompt = utterance.get("design_prompt") or role.design_prompt
@@ -96,6 +100,8 @@ def synthesize_local_qwen3(
         "response_format": request_payload.get("response_format", "wav"),
         "x_vector_only": bool(request_payload.get("x_vector_only", False)),
     }
+    if request_payload.get("emotion_control_text"):
+        payload["emotion_control_text"] = request_payload["emotion_control_text"]
     base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
         "/"
     )

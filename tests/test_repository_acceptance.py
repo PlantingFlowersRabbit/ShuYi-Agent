@@ -20,6 +20,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/development/v0.11-verification.md",
         "spec/v0.12-harness.md",
         "docs/development/v0.12-verification.md",
+        "spec/v0.13-harness.md",
+        "docs/development/v0.13-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -34,7 +36,7 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.12" in app
+    assert "NovelVoice-Agent v0.13" in app
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
@@ -44,7 +46,9 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     assert "章节列表" in app
     assert "角色列表" in app
     assert "音色选择" in app
-    assert "播放音色" in app
+    assert 'aria-label="播放音色"' in app
+    assert "playVoicePreview" in app
+    assert "新增角色" in app
     assert "音色描述" in app
     assert "语音具体内容" in app
     assert "当前章节" in app
@@ -56,25 +60,30 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     assert "保存音色" in app
     assert "生成音色" in app
     assert "勾选删除" in app
-    assert "LLM Provider" in app
-    assert "TTS Provider" in app
-    assert "api_key_env" in app
-    assert '"api_key":' not in app
-    assert "音频试听" in app
+    assert "远端模型" in app
+    assert "本地模型" in app
+    assert "api_key" in app
+    assert "模型权重路径" in app
+    for removed_field in ["LLM Provider", "TTS Provider", "api_key_env", "Timeout", "Retries", "Device Env"]:
+        assert removed_field not in app
+    assert "音频生成" in app
+    assert "音频试听" not in app
     assert 'fetch(path' in app
     assert '"/api/novels/parse"' in app
     assert "`/api/roles/${roleId}`" in app
     assert '"/api/voice-resources"' in app
     assert '"/api/voice-resources/generate"' in app
     assert '"/api/model-config"' in app
-    assert '}/segment`' in app
     assert '}/speech`' in app
     assert "<audio controls" in app
     assert '"/api": "http://127.0.0.1:8000"' in vite_config
     assert '"/outputs": "http://127.0.0.1:8000"' in vite_config
 
-    for control in ["折叠", "展开", "删除", "textarea", "select", "emotion", "speed", "volume", "designPrompt"]:
+    for control in ["折叠", "展开", "删除", "textarea", "select"]:
         assert control in app
+    for labeled_control in ["语句文本", "选择角色", "情绪", "语速", "音量", "情感控制文本"]:
+        assert labeled_control in app
+    assert '<option value="voice_cloning">voice_cloning</option>' not in app
 
     assert "confirmed" in app
     assert "setConfirmed" in app
@@ -111,7 +120,7 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.12" in app
+    assert "NovelVoice-Agent v0.13" in app
     assert "划分章节" in app
     assert "确认划分章节" not in app
     assert "chapterSplitProgress" in app
@@ -129,6 +138,25 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     assert ".sidebar" in styles and "overflow-y: auto" in styles
     assert ".main-panel" in styles and "overflow-y: auto" in styles
     assert "body {" in styles and "overflow: hidden" in styles
+
+
+def test_frontend_v0_13_local_segmentation_and_scrollable_subpages():
+    """Covers v0.13 local utterance drafts, labeled controls, and subpage scrolling."""
+    app = read("frontend/src/App.tsx")
+    styles = read("frontend/src/styles.css")
+
+    assert "NovelVoice-Agent v0.13" in app
+    assert "createLocalUtteranceDrafts" in app
+    assert "已生成本地可编辑语句草稿" in app
+    assert '}/segment`' not in app
+    assert "paragraph not found" not in app
+    assert "语句划分失败" not in app
+    assert "audioStatus: \"尚未生成\"" in app
+
+    assert ".library-page," in styles
+    assert ".model-page" in styles
+    assert "height: calc(100vh - 62px)" in styles
+    assert "overflow-y: auto" in styles
 
 
 def test_v0_11_frontend_uses_unitale_style_tokens():
