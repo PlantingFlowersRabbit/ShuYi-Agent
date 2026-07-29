@@ -81,6 +81,29 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     assert "75%" in styles or "1fr 3fr" in styles
 
 
+def test_frontend_v0_11_progress_and_large_upload_guardrails():
+    """Covers v0.11 progress bars and avoiding huge full-novel textarea rendering."""
+    app = read("frontend/src/App.tsx")
+    styles = read("frontend/src/styles.css")
+
+    for state_name in ["uploadProgress", "segmentationProgress", "voiceGenerationProgress"]:
+      assert state_name in app
+
+    assert "progress-bar" in app
+    assert "上传小说进度" in app
+    assert "语句划分进度" in app
+    assert "语音生成进度" in app
+    assert "MAX_NOVEL_PREVIEW_CHARS" in app
+    assert "novelPreview" in app
+    assert "fullNovelTextRef" in app
+    assert "fullNovelTextRef.current" in app
+    assert "value={novelText}" not in app
+    assert "onChange={(event) => setNovelText(event.target.value)}" not in app
+
+    assert ".progress-bar" in styles
+    assert ".novel-preview" in styles
+
+
 def test_v0_11_frontend_uses_unitale_style_tokens():
     """Covers v0.11 Unitale-inspired visual direction."""
     styles = read("frontend/src/styles.css")

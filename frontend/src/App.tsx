@@ -99,6 +99,8 @@ const sampleNovel = `1.变成蘑菇的公爵千金
 
 “佩罗，你昏迷术掺水了？这就醒了。”`;
 
+const MAX_NOVEL_PREVIEW_CHARS = 700;
+
 const defaultVoices: VoiceResource[] = [
   {
     voiceId: "voice-male-narrator",
@@ -147,6 +149,12 @@ const defaultModelConfig: ModelConfig = {
 function initialPageFromUrl(): Page {
   const page = new URLSearchParams(window.location.search).get("page");
   return page === "voices" || page === "models" ? page : "main";
+}
+
+function makeNovelPreview(text: string): string {
+  const trimmed = text.trimStart();
+  if (trimmed.length <= MAX_NOVEL_PREVIEW_CHARS) return trimmed;
+  return `${trimmed.slice(0, MAX_NOVEL_PREVIEW_CHARS)}\n\n……仅展示开头预览，完整小说已保留用于章节划分。`;
 }
 
 function parseChapters(text: string): Chapter[] {
@@ -297,10 +305,26 @@ function makeUtteranceDraft(paragraph: ParagraphModule, roles: RoleCard[]): Utte
   };
 }
 
+function ProgressBar({ label, value }: { label: string; value: number }) {
+  const normalized = Math.max(0, Math.min(100, Math.round(value)));
+  return (
+    <div className="progress-block">
+      <div className="progress-label">
+        <span>{label}</span>
+        <span>{normalized}%</span>
+      </div>
+      <div className="progress-bar" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={normalized}>
+        <span style={{ width: `${normalized}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fullNovelTextRef = useRef(sampleNovel);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
-  const [novelText, setNovelText] = useState(sampleNovel);
+  const [novelPreview, setNovelPreview] = useState(() => makeNovelPreview(sampleNovel));
   const [chapters, setChapters] = useState<Chapter[]>(() => parseChapters(sampleNovel));
   const [activeChapterId, setActiveChapterId] = useState("chapter-0001");
   const [paragraphs, setParagraphs] = useState<ParagraphModule[]>(() =>
@@ -323,6 +347,9 @@ function App() {
   });
   const [modelConfig, setModelConfig] = useState<ModelConfig>(defaultModelConfig);
   const [apiStatus, setApiStatus] = useState("等待上传小说");
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [segmentationProgress, setSegmentationProgress] = useState(0);
+  const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId) ?? chapters[0];
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
@@ -348,6 +375,8 @@ function App() {
   }, []);
 
   async function importNovelText(text: string) {
+    fullNovelTextRef.current = text;
+    setNovelPreview(makeNovelPreview(text));
     try {
       const data = await requestJson<{ chapters: ApiChapter[] }>("/api/novels/parse", {
         method: "POST",
@@ -372,13 +401,20 @@ function App() {
   async function handleTxtFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+    setUploadProgress(8);
+    setApiStatus(`正在读取小说：${file.name}`);
     const text = await file.text();
-    setNovelText(text);
+    fullNovelTextRef.current = text;
+    setNovelPreview(makeNovelPreview(text));
+    setUploadProgress(62);
     await importNovelText(text);
+    setUploadProgress(100);
   }
 
   function confirmChapterSplit() {
-    applyChapters(parseChapters(novelText), "章节已确认划分，可以选择章节继续校对段落");
+    setUploadProgress(82);
+    applyChapters(parseChapters(fullNovelTextRef.current), "章节已确认划分，可以选择章节继续校对段落");
+    setUploadProgress(100);
   }
 
   async function selectChapter(chapterId: string) {
@@ -489,8 +525,9 @@ function App() {
   async function runSegmentation() {
     if (!confirmed) return;
     setApiStatus("正在调用 LLM 语句划分");
+    setSegmentationProgress(0);
     const grouped: Record<string, UtteranceDraft[]> = {};
-    for (const paragraph of visibleParagraphs) {
+    for (const [index, paragraph] of visibleParagraphs.entries()) {
       try {
         const result = await requestJson<{
           ok: boolean;
@@ -539,6 +576,7 @@ function App() {
           },
         ];
       }
+      setSegmentationProgress(Math.round(((index + 1) / visibleParagraphs.length) * 100));
     }
     setUtterancesByParagraph(grouped);
     setApiStatus("语句划分完成；子语句已嵌套在对应段落内");
@@ -576,6 +614,7 @@ function App() {
       return;
     }
     updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "正在调用本地 TTS");
+    setVoiceGenerationProgress(25);
     try {
       const result = await requestJson<{ audio_url: string; voice_job: { status: string } }>(
         `/api/utterances/${utterance.utteranceId}/speech`,
@@ -597,8 +636,10 @@ function App() {
             : item,
         ),
       }));
+      setVoiceGenerationProgress(100);
     } catch (error) {
       updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", `试听失败：${String(error)}`);
+      setVoiceGenerationProgress(100);
     }
   }
 
@@ -677,11 +718,12 @@ function App() {
               accept=".txt,text/plain"
               onChange={handleTxtFile}
             />
-            <textarea
-              aria-label="固定格式 txt 小说导入"
-              value={novelText}
-              onChange={(event) => setNovelText(event.target.value)}
-            />
+            <ProgressBar label="上传小说进度" value={uploadProgress} />
+            <ProgressBar label="语句划分进度" value={segmentationProgress} />
+            <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
+            <div className="novel-preview" aria-label="小说开头预览">
+              {novelPreview}
+            </div>
             <small>{apiStatus}</small>
             <div className="chapter-list" aria-label="章节列表">
               {chapters.map((chapter) => (
