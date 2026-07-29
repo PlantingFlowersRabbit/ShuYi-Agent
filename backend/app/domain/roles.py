@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-SMOKE_TEST_NOTE = "功能烟测占位，不代表最终音色质量"
 DEFAULT_REFERENCE_AUDIO = "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav"
 DEFAULT_REFERENCE_TEXT = "齐心协力"
 
@@ -17,7 +16,7 @@ class RoleCard:
     reference_audio_path: str | None
     reference_text: str | None
     design_prompt: str | None
-    sample_note: str = SMOKE_TEST_NOTE
+    voice_resource_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -37,7 +36,7 @@ def _role_from_mapping(data: RoleCard | dict[str, Any]) -> RoleCard:
         reference_audio_path=data.get("reference_audio_path"),
         reference_text=data.get("reference_text"),
         design_prompt=data.get("design_prompt"),
-        sample_note=data.get("sample_note", SMOKE_TEST_NOTE),
+        voice_resource_id=data.get("voice_resource_id"),
     )
 
 
@@ -46,29 +45,32 @@ def default_role_cards() -> list[RoleCard]:
         RoleCard(
             role_id="narrator",
             name="旁白",
-            description="用于叙述性文本。",
+            description="用于叙述性文本，默认绑定男声旁白音色。",
             voice_mode="voice_cloning",
             reference_audio_path=DEFAULT_REFERENCE_AUDIO,
             reference_text=DEFAULT_REFERENCE_TEXT,
             design_prompt=None,
+            voice_resource_id="voice-male-narrator",
         ),
         RoleCard(
             role_id="male_lead",
-            name="男主",
-            description="功能烟测默认角色，不代表最终项目必须只有一个男主。",
+            name="年轻男",
+            description="适合年轻男性角色对白。",
             voice_mode="voice_cloning",
             reference_audio_path=DEFAULT_REFERENCE_AUDIO,
             reference_text=DEFAULT_REFERENCE_TEXT,
             design_prompt=None,
+            voice_resource_id="voice-young-male",
         ),
         RoleCard(
             role_id="female_lead",
-            name="女主",
-            description="功能烟测默认角色，不代表最终项目必须只有一个女主。",
+            name="御姐音",
+            description="适合成熟女性角色对白。",
             voice_mode="voice_cloning",
             reference_audio_path=DEFAULT_REFERENCE_AUDIO,
             reference_text=DEFAULT_REFERENCE_TEXT,
             design_prompt=None,
+            voice_resource_id="voice-yujie",
         ),
     ]
 

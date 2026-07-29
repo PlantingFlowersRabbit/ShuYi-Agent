@@ -1,12 +1,12 @@
-# NovelVoice-Agent v0.1 验收标准
+# NovelVoice-Agent v0.11 验收标准
 
 ## 总通过口径
 
-v0.1 通过验收，需要同时满足：
+v0.11 通过验收，需要同时满足：
 
 - 文档、spec、资源说明、agent 配置完整。
-- 后续实现能按本文 AC 建立测试和证据。
 - 人工协作主流程范围清楚，不混入全自动 harness 编排。
+- 主页面、音色资源库和模型配置三个页面可运行。
 - 资源有来源和许可证。
 - 模型输出有 JSON schema、repair 和文本守恒校验。
 - UI、LLM、TTS 和音频验收都能在真实环境取证。
@@ -15,29 +15,32 @@ v0.1 通过验收，需要同时满足：
 
 - **AC-DOC-01** 仓库包含 `AGENTS.md`，并说明目标、结构、实现约束、子 Agent 协作和强制开发流程。
 - **AC-DOC-02** 仓库包含兼容入口 `AGENT.md`，并指向 `AGENTS.md`。
-- **AC-DOC-03** `spec/` 包含 v0.1 版本目标、产品范围、架构合约、LLM 合约和 TTS 合约。
+- **AC-DOC-03** `spec/` 包含 v0.11 版本目标、产品范围、架构合约、LLM 合约和 TTS 合约。
 - **AC-DOC-04** `docs/index.md` 包含所有新增 docs 文档链接。
 - **AC-DOC-05** `docs/experience-library/` 包含入口、主动规则和 lessons。
 - **AC-DOC-06** `.codex/agents/` 包含 builder、test-author、acceptance-checker、visual-reviewer、audio-reviewer 和 reviewer。
 
 ## 二、产品流程
 
-- **AC-FLOW-01** v0.1 明确是人工主导的人机协作版。
-- **AC-FLOW-02** txt 小说导入后按固定章节正则拆分。
+- **AC-FLOW-01** v0.11 明确是人工主导的人机协作版。
+- **AC-FLOW-02** txt 小说导入后按中文章节或数字编号章节正则拆分。
 - **AC-FLOW-03** 章节选择后右侧展示该章节正文。
 - **AC-FLOW-04** 正文按段落拆成可折叠、可编辑、可删除模块。
 - **AC-FLOW-05** 段落确认前不能执行语句划分。
 - **AC-FLOW-06** 段落确认后才出现或启用语句划分按钮。
-- **AC-FLOW-07** 语句划分结果必须可人工编辑。
+- **AC-FLOW-07** 语句划分结果必须嵌套在来源段落内，且可人工编辑。
 - **AC-FLOW-08** 角色卡变更后，子语句角色选择器同步更新。
+- **AC-FLOW-09** 主页面 UI 参考 Unitale 浅色工作台风格，不出现明显文本重叠或按钮溢出。
 
 ## 三、角色和声音
 
-- **AC-ROLE-01** 默认提供旁白、男主、女主三个角色卡。
-- **AC-ROLE-02** 每个角色卡包含姓名、简介、声音模式、参考音频或声音设计 prompt。
+- **AC-ROLE-01** 默认角色列表由音色资源库驱动，不再使用三个烟测占位角色卡。
+- **AC-ROLE-02** 每个角色卡包含姓名、简介、声音模式、绑定音色、参考音频或声音设计 prompt。
 - **AC-ROLE-03** voice cloning 缺少参考音频或参考文本时不得发起 TTS。
 - **AC-ROLE-04** voice design 缺少 prompt 时不得发起 TTS。
-- **AC-ROLE-05** 默认样本角色音频必须标注“功能烟测占位，不代表最终音色质量”。
+- **AC-ROLE-05** 角色音色选择器必须展示音色名称，并可查看音色描述和语音具体内容。
+- **AC-ROLE-06** 音色资源库必须支持列表、添加、生成、修改、勾选删除和参考音频播放。
+- **AC-ROLE-07** 生成音色若使用本地替身，必须标注为替身，不得宣称真实 voice design 质量。
 
 ## 四、LLM 语句划分
 
@@ -76,4 +79,11 @@ v0.1 通过验收，需要同时满足：
 - **AC-REAL-03** UI 改动需要真实截图或录屏证据。
 - **AC-REAL-04** 音频改动需要真实音频文件、时长、可解码结果和许可证证据。
 - **AC-REAL-05** 开发完成前必须经过 builder / test-author / acceptance-checker / visual-reviewer / audio-reviewer / reviewer 的分离规则，适用者不得由同一上下文兼任。
+- **AC-REAL-06** 真实小说样本 `这个地下城长蘑菇了.txt` 必须能按数字编号章节解析。
+- **AC-REAL-07** 本地真实音色样本 `年轻男`、`御姐音`、`播音腔女`、`男声旁白` 必须能读取 transcript 并通过 `ffprobe` 解码。
 
+## 八、模型配置
+
+- **AC-CONFIG-01** 模型配置页集中展示 LLM provider、base URL、模型名、API-key 环境变量名、超时和重试。
+- **AC-CONFIG-02** 模型配置页集中展示 TTS provider、base URL、模型路径环境变量、device 环境变量和超时。
+- **AC-CONFIG-03** API key 只能通过环境变量或本地密钥管理注入，前端代码、文档和测试夹具不得包含真实 key。

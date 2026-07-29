@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 
 CHAPTER_HEADING_RE = re.compile(
-    r"^(第[一二三四五六七八九十百千万零〇两\d]+[章节回][^\n\r]*)$",
+    r"^[ \t]*((?:第[一二三四五六七八九十百千万零〇两\d]+[章节回][^\n\r]*)|(?:\d+[.．、][^\n\r]*))$",
     re.MULTILINE,
 )
 

@@ -1,1 +1,1 @@
-"""Domain services for the v0.1 manual collaboration workflow."""
+"""Domain services for the v0.11 manual collaboration workflow."""

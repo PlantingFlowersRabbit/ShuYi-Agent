@@ -1,6 +1,6 @@
 # 资源说明
 
-本文说明 NovelVoice-Agent v0.1 的样本资源、许可证边界和新增资源要求。
+本文说明 NovelVoice-Agent v0.11 的样本资源、许可证边界和新增资源要求。
 
 ## 目录
 
@@ -27,9 +27,9 @@
 - 小说样本：Project Gutenberg `A Dream Of Red Mansions / 紅樓夢`，裁剪为 `assets/samples/novels/hongloumeng_pg24264_excerpt.txt`，用于章节和段落正则测试。
 - 音频样本：Wikimedia Commons / Lingua Libre CC0 普通话词条音频 `齐心协力`，原始短音频和 20 秒循环派生版本用于 voice cloning 接口烟测。
 
-## 关于默认角色
+## 关于默认音色
 
-v0.1 默认角色卡包括 `旁白`、`男主`、`女主`。当前入库的 CC0 音频只用于功能烟测，默认可以临时复用于三个角色卡，不能代表最终音色设计质量。
+v0.11 默认角色列表由音色资源库驱动。仓库内 CC0 音频只用于接口和许可证 smoke test；真实本地验收可使用 `/Users/gaojing/Downloads/真实测试样本/音频` 下的 `年轻男`、`御姐音`、`播音腔女` 和 `男声旁白`，但这些本地文件不默认提交到仓库。
 
 正式测试角色音频应逐步替换为：
 
@@ -46,4 +46,3 @@ Mozilla Common Voice Chinese (China) 可作为本地手工下载的大规模候�
 ## LibriVox
 
 LibriVox 录音是美国公有领域，可作为后续更长中文参考音频来源。当前 Archive.org 下载在本环境中连接失败，因此本轮仅在 manifest 中保留为可选来源，不把未下载成功的文件登记为本地样本。
-

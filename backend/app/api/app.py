@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.domain.audio import (
@@ -16,11 +18,19 @@ from backend.app.domain.audio import (
 from backend.app.domain.llm import MissingProviderCredential, OpenAICompatibleSegmentationClient
 from backend.app.domain.novel import Chapter, ChapterWorkbench, parse_novel_text
 from backend.app.domain.providers import default_provider_registry
-from backend.app.domain.roles import RoleCollection, default_role_cards
+from backend.app.domain.roles import RoleCard, RoleCollection, default_role_cards
 from backend.app.domain.segmentation import repair_json_output_once, validate_segmentation_result
+from backend.app.domain.voices import (
+    BUILTIN_REFERENCE_AUDIO,
+    VoiceResource,
+    VoiceResourceCollection,
+    default_voice_resources,
+    generated_voice_content,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_AUDIO_DIR = ROOT / "outputs/audio"
+REAL_VOICE_ROOT = Path(os.environ.get("NOVELVOICE_REAL_VOICE_ROOT", "/Users/gaojing/Downloads/真实测试样本/音频"))
 
 
 def _chapter_to_dict(chapter: Chapter) -> dict[str, Any]:
@@ -35,15 +45,68 @@ def _state(app: FastAPI) -> dict[str, Any]:
     return app.state.workflow
 
 
+def _voice_to_dict(voice: VoiceResource) -> dict[str, Any]:
+    return voice.to_dict()
+
+
+def _default_model_config() -> dict[str, Any]:
+    providers = default_provider_registry()
+    siliconflow = providers["siliconflow-qwen3-8b"]
+    return {
+        "llm": {
+            "provider": siliconflow["name"],
+            "base_url": siliconflow["base_url"],
+            "model": siliconflow["model"],
+            "api_key_env": siliconflow["api_key_env"],
+            "timeout_seconds": siliconflow["timeout_seconds"],
+            "max_retries": siliconflow["max_retries"],
+            "extra_body": siliconflow["extra_body"],
+        },
+        "tts": {
+            "provider": "local-qwen3-tts",
+            "base_url": os.environ.get("QWEN3_TTS_BASE_URL", "http://127.0.0.1:7811"),
+            "model_path_env": "QWEN3_TTS_MODEL_PATH",
+            "device_env": "QWEN3_TTS_DEVICE",
+            "timeout_seconds": 120,
+        },
+    }
+
+
+def _role_with_voice(role: RoleCard, voice: VoiceResource) -> RoleCard:
+    return role.with_updates(
+        voice_resource_id=voice.voice_id,
+        reference_audio_path=voice.reference_audio_path,
+        reference_text=voice.reference_text,
+        design_prompt=None,
+        voice_mode="voice_cloning",
+    )
+
+
+def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
+    roles = []
+    for role in default_role_cards():
+        if role.voice_resource_id:
+            try:
+                roles.append(_role_with_voice(role, voices.get(role.voice_resource_id)))
+                continue
+            except KeyError:
+                pass
+        roles.append(role)
+    return RoleCollection(roles)
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.1 Manual Collaboration API")
+    app = FastAPI(title="NovelVoice-Agent v0.11 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
+    voices = VoiceResourceCollection(default_voice_resources(REAL_VOICE_ROOT))
     app.state.workflow = {
         "chapters": [],
         "workbenches": {},
-        "roles": RoleCollection(default_role_cards()),
+        "voices": voices,
+        "roles": _seed_roles_from_voices(voices),
         "voice_jobs": {},
+        "model_config": _default_model_config(),
     }
 
     @app.post("/api/novels/parse")
@@ -131,7 +194,7 @@ def create_app() -> FastAPI:
     async def roles(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         collection = _state(app)["roles"]
         if payload:
-            collection.upsert(payload)
+            collection.upsert(_role_payload_with_resource(app, payload))
         return {
             "roles": [role.to_dict() for role in collection.list()],
             "role_options": collection.utterance_role_options(),
@@ -141,12 +204,96 @@ def create_app() -> FastAPI:
     async def update_role(role_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         collection = _state(app)["roles"]
         current = collection.get(role_id)
-        updated = current.with_updates(**{**payload, "role_id": role_id})
+        updates = _role_payload_with_resource(app, {**payload, "role_id": role_id})
+        updated = current.with_updates(**updates)
         collection.upsert(updated)
         return {
             "role": updated.to_dict(),
             "role_options": collection.utterance_role_options(),
         }
+
+    @app.get("/api/voice-resources")
+    async def list_voice_resources() -> dict[str, Any]:
+        voices = _state(app)["voices"]
+        return {"voices": [_voice_to_dict(voice) for voice in voices.list()]}
+
+    @app.post("/api/voice-resources")
+    async def create_voice_resource(payload: dict[str, Any]) -> dict[str, Any]:
+        voices = _state(app)["voices"]
+        resource = voices.upsert(
+            {
+                "voice_id": payload.get("voice_id") or voices.next_id(),
+                "name": _required_text(payload, "name"),
+                "description": _required_text(payload, "description"),
+                "reference_text": _required_text(payload, "reference_text"),
+                "reference_audio_path": _required_text(payload, "reference_audio_path"),
+                "generated": bool(payload.get("generated", False)),
+            }
+        )
+        return {"voice": _voice_to_dict(resource), "voices": [_voice_to_dict(voice) for voice in voices.list()]}
+
+    @app.post("/api/voice-resources/generate")
+    async def generate_voice_resource(payload: dict[str, Any]) -> dict[str, Any]:
+        voices = _state(app)["voices"]
+        name = _required_text(payload, "name")
+        description = _required_text(payload, "description")
+        resource = voices.upsert(
+            {
+                "voice_id": payload.get("voice_id") or voices.next_id(),
+                "name": name,
+                "description": description,
+                "reference_text": generated_voice_content(name, description),
+                "reference_audio_path": str(payload.get("reference_audio_path") or BUILTIN_REFERENCE_AUDIO),
+                "generated": True,
+            }
+        )
+        return {
+            "voice": _voice_to_dict(resource),
+            "voices": [_voice_to_dict(voice) for voice in voices.list()],
+            "generation_note": "local deterministic substitute; not a real voice design quality claim",
+        }
+
+    @app.patch("/api/voice-resources/{voice_id}")
+    async def update_voice_resource(voice_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        voices = _state(app)["voices"]
+        current = voices.get(voice_id)
+        allowed = {
+            key: value
+            for key, value in payload.items()
+            if key in {"name", "description", "reference_text", "reference_audio_path", "generated"}
+        }
+        updated = current.with_updates(**allowed)
+        voices.upsert(updated)
+        return {"voice": _voice_to_dict(updated), "voices": [_voice_to_dict(voice) for voice in voices.list()]}
+
+    @app.get("/api/voice-resources/{voice_id}/audio")
+    async def get_voice_resource_audio(voice_id: str):
+        voice = _state(app)["voices"].get(voice_id)
+        audio_path = Path(voice.reference_audio_path)
+        if not audio_path.is_absolute():
+            audio_path = ROOT / audio_path
+        if not audio_path.exists():
+            raise HTTPException(status_code=404, detail="reference audio not found")
+        return FileResponse(audio_path)
+
+    @app.delete("/api/voice-resources/{voice_id}")
+    async def delete_voice_resource(voice_id: str) -> dict[str, Any]:
+        voices = _state(app)["voices"]
+        voices.remove(voice_id)
+        return {"voices": [_voice_to_dict(voice) for voice in voices.list()]}
+
+    @app.get("/api/model-config")
+    async def get_model_config() -> dict[str, Any]:
+        return {"config": _state(app)["model_config"]}
+
+    @app.patch("/api/model-config")
+    async def update_model_config(payload: dict[str, Any]) -> dict[str, Any]:
+        config = _state(app)["model_config"]
+        for section in ("llm", "tts"):
+            if isinstance(payload.get(section), dict):
+                sanitized = {key: value for key, value in payload[section].items() if key != "api_key"}
+                config[section] = {**config[section], **sanitized}
+        return {"config": config}
 
     @app.post("/api/utterances/{utterance_id}/speech")
     async def synthesize_speech(utterance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -213,3 +360,22 @@ def _find_workbench_for_paragraph(app: FastAPI, paragraph_id: str) -> ChapterWor
             continue
         return workbench
     raise HTTPException(status_code=404, detail="paragraph not found")
+
+
+def _required_text(payload: dict[str, Any], field: str) -> str:
+    value = payload.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{field} is required")
+    return value.strip()
+
+
+def _role_payload_with_resource(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:
+    updates = dict(payload)
+    voice_resource_id = updates.get("voice_resource_id")
+    if voice_resource_id:
+        voice = _state(app)["voices"].get(str(voice_resource_id))
+        updates["reference_audio_path"] = voice.reference_audio_path
+        updates["reference_text"] = voice.reference_text
+        updates["design_prompt"] = None
+        updates["voice_mode"] = "voice_cloning"
+    return updates

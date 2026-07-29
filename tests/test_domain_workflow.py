@@ -16,9 +16,17 @@ from backend.app.domain.novel import ChapterWorkbench, parse_novel_text
 from backend.app.domain.providers import default_provider_registry
 from backend.app.domain.roles import RoleCollection, default_role_cards
 from backend.app.domain.segmentation import validate_segmentation_result
+from backend.app.domain.voices import (
+    VoiceResourceCollection,
+    default_voice_resources,
+    generated_voice_content,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_NOVEL = ROOT / "assets/samples/novels/hongloumeng_pg24264_excerpt.txt"
+REAL_SAMPLE_ROOT = Path("/Users/gaojing/Downloads/真实测试样本")
+REAL_NOVEL = REAL_SAMPLE_ROOT / "小说/这个地下城长蘑菇了.txt"
+REAL_VOICE_ROOT = REAL_SAMPLE_ROOT / "音频"
 
 
 def test_parse_sample_novel_into_chapters_and_paragraph_workbench_gate():
@@ -55,16 +63,17 @@ def test_parse_sample_novel_into_chapters_and_paragraph_workbench_gate():
 
 
 def test_default_roles_and_role_options_sync_to_utterance_selectors():
-    """Covers AC-FLOW-08, AC-ROLE-01, AC-ROLE-02, AC-ROLE-05."""
+    """Covers AC-FLOW-08, AC-ROLE-01, AC-ROLE-02, and v0.11 voice resources."""
     roles = default_role_cards()
-    assert [role.name for role in roles] == ["旁白", "男主", "女主"]
+    assert [role.name for role in roles] == ["旁白", "年轻男", "御姐音"]
     assert {role.voice_mode for role in roles} <= {"voice_cloning", "voice_design"}
 
     for role in roles:
         assert role.role_id
         assert role.name
         assert role.description
-        assert role.sample_note == "功能烟测占位，不代表最终音色质量"
+        assert role.voice_resource_id
+        assert "功能烟测占位" not in role.description
         if role.voice_mode == "voice_cloning":
             assert role.reference_audio_path
             assert role.reference_text
@@ -79,13 +88,70 @@ def test_default_roles_and_role_options_sync_to_utterance_selectors():
             "reference_audio_path": None,
             "reference_text": None,
             "design_prompt": "低沉、阴冷、克制",
-            "sample_note": "功能烟测占位，不代表最终音色质量",
+            "voice_resource_id": None,
         }
     )
 
     options = collection.utterance_role_options()
     assert {option["value"] for option in options} >= {"narrator", "male_lead", "female_lead", "villain"}
     assert next(option for option in options if option["value"] == "villain")["label"] == "反派"
+
+
+def test_v0_11_numeric_heading_real_sample_splits_into_chapters():
+    """Covers v0.11 real novel parsing for numeric headings such as `1.标题`."""
+    if not REAL_NOVEL.exists():
+        pytest.skip(f"real sample novel not found: {REAL_NOVEL}")
+
+    chapters = parse_novel_text(REAL_NOVEL.read_text(encoding="utf-8"))
+
+    assert len(chapters) >= 30
+    assert chapters[0].chapter_id == "chapter-0001"
+    assert chapters[0].title == "1.变成蘑菇的公爵千金"
+    assert chapters[1].title == "2.蘑菇园来了个外乡菇"
+    assert chapters[0].title != "未分章正文"
+    assert "伊南娜" in chapters[0].body
+
+
+def test_v0_11_voice_resources_load_real_samples_and_support_crud():
+    """Covers v0.11 voice resource library data behavior."""
+    resources = default_voice_resources(REAL_VOICE_ROOT if REAL_VOICE_ROOT.exists() else None)
+    collection = VoiceResourceCollection(resources)
+    names = {resource.name for resource in collection.list()}
+
+    if REAL_VOICE_ROOT.exists():
+        assert {"年轻男", "御姐音", "播音腔女", "男声旁白"} <= names
+        young_male = next(resource for resource in collection.list() if resource.name == "年轻男")
+        assert young_male.reference_audio_path.endswith("年轻男.mp3")
+        assert "光柱最终落在" in young_male.reference_text
+
+    added = collection.upsert(
+        {
+            "voice_id": "voice-test",
+            "name": "测试音色",
+            "description": "清晰、稳定、适合角色对白",
+            "reference_text": "这是一段测试语音内容。",
+            "reference_audio_path": "outputs/audio/test.wav",
+            "generated": False,
+        }
+    )
+    assert added.name == "测试音色"
+    assert collection.get("voice-test").description == "清晰、稳定、适合角色对白"
+
+    updated = collection.upsert({**added.to_dict(), "description": "已修改描述"})
+    assert updated.description == "已修改描述"
+
+    collection.remove("voice-test")
+    with pytest.raises(KeyError):
+        collection.get("voice-test")
+
+
+def test_v0_11_generated_voice_content_is_deterministic_substitute():
+    """Covers v0.11 generated voice resource boundary without claiming real TTS quality."""
+    content = generated_voice_content("冷静旁白", "沉稳、克制、叙事感强")
+
+    assert "冷静旁白" in content
+    assert "沉稳、克制、叙事感强" in content
+    assert len(content) > 20
 
 
 def test_provider_registry_preserves_default_llm_boundaries():
@@ -316,13 +382,16 @@ def test_tts_request_validation_and_voice_job_traceability():
     assert trace["output_path"].endswith(".wav")
 
 
-def test_fastapi_app_exposes_v0_1_resource_boundaries():
-    """Covers architecture API boundary for the v0.1 manual workbench."""
+def test_fastapi_app_exposes_v0_11_resource_boundaries():
+    """Covers architecture API boundary for the v0.11 manual workbench."""
     pytest.importorskip("fastapi")
     from backend.app.api.app import create_app
 
     app = create_app()
-    routes = {route.path: route.methods for route in app.routes if hasattr(route, "methods")}
+    routes = {}
+    for route in app.routes:
+        if hasattr(route, "methods"):
+            routes.setdefault(route.path, set()).update(route.methods)
 
     expected = [
         ("/api/novels/parse", "POST"),
@@ -333,10 +402,109 @@ def test_fastapi_app_exposes_v0_1_resource_boundaries():
         ("/api/roles", "GET"),
         ("/api/roles", "POST"),
         ("/api/roles/{role_id}", "PATCH"),
+        ("/api/voice-resources", "GET"),
+        ("/api/voice-resources", "POST"),
+        ("/api/voice-resources/generate", "POST"),
+        ("/api/voice-resources/{voice_id}", "PATCH"),
+        ("/api/voice-resources/{voice_id}", "DELETE"),
+        ("/api/voice-resources/{voice_id}/audio", "GET"),
+        ("/api/model-config", "GET"),
+        ("/api/model-config", "PATCH"),
         ("/api/utterances/{utterance_id}/speech", "POST"),
     ]
     for path, method in expected:
         assert method in routes[path]
+
+
+def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync():
+    """Covers v0.11 voice resource API and role selection synchronization."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api.app import create_app
+
+    client = TestClient(create_app())
+    list_response = client.get("/api/voice-resources")
+    assert list_response.status_code == 200
+    assert list_response.json()["voices"]
+
+    create_response = client.post(
+        "/api/voice-resources",
+        json={
+            "name": "接口测试音色",
+            "description": "明亮、自然、适合少年角色",
+            "reference_text": "接口测试语音内容。",
+            "reference_audio_path": "outputs/audio/api-test.wav",
+        },
+    )
+    assert create_response.status_code == 200
+    created = create_response.json()["voice"]
+    assert created["voice_id"].startswith("voice-")
+    assert created["name"] == "接口测试音色"
+
+    role_response = client.patch(
+        "/api/roles/narrator",
+        json={
+            "name": "旁白",
+            "voice_resource_id": created["voice_id"],
+        },
+    )
+    assert role_response.status_code == 200
+    role = role_response.json()["role"]
+    assert role["voice_resource_id"] == created["voice_id"]
+    assert role["reference_audio_path"] == "outputs/audio/api-test.wav"
+    assert role["reference_text"] == "接口测试语音内容。"
+
+    update_response = client.patch(
+        f"/api/voice-resources/{created['voice_id']}",
+        json={"description": "已通过接口修改"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["voice"]["description"] == "已通过接口修改"
+
+    delete_response = client.delete(f"/api/voice-resources/{created['voice_id']}")
+    assert delete_response.status_code == 200
+    remaining_ids = {voice["voice_id"] for voice in delete_response.json()["voices"]}
+    assert created["voice_id"] not in remaining_ids
+
+
+def test_fastapi_v0_11_generated_voice_and_model_config_boundaries():
+    """Covers v0.11 generated voice substitute and model config API boundaries."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api.app import create_app
+
+    client = TestClient(create_app())
+    generated = client.post(
+        "/api/voice-resources/generate",
+        json={
+            "name": "生成旁白",
+            "description": "沉稳、叙事、颗粒感轻",
+        },
+    )
+    assert generated.status_code == 200
+    voice = generated.json()["voice"]
+    assert voice["generated"] is True
+    assert "生成旁白" in voice["reference_text"]
+    assert voice["reference_audio_path"].endswith(".wav") or voice["reference_audio_path"].endswith(".mp3")
+
+    config_response = client.get("/api/model-config")
+    assert config_response.status_code == 200
+    config = config_response.json()["config"]
+    assert config["llm"]["api_key_env"] == "SILICONFLOW_API_KEY"
+    assert "api_key" not in config["llm"]
+    assert config["tts"]["base_url"] == "http://127.0.0.1:7811"
+
+    patched = client.patch(
+        "/api/model-config",
+        json={
+            "llm": {"model": "Qwen/Qwen3-8B", "timeout_seconds": 90},
+            "tts": {"base_url": "http://127.0.0.1:7811", "provider": "local-qwen3-tts"},
+        },
+    )
+    assert patched.status_code == 200
+    assert patched.json()["config"]["llm"]["timeout_seconds"] == 90
 
 
 def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkeypatch):

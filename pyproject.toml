@@ -1,7 +1,7 @@
 [project]
 name = "novelvoice-agent"
-version = "0.1.0"
-description = "Harness-first novel dubbing assistant for manual human-agent collaboration."
+version = "0.11.0"
+description = "Harness-first novel dubbing assistant with Unitale-style v0.11 workbench."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
