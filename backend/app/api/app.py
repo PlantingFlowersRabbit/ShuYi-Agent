@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -25,6 +26,7 @@ from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangCh
 from backend.app.domain.audio import (
     DEFAULT_GENERATED_VOICE_TEXT,
     TTSServiceError,
+    TTSTextLimitError,
     VoiceJob,
     build_tts_request,
     synthesize_local_qwen3,
@@ -68,6 +70,46 @@ def _state(app: FastAPI) -> dict[str, Any]:
 
 def _voice_to_dict(voice: VoiceResource) -> dict[str, Any]:
     return voice.to_dict()
+
+
+def _resolve_audio_path(path_text: str) -> Path:
+    path = Path(path_text)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _is_inside(path: Path, directory: Path) -> bool:
+    try:
+        path.resolve().relative_to(directory.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _store_voice_resource_audio(path_text: str, *, voice_id: str) -> str:
+    source = _resolve_audio_path(path_text)
+    if not source.exists():
+        raise HTTPException(status_code=400, detail=f"reference audio file does not exist: {path_text}")
+    OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
+    if _is_inside(source, OUTPUT_VOICE_RESOURCE_DIR):
+        return str(source.resolve())
+    filename = _safe_audio_filename(f"{voice_id}{source.suffix}")
+    target = OUTPUT_VOICE_RESOURCE_DIR / filename
+    shutil.copy2(source, target)
+    return str(target)
+
+
+def _materialize_voice_resources(resources: list[VoiceResource]) -> list[VoiceResource]:
+    materialized: list[VoiceResource] = []
+    for voice in resources:
+        try:
+            reference_audio_path = _store_voice_resource_audio(
+                voice.reference_audio_path,
+                voice_id=voice.voice_id,
+            )
+        except HTTPException:
+            reference_audio_path = voice.reference_audio_path
+        materialized.append(voice.with_updates(reference_audio_path=reference_audio_path))
+    return materialized
 
 
 def _default_model_config() -> dict[str, Any]:
@@ -120,11 +162,16 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.24 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.21 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
-    voices = VoiceResourceCollection(default_voice_resources(REAL_VOICE_ROOT))
+    app.mount(
+        "/outputs/voice-resources",
+        StaticFiles(directory=OUTPUT_VOICE_RESOURCE_DIR),
+        name="output_voice_resources",
+    )
+    voices = VoiceResourceCollection(_materialize_voice_resources(default_voice_resources(REAL_VOICE_ROOT)))
     app.state.workflow = {
         "chapters": [],
         "workbenches": {},
@@ -305,13 +352,18 @@ def create_app() -> FastAPI:
     @app.post("/api/voice-resources")
     async def create_voice_resource(payload: dict[str, Any]) -> dict[str, Any]:
         voices = _state(app)["voices"]
+        voice_id = str(payload.get("voice_id") or voices.next_id())
+        reference_audio_path = _store_voice_resource_audio(
+            _required_text(payload, "reference_audio_path"),
+            voice_id=voice_id,
+        )
         resource = voices.upsert(
             {
-                "voice_id": payload.get("voice_id") or voices.next_id(),
+                "voice_id": voice_id,
                 "name": _required_text(payload, "name"),
                 "description": _required_text(payload, "description"),
                 "reference_text": _required_text(payload, "reference_text"),
-                "reference_audio_path": _required_text(payload, "reference_audio_path"),
+                "reference_audio_path": reference_audio_path,
                 "generated": bool(payload.get("generated", False)),
             }
         )
@@ -340,7 +392,7 @@ def create_app() -> FastAPI:
         if not reference_text:
             reference_text = generated_voice_content(name, description)
         preview_id = f"preview-{len(_state(app)['voice_previews']) + 1:04d}"
-        output_path = OUTPUT_AUDIO_DIR / f"{preview_id}.wav"
+        output_path = OUTPUT_VOICE_RESOURCE_DIR / f"{preview_id}.wav"
         design_request = {
             "input": reference_text,
             "instruct": description,
@@ -375,7 +427,7 @@ def create_app() -> FastAPI:
         _state(app)["voice_previews"][preview_id] = resource
         return {
             "voice": _voice_to_dict(resource),
-            "audio_url": f"/outputs/audio/{preview_id}.wav",
+            "audio_url": f"/outputs/voice-resources/{preview_id}.wav",
             "duration_seconds": duration_seconds,
             "generation_status": generation_status,
             "generation_note": generation_note,
@@ -391,6 +443,11 @@ def create_app() -> FastAPI:
             for key, value in payload.items()
             if key in {"name", "description", "reference_text", "reference_audio_path", "generated"}
         }
+        if "reference_audio_path" in allowed:
+            allowed["reference_audio_path"] = _store_voice_resource_audio(
+                str(allowed["reference_audio_path"]),
+                voice_id=voice_id,
+            )
         updated = current.with_updates(**allowed)
         voices.upsert(updated)
         return {"voice": _voice_to_dict(updated), "voices": [_voice_to_dict(voice) for voice in voices.list()]}
@@ -444,19 +501,27 @@ def create_app() -> FastAPI:
     @app.post("/api/model-config/llm/test")
     async def test_remote_model_link(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         config = {**_state(app)["model_config"]["llm"], **((payload or {}).get("llm") or {})}
-        base_url = str(config.get("base_url") or "").rstrip("/")
-        if not base_url:
-            raise HTTPException(status_code=400, detail="base_url is required")
-        headers = {"Content-Type": "application/json"}
-        api_key = str(config.get("api_key") or "").strip()
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib.request.Request(f"{base_url}/models", headers=headers, method="GET")
         try:
-            await asyncio.to_thread(_test_models_endpoint, request)
+            await _test_model_link(config)
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"远端模型连接失败：{exc}") from exc
         return {"ok": True, "message": "远端模型连接成功"}
+
+    @app.post("/api/model-config/chapter-agent/test")
+    async def test_chapter_agent_model_link(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        config = {
+            **_state(app)["model_config"]["chapter_agent"],
+            **((payload or {}).get("chapter_agent") or {}),
+        }
+        try:
+            await _test_model_link(config)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"章节划分智能体连接失败：{exc}") from exc
+        return {"ok": True, "message": "章节划分智能体连接成功"}
 
     @app.post("/api/model-config/tts/start")
     async def start_local_tts_service(payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -580,11 +645,22 @@ def create_app() -> FastAPI:
             x_vector_only=bool(request.get("x_vector_only", False)),
         )
         try:
-            duration_seconds = synthesize_local_qwen3(
+            duration_seconds = await asyncio.to_thread(
+                synthesize_local_qwen3,
                 request,
                 output_path=output_path,
                 service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
             )
+        except TTSTextLimitError as exc:
+            error_job = VoiceJob(
+                **{
+                    **job.to_dict(),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+            )
+            _state(app)["voice_jobs"][job_id] = error_job
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TTSServiceError as exc:
             duration_seconds = _write_substitute_wav(output_path)
             substitute_job = VoiceJob(
@@ -742,6 +818,18 @@ def _port_from_base_url(base_url: str) -> int:
 def _test_models_endpoint(request: urllib.request.Request) -> None:
     with urllib.request.urlopen(request, timeout=10) as response:
         response.read()
+
+
+async def _test_model_link(config: dict[str, Any]) -> None:
+    base_url = str(config.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+    headers = {"Content-Type": "application/json"}
+    api_key = str(config.get("api_key") or "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(f"{base_url}/models", headers=headers, method="GET")
+    await asyncio.to_thread(_test_models_endpoint, request)
 
 
 def _start_tts_process(command: list[str]) -> subprocess.Popen:

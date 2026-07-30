@@ -1,7 +1,7 @@
 [project]
 name = "novelvoice-agent"
-version = "0.24.0"
-description = "Harness-first novel dubbing assistant with v0.24 AI utterance segmentation updates."
+version = "0.21.0"
+description = "Harness-first novel dubbing assistant with v0.21 audio-generation controls and TTS stability updates."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import urllib.error
 import urllib.request
 import wave
 from dataclasses import asdict, dataclass
@@ -13,6 +14,10 @@ from backend.app.domain.roles import RoleCard
 
 
 class TTSServiceError(RuntimeError):
+    pass
+
+
+class TTSTextLimitError(TTSServiceError):
     pass
 
 
@@ -31,6 +36,9 @@ DEFAULT_LANGUAGE_OPTIONS = [
     "Russian",
 ]
 DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。"
+DEFAULT_TTS_MAX_INPUT_CHARS = 120
+DEFAULT_TTS_MAX_NEW_TOKENS = 8192
+DEFAULT_TTS_REQUEST_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,85 @@ def _bounded_float(value: Any, *, default: float, minimum: float, maximum: float
 def _normalized_language(value: Any, default: str) -> str:
     language = str(value or default).strip()
     return language if language in DEFAULT_LANGUAGE_OPTIONS else default
+
+
+def _positive_int_from_env(*names: str, default: int) -> int:
+    for name in names:
+        raw_value = os.environ.get(name, "").strip()
+        if not raw_value:
+            continue
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            continue
+    return default
+
+
+def tts_max_input_chars() -> int:
+    return _positive_int_from_env(
+        "NOVELVOICE_TTS_MAX_INPUT_CHARS",
+        "QWEN3_TTS_MAX_INPUT_CHARS",
+        default=DEFAULT_TTS_MAX_INPUT_CHARS,
+    )
+
+
+def tts_max_new_tokens() -> int:
+    return _positive_int_from_env(
+        "NOVELVOICE_TTS_MAX_NEW_TOKENS",
+        "QWEN3_TTS_MAX_NEW_TOKENS",
+        default=DEFAULT_TTS_MAX_NEW_TOKENS,
+    )
+
+
+def _tts_request_timeout_seconds(text: str) -> float:
+    raw_value = os.environ.get("NOVELVOICE_TTS_REQUEST_TIMEOUT_SECONDS", "").strip()
+    if raw_value:
+        try:
+            return max(1.0, float(raw_value))
+        except ValueError:
+            pass
+    return max(DEFAULT_TTS_REQUEST_TIMEOUT_SECONDS, min(480.0, 60.0 + len(text) * 2.0))
+
+
+def _tts_text_limit_message(text: str, max_chars: int) -> str:
+    return (
+        f"当前语句文本长度 {len(text)} 字，超过本地 TTS 单条上限 {max_chars} 字；"
+        f"已使用最大 max_new_tokens={tts_max_new_tokens()}，未发现可继续安全提高的请求长度参数。"
+        "请手动缩短文本或拆成多条音频生成。"
+    )
+
+
+def validate_tts_text_length(text: str) -> None:
+    max_chars = tts_max_input_chars()
+    if max_chars > 0 and len(text) > max_chars:
+        raise TTSTextLimitError(_tts_text_limit_message(text, max_chars))
+
+
+def _timeout_text_limit_message(text: str, timeout_seconds: float) -> str:
+    return (
+        f"本地 TTS 生成超时（已等待 {timeout_seconds:.0f} 秒）；当前语句文本长度 {len(text)} 字，"
+        f"已使用最大 max_new_tokens={tts_max_new_tokens()}。"
+        "模型仍未返回可播放音频，请手动缩短文本或拆成多条音频生成。"
+    )
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw_body = exc.read().decode("utf-8", "replace")
+    except (OSError, UnicodeDecodeError):
+        raw_body = ""
+    if not raw_body:
+        return "服务未返回错误详情"
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return raw_body
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    if detail:
+        return json.dumps(detail, ensure_ascii=False)
+    return raw_body
 
 
 def _speed_instruction(speed: float) -> str:
@@ -210,18 +297,22 @@ def synthesize_local_qwen3(
     if "audio_sample_path" not in request_payload:
         raise TTSServiceError("local Qwen3-TTS currently requires voice cloning reference audio")
 
+    text = str(request_payload["input"])
+    validate_tts_text_length(text)
+
     reference_audio = Path(request_payload["audio_sample_path"])
     if not reference_audio.exists():
         raise TTSServiceError(f"reference audio does not exist: {reference_audio}")
 
     payload = {
-        "input": request_payload["input"],
+        "input": text,
         "audio_sample": base64.b64encode(reference_audio.read_bytes()).decode("ascii"),
         "audio_sample_suffix": _safe_reference_audio_suffix(reference_audio.suffix),
         "ref_text": request_payload["ref_text"],
         "language": request_payload.get("language", "Auto"),
         "response_format": request_payload.get("response_format", "wav"),
         "x_vector_only": bool(request_payload.get("x_vector_only", False)),
+        "max_new_tokens": int(request_payload.get("max_new_tokens") or tts_max_new_tokens()),
     }
     base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
         "/"
@@ -233,8 +324,21 @@ def synthesize_local_qwen3(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(http_request, timeout=120) as response:
+        timeout_seconds = _tts_request_timeout_seconds(text)
+        with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
             audio_bytes = response.read()
+    except TTSTextLimitError:
+        raise
+    except urllib.error.HTTPError as exc:
+        detail = _http_error_detail(exc)
+        if not detail or detail == "服务未返回错误详情":
+            detail = (
+                f"{detail}；当前语句文本长度 {len(text)} 字，"
+                f"max_new_tokens={tts_max_new_tokens()}，可尝试缩短文本或拆成多条音频生成。"
+            )
+        raise TTSServiceError(f"local Qwen3-TTS request failed: HTTP {exc.code}: {detail}") from exc
+    except TimeoutError as exc:
+        raise TTSTextLimitError(_timeout_text_limit_message(text, timeout_seconds)) from exc
     except Exception as exc:
         raise TTSServiceError(f"local Qwen3-TTS request failed: {exc}") from exc
 

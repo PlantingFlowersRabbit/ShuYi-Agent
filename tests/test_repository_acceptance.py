@@ -49,8 +49,8 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.24" in app
-    assert "NovelVoice-Agent v0.24" in index_html
+    assert "NovelVoice-Agent v0.21" in app
+    assert "NovelVoice-Agent v0.21" in index_html
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
@@ -95,8 +95,20 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     for control in ["折叠", "展开", "删除", "textarea", "select"]:
         assert control in app
-    for labeled_control in ["语句文本", "选择角色", "情绪", "语言", "仅使用声纹", "语速", "音量", "其他控制文本"]:
+    for labeled_control in ["语句文本", "选择角色", "语言"]:
         assert labeled_control in app
+    for removed_audio_control in [
+        "EMOTION_OPTIONS",
+        "情绪",
+        "仅使用声纹",
+        "语速",
+        "音量",
+        "其他控制文本",
+        "压低声音、急促、带害怕情绪",
+        "buildDeferredControlInstruct",
+        "xVectorOnly",
+    ]:
+        assert removed_audio_control not in app
     assert "情感控制文本" not in app
     assert '<option value="voice_cloning">voice_cloning</option>' not in app
 
@@ -135,7 +147,7 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.24" in app
+    assert "NovelVoice-Agent v0.21" in app
     assert "AI章节划分" in app
     assert "runAiChapterSplit" in app
     assert '"/api/novels/ai-chapter-split"' in app
@@ -162,12 +174,15 @@ def test_frontend_v0_20_model_config_exposes_deepseek_chapter_agent():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.24.0"' in package_json
+    assert '"version": "0.21.0"' in package_json
     assert "chapter_agent" in app
     assert "AI章节划分智能体" in app
     assert "https://api.deepseek.com" in app
     assert "deepseek-v4-flash" in app
     assert "章节划分智能体配置保存成功" in app
+    assert "testChapterAgentModelLink" in app
+    assert '"/api/model-config/chapter-agent/test"' in app
+    assert app.count("测试链接") >= 2
 
 
 def test_frontend_v0_20_upload_decodes_legacy_chinese_txt_before_preview():
@@ -186,7 +201,7 @@ def test_frontend_v0_22_uploads_epub_to_ai_chapter_agent_file_endpoint():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.24.0"' in package_json
+    assert '"version": "0.21.0"' in package_json
     assert 'accept=".txt,.epub,text/plain,application/epub+zip"' in app
     assert "uploadedNovelFileRef" in app
     assert "readNovelFileUpload" in app
@@ -200,7 +215,7 @@ def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.24" in app
+    assert "NovelVoice-Agent v0.21" in app
     assert "runAiSegmentationForParagraph" in app
     assert "Qwen/Qwen3-8B" in app
     assert "AI语句划分智能体正在分析" in app
@@ -248,14 +263,13 @@ def test_frontend_v0_14_audio_module_controls_and_no_mobile_layout():
         "deleteUtterance",
         "添加音频生成",
         "删除音频生成",
-        "EMOTION_OPTIONS",
-        "<option value=\"\">空</option>",
-        "取值 0.0-2.0",
-        "取值 0.5-2.0",
-        "压低声音、急促、带害怕情绪",
     ]:
         assert term in app
 
+    assert "addUtteranceAfter(paragraph.paragraphId, utterance.utteranceId)" not in app
+    assert "addUtteranceAfter(paragraph.paragraphId)" in app
+    for removed_audio_control in ["<option value=\"\">空</option>", "取值 0.0-2.0", "取值 0.5-2.0"]:
+        assert removed_audio_control not in app
     assert "paragraph.collapsed ? null" in app
     assert "min-width: 1180px" in styles
     assert "@media (max-width" not in styles
@@ -328,12 +342,21 @@ def test_frontend_v0_141_visible_feedback_and_voicedesign_explanations():
         "generation_status",
         "model_requirement",
         'value: "Auto"',
-        "控制提示已暂存，暂不传入后端",
         "没有成功调用 VoiceDesign 模型",
         "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-        "只使用从参考音频提取的说话人声纹",
     ]:
         assert term in app
+
+
+def test_frontend_v0_21_audio_generation_keeps_completed_audio_playable_during_other_jobs():
+    """Covers v0.21 per-utterance generation state and playback availability."""
+    app = read("frontend/src/App.tsx")
+
+    assert "generatingUtteranceIds" in app
+    assert "isGeneratingThisUtterance" in app
+    assert 'disabled={isGeneratingThisUtterance}' in app
+    assert "正在生成" in app
+    assert "{utterance.audioUrl && <audio controls src={utterance.audioUrl} />}" in app
 
 
 def test_v0_11_frontend_uses_unitale_style_tokens():

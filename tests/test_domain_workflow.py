@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import sys
+import time
 import types
 import wave
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 from backend.app.domain.audio import (
     TTSServiceError,
+    TTSTextLimitError,
     VoiceJob,
     build_tts_request,
     model_control_note,
@@ -739,6 +741,7 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
         ("/api/model-config", "GET"),
         ("/api/model-config", "PATCH"),
         ("/api/model-config/llm/test", "POST"),
+        ("/api/model-config/chapter-agent/test", "POST"),
         ("/api/model-config/tts/start", "POST"),
         ("/api/utterances/{utterance_id}/speech", "POST"),
     ]
@@ -746,53 +749,62 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
         assert method in routes[path]
 
 
-def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync():
+def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync(tmp_path):
     """Covers v0.11 voice resource API and role selection synchronization."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
+    from backend.app.api import app as app_module
     from backend.app.api.app import create_app
 
-    client = TestClient(create_app())
-    list_response = client.get("/api/voice-resources")
-    assert list_response.status_code == 200
-    assert list_response.json()["voices"]
+    source_audio = tmp_path / "api-test.wav"
+    write_valid_wav(source_audio)
+    voice_store = tmp_path / "voice-store"
 
-    create_response = client.post(
-        "/api/voice-resources",
-        json={
-            "name": "接口测试音色",
-            "description": "明亮、自然、适合少年角色",
-            "reference_text": "接口测试语音内容。",
-            "reference_audio_path": "outputs/audio/api-test.wav",
-        },
-    )
-    assert create_response.status_code == 200
-    created = create_response.json()["voice"]
-    assert created["voice_id"].startswith("voice-")
-    assert created["name"] == "接口测试音色"
+    with patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", voice_store):
+        client = TestClient(create_app())
+        list_response = client.get("/api/voice-resources")
+        assert list_response.status_code == 200
+        assert list_response.json()["voices"]
 
-    role_response = client.patch(
-        "/api/roles/narrator",
-        json={
-            "name": "旁白",
-            "voice_resource_id": created["voice_id"],
-        },
-    )
-    assert role_response.status_code == 200
-    role = role_response.json()["role"]
-    assert role["voice_resource_id"] == created["voice_id"]
-    assert role["reference_audio_path"] == "outputs/audio/api-test.wav"
-    assert role["reference_text"] == "接口测试语音内容。"
+        create_response = client.post(
+            "/api/voice-resources",
+            json={
+                "name": "接口测试音色",
+                "description": "明亮、自然、适合少年角色",
+                "reference_text": "接口测试语音内容。",
+                "reference_audio_path": str(source_audio),
+            },
+        )
+        assert create_response.status_code == 200
+        created = create_response.json()["voice"]
+        assert created["voice_id"].startswith("voice-")
+        assert created["name"] == "接口测试音色"
+        created_audio_path = Path(created["reference_audio_path"])
+        assert created_audio_path.parent == voice_store
+        assert created_audio_path.exists()
 
-    update_response = client.patch(
-        f"/api/voice-resources/{created['voice_id']}",
-        json={"description": "已通过接口修改"},
-    )
-    assert update_response.status_code == 200
-    assert update_response.json()["voice"]["description"] == "已通过接口修改"
+        role_response = client.patch(
+            "/api/roles/narrator",
+            json={
+                "name": "旁白",
+                "voice_resource_id": created["voice_id"],
+            },
+        )
+        assert role_response.status_code == 200
+        role = role_response.json()["role"]
+        assert role["voice_resource_id"] == created["voice_id"]
+        assert role["reference_audio_path"] == str(created_audio_path)
+        assert role["reference_text"] == "接口测试语音内容。"
 
-    delete_response = client.delete(f"/api/voice-resources/{created['voice_id']}")
+        update_response = client.patch(
+            f"/api/voice-resources/{created['voice_id']}",
+            json={"description": "已通过接口修改"},
+        )
+        assert update_response.status_code == 200
+        assert update_response.json()["voice"]["description"] == "已通过接口修改"
+
+        delete_response = client.delete(f"/api/voice-resources/{created['voice_id']}")
     assert delete_response.status_code == 200
     remaining_ids = {voice["voice_id"] for voice in delete_response.json()["voices"]}
     assert created["voice_id"] not in remaining_ids
@@ -814,7 +826,7 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
         return 0.75
 
     with (
-        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path),
         patch.object(app_module, "synthesize_voice_design_qwen3", fake_voice_design),
     ):
         client = TestClient(create_app())
@@ -836,7 +848,7 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
         assert voice["voice_id"].startswith("preview-")
         assert voice["reference_text"] == "这是一段用于试听新音色的语音。"
         assert voice["reference_audio_path"].endswith(".wav")
-        assert data["audio_url"].startswith("/outputs/audio/")
+        assert data["audio_url"].startswith("/outputs/voice-resources/")
         assert data["generation_status"] == "succeeded"
         assert "VoiceDesign" in data["generation_note"]
         assert calls[0]["request"]["input"] == "这是一段用于试听新音色的语音。"
@@ -870,7 +882,7 @@ def test_fastapi_v0_141_generated_voice_substitute_explains_required_model(tmp_p
         raise TTSServiceError("voice design endpoint unavailable")
 
     with (
-        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path),
         patch.object(app_module, "synthesize_voice_design_qwen3", unavailable_voice_design),
     ):
         client = TestClient(create_app())
@@ -909,8 +921,10 @@ def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
         write_valid_wav(output_path)
         return 0.75
 
+    voice_store = tmp_path / "voice-store"
     with (
         patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", voice_store),
         patch.object(app_module, "synthesize_local_qwen3", fake_synthesize),
     ):
         client = TestClient(create_app())
@@ -926,6 +940,9 @@ def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
             },
         )
         assert voice_response.status_code == 200
+        copied_audio_path = Path(voice_response.json()["voice"]["reference_audio_path"])
+        assert copied_audio_path.parent == voice_store
+        assert copied_audio_path.exists()
 
         stale_role = client.post(
             "/api/roles",
@@ -955,9 +972,9 @@ def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
 
     assert speech.status_code == 200
     data = speech.json()
-    assert captured["request"]["audio_sample_path"] == str(reference_audio)
+    assert captured["request"]["audio_sample_path"] == str(copied_audio_path)
     assert captured["request"]["ref_text"] == "这是一段用于试听新音色的语音。"
-    assert data["voice_job"]["reference_audio_path"] == str(reference_audio)
+    assert data["voice_job"]["reference_audio_path"] == str(copied_audio_path)
     assert data["voice_job"]["reference_text"] == "这是一段用于试听新音色的语音。"
 
 
@@ -1028,6 +1045,56 @@ def test_fastapi_v0_14_reference_audio_upload_saves_local_file(tmp_path):
     assert Path(data["reference_audio_path"]).exists()
 
 
+def test_fastapi_v0_21_voice_resources_are_materialized_into_one_directory(tmp_path):
+    """Covers v0.21 unified voice-resource storage directory."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    sample_root = tmp_path / "real-samples"
+    sample_voice_dir = sample_root / "年轻男"
+    sample_voice_dir.mkdir(parents=True)
+    external_audio = sample_voice_dir / "年轻男.mp3"
+    external_audio.write_bytes(b"ID3 fake mp3 bytes")
+    (sample_voice_dir / "语音内容.txt").write_text("光柱最终落在那株神木幼苗上。", encoding="utf-8")
+    voice_store = tmp_path / "voice-store"
+
+    with (
+        patch.object(app_module, "REAL_VOICE_ROOT", sample_root),
+        patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", voice_store),
+    ):
+        client = TestClient(create_app())
+        listed = client.get("/api/voice-resources")
+
+        new_source = tmp_path / "external-new.wav"
+        write_valid_wav(new_source)
+        created = client.post(
+            "/api/voice-resources",
+            json={
+                "voice_id": "voice-external",
+                "name": "外部音色",
+                "description": "外部路径导入",
+                "reference_text": "外部音色参考文本。",
+                "reference_audio_path": str(new_source),
+            },
+        )
+
+    assert listed.status_code == 200
+    listed_voice = listed.json()["voices"][0]
+    listed_path = Path(listed_voice["reference_audio_path"])
+    assert listed_path.parent == voice_store
+    assert listed_path.exists()
+    assert listed_path != external_audio
+
+    assert created.status_code == 200
+    created_path = Path(created.json()["voice"]["reference_audio_path"])
+    assert created_path.parent == voice_store
+    assert created_path.exists()
+    assert created_path != new_source
+
+
 def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatch):
     """Covers v0.14 split model-config save/test/start API behavior."""
     pytest.importorskip("fastapi")
@@ -1094,6 +1161,28 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
     assert test_link.status_code == 200
     assert test_link.json()["ok"] is True
     assert "远端模型连接成功" in test_link.json()["message"]
+
+    captured_model_urls = []
+
+    def capture_model_urlopen(request, timeout=10):
+        captured_model_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", capture_model_urlopen)
+    chapter_link = client.post(
+        "/api/model-config/chapter-agent/test",
+        json={
+            "chapter_agent": {
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+                "api_key": "chapter-test-key",
+            }
+        },
+    )
+    assert chapter_link.status_code == 200
+    assert chapter_link.json()["ok"] is True
+    assert "章节划分智能体连接成功" in chapter_link.json()["message"]
+    assert captured_model_urls[-1] == "https://api.deepseek.com/models"
 
     calls = []
 
@@ -1172,6 +1261,73 @@ def test_fastapi_v0_23_tts_start_waits_for_health_before_reporting_success(monke
     assert response.status_code == 503
     assert "尚未完成启动" in response.text
     assert "模型加载" in response.text
+
+
+def test_fastapi_v0_21_long_tts_text_returns_user_actionable_error(tmp_path):
+    """Covers v0.21 clear feedback when one utterance exceeds the local TTS boundary."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    long_text = (
+        "【技能：骑术LV4、元素亲和（水、光）LV4、魔力储存LV3、魔力操控LV4、光系魔法LV4、"
+        "水系魔法LV3、布甲精通LV2、匕首精通LV2、魔法抗性LV6、物理抗性LV6、精神抗性LV6、"
+        "腐蚀抗性LV6、麻痹抗性LV6、高温抗性LV6、寒冷抗性LV6、眩晕抗性LV6、水下适应LV6、"
+        "星象占卜LV1、古精灵语LV2、生命回复LV4】"
+    )
+
+    def text_limit(request, *, output_path, service_base_url=None):
+        raise TTSTextLimitError(
+            "当前语句文本长度 167 字，超过本地 TTS 单条建议上限 120 字；"
+            "已使用最大 max_new_tokens=8192，仍不适合继续等待。请手动缩短文本或拆成多条音频生成。"
+        )
+
+    with (
+        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "synthesize_local_qwen3", text_limit),
+    ):
+        client = TestClient(create_app())
+        response = client.post(
+            "/api/utterances/p-0001-u-001/speech",
+            json={
+                "role_id": "narrator",
+                "text": long_text,
+                "voice_mode": "voice_cloning",
+            },
+        )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "当前语句文本长度" in detail
+    assert "max_new_tokens=8192" in detail
+    assert "请手动缩短文本或拆成多条音频生成" in detail
+
+
+def test_synthesize_local_qwen3_preflights_configurable_text_limit(tmp_path, monkeypatch):
+    """Covers v0.21 local request guard before long text reaches the model server."""
+    reference_audio = tmp_path / "reference.wav"
+    write_valid_wav(reference_audio)
+    monkeypatch.setenv("NOVELVOICE_TTS_MAX_INPUT_CHARS", "12")
+
+    with pytest.raises(TTSTextLimitError) as exc_info:
+        synthesize_local_qwen3(
+            {
+                "input": "这是一段明显过长的待合成文本",
+                "audio_sample_path": str(reference_audio),
+                "ref_text": "参考文本",
+                "language": "Chinese",
+                "response_format": "wav",
+            },
+            output_path=tmp_path / "out.wav",
+            service_base_url="http://127.0.0.1:7811",
+        )
+
+    message = str(exc_info.value)
+    assert "当前语句文本长度" in message
+    assert "单条上限 12 字" in message
+    assert "请手动缩短文本或拆成多条音频生成" in message
 
 
 def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
@@ -1383,6 +1539,68 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
     assert data["audio_url"] == "/outputs/audio/vj-0001.wav"
     assert data["duration_seconds"] == 0.75
     assert calls[0]["request"]["input"] == "待合成文本"
+
+
+def test_fastapi_v0_21_speech_synthesis_does_not_block_voice_resource_reads(tmp_path):
+    """Covers v0.21: one running TTS job must not block already playable resources."""
+    pytest.importorskip("fastapi")
+    httpx = pytest.importorskip("httpx")
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    reference_audio = tmp_path / "reference.wav"
+    write_valid_wav(reference_audio)
+
+    def slow_synthesize(request, *, output_path, service_base_url=None):
+        time.sleep(0.2)
+        write_valid_wav(output_path)
+        return 0.75
+
+    async def scenario():
+        with (
+            patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path / "audio"),
+            patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path / "voices"),
+            patch.object(app_module, "synthesize_local_qwen3", slow_synthesize),
+        ):
+            app = create_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                create_voice = await client.post(
+                    "/api/voice-resources",
+                    json={
+                        "voice_id": "voice-concurrent",
+                        "name": "并发测试音色",
+                        "description": "用于并发生成测试",
+                        "reference_text": "参考文本",
+                        "reference_audio_path": str(reference_audio),
+                    },
+                )
+                assert create_voice.status_code == 200
+
+                started_at = time.perf_counter()
+                speech_task = asyncio.create_task(
+                    client.post(
+                        "/api/utterances/p-0001-u-001/speech",
+                        json={
+                            "role_id": "narrator",
+                            "voice_resource_id": "voice-concurrent",
+                            "text": "第一条正在生成的文本",
+                            "voice_mode": "voice_cloning",
+                        },
+                    )
+                )
+                await asyncio.sleep(0.02)
+                elapsed_before_read = time.perf_counter() - started_at
+                voices_response = await client.get("/api/voice-resources")
+                speech_response = await speech_task
+                return elapsed_before_read, voices_response, speech_response
+
+    elapsed, voices_response, speech_response = asyncio.run(scenario())
+
+    assert elapsed < 0.12
+    assert voices_response.status_code == 200
+    assert speech_response.status_code == 200
 
 
 def test_qwen3_tts_server_reuses_voice_clone_prompt_for_same_reference(tmp_path, monkeypatch):

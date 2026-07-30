@@ -32,6 +32,58 @@ voice_clone_model = None
 voice_design_model = None
 voice_clone_prompt_cache: dict[str, Any] = {}
 REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+DEFAULT_TTS_MAX_INPUT_CHARS = 120
+DEFAULT_TTS_MAX_NEW_TOKENS = 8192
+
+
+def positive_int_from_env(*names: str, default: int) -> int:
+    for name in names:
+        raw_value = os.environ.get(name, "").strip()
+        if not raw_value:
+            continue
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            continue
+    return default
+
+
+def tts_max_input_chars() -> int:
+    return positive_int_from_env(
+        "NOVELVOICE_TTS_MAX_INPUT_CHARS",
+        "QWEN3_TTS_MAX_INPUT_CHARS",
+        default=DEFAULT_TTS_MAX_INPUT_CHARS,
+    )
+
+
+def tts_max_new_tokens(value: Any = None) -> int:
+    try:
+        if value is not None:
+            return max(1, int(value))
+    except (TypeError, ValueError):
+        pass
+    return positive_int_from_env(
+        "NOVELVOICE_TTS_MAX_NEW_TOKENS",
+        "QWEN3_TTS_MAX_NEW_TOKENS",
+        default=DEFAULT_TTS_MAX_NEW_TOKENS,
+    )
+
+
+def validate_request_text(text: str) -> None:
+    max_chars = tts_max_input_chars()
+    if max_chars > 0 and len(text) > max_chars:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"当前语句文本长度 {len(text)} 字，超过本地 TTS 单条上限 {max_chars} 字；"
+                f"已使用最大 max_new_tokens={tts_max_new_tokens()}，未发现可继续安全提高的请求长度参数。"
+                "请手动缩短文本或拆成多条音频生成。"
+            ),
+        )
+
+
+def exception_detail(exc: Exception) -> str:
+    return str(exc) or exc.__class__.__name__
 
 
 def load_model(model_path: str):
@@ -111,6 +163,7 @@ def generate_voice_clone_with_reusable_prompt(
     reference_audio: bytes,
     reusable_prompt: str,
     x_vector_only: bool,
+    max_new_tokens: int = DEFAULT_TTS_MAX_NEW_TOKENS,
 ):
     voice_clone_prompt = get_or_create_voice_clone_prompt(
         model,
@@ -128,6 +181,7 @@ def generate_voice_clone_with_reusable_prompt(
         )
     else:
         kwargs["voice_clone_prompt"] = voice_clone_prompt
+    kwargs["max_new_tokens"] = max_new_tokens
     return model.generate_voice_clone(**kwargs)
 
 
@@ -165,7 +219,9 @@ async def speech_upload(
     language: str = Form("Auto"),
     response_format: str = Form("wav"),
     x_vector_only: bool = Form(False),
+    max_new_tokens: int | None = Form(None),
 ):
+    validate_request_text(input)
     suffix = Path(voice_file.filename or "reference.wav").suffix or ".wav"
     reference_audio = await voice_file.read()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as reference:
@@ -182,10 +238,11 @@ async def speech_upload(
             reference_audio=reference_audio,
             reusable_prompt=ref_text,
             x_vector_only=x_vector_only,
+            max_new_tokens=tts_max_new_tokens(max_new_tokens),
         )
         return encode_audio_response(wavs[0], sr, response_format)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
     finally:
         try:
             os.remove(reference_path)
@@ -200,9 +257,11 @@ async def speech_json(payload: dict):
     language = payload.get("language", "Auto")
     response_format = payload.get("response_format", "wav")
     x_vector_only = bool(payload.get("x_vector_only", False))
+    max_new_tokens = tts_max_new_tokens(payload.get("max_new_tokens"))
     audio_sample = payload.get("audio_sample") or payload.get("voice_file")
     if not text or not audio_sample:
         raise HTTPException(status_code=400, detail="input and audio_sample are required")
+    validate_request_text(text)
 
     reference_audio = base64.b64decode(audio_sample)
     suffix = safe_reference_audio_suffix(payload.get("audio_sample_suffix") or payload.get("audio_sample_format"))
@@ -220,10 +279,11 @@ async def speech_json(payload: dict):
             reference_audio=reference_audio,
             reusable_prompt=ref_text,
             x_vector_only=x_vector_only,
+            max_new_tokens=max_new_tokens,
         )
         return encode_audio_response(wavs[0], sr, response_format)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
     finally:
         try:
             os.remove(reference_path)
@@ -246,8 +306,10 @@ async def voice_design_json(payload: dict):
     instruct = payload.get("instruct") or payload.get("design_prompt") or ""
     language = payload.get("language", "Auto")
     response_format = payload.get("response_format", "wav")
+    max_new_tokens = tts_max_new_tokens(payload.get("max_new_tokens"))
     if not text or not instruct:
         raise HTTPException(status_code=400, detail="input and instruct are required")
+    validate_request_text(text)
 
     try:
         wavs, sr = await asyncio.to_thread(
@@ -255,6 +317,7 @@ async def voice_design_json(payload: dict):
             text=text,
             language=language,
             instruct=instruct,
+            max_new_tokens=max_new_tokens,
         )
         return encode_audio_response(wavs[0], sr, response_format)
     except AttributeError as exc:
@@ -263,7 +326,7 @@ async def voice_design_json(payload: dict):
             detail="loaded Qwen3-TTS model does not provide generate_voice_design; use Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
 
 
 def encode_audio_response(wav, sr, response_format: str) -> Response:
