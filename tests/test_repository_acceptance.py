@@ -24,6 +24,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/development/v0.13-verification.md",
         "spec/v0.14-harness.md",
         "docs/development/v0.14-verification.md",
+        "spec/v0.141-harness.md",
+        "docs/development/v0.141-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -38,7 +40,7 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.14" in app
+    assert "NovelVoice-Agent v0.141" in app
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
@@ -123,7 +125,7 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.14" in app
+    assert "NovelVoice-Agent v0.141" in app
     assert "划分章节" in app
     assert "确认划分章节" not in app
     assert "chapterSplitProgress" in app
@@ -148,7 +150,7 @@ def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.14" in app
+    assert "NovelVoice-Agent v0.141" in app
     assert "runQwenSegmentation" in app
     assert "Qwen/Qwen3-8B" in app
     assert "已根据 Qwen/Qwen3-8B 生成可编辑语句草稿" in app
@@ -213,6 +215,30 @@ def test_frontend_v0_14_voice_library_file_picker_generation_preview_and_model_b
         "本地模型配置保存成功",
         "远端模型连接成功",
         "本地 TTS 服务启动成功",
+    ]:
+        assert term in app
+
+
+def test_frontend_v0_141_visible_feedback_and_voicedesign_explanations():
+    """Covers v0.141 visible feedback, failure messages, VoiceDesign requirement, and x-vector help."""
+    app = read("frontend/src/App.tsx")
+
+    for term in [
+        "模型配置反馈",
+        "音色资源库反馈",
+        "保存音色成功",
+        "保存音色失败",
+        "删除选中音色成功",
+        "删除选中音色失败",
+        "远端模型配置保存失败",
+        "本地模型配置保存失败",
+        "测试链接失败",
+        "启动服务失败",
+        "generation_status",
+        "model_requirement",
+        "没有成功调用 VoiceDesign 模型",
+        "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "只使用从参考音频提取的说话人声纹",
     ]:
         assert term in app
 

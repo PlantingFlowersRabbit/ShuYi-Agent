@@ -22,6 +22,7 @@ from backend.app.domain.audio import (
     VoiceJob,
     build_tts_request,
     synthesize_local_qwen3,
+    synthesize_voice_design_qwen3,
 )
 from backend.app.domain.llm import MissingProviderCredential, OpenAICompatibleSegmentationClient
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
@@ -295,7 +296,29 @@ def create_app() -> FastAPI:
             reference_text = generated_voice_content(name, description)
         preview_id = f"preview-{len(_state(app)['voice_previews']) + 1:04d}"
         output_path = OUTPUT_AUDIO_DIR / f"{preview_id}.wav"
-        duration_seconds = _write_substitute_wav(output_path)
+        design_request = {
+            "input": reference_text,
+            "instruct": description,
+            "language": str(payload.get("language") or "Chinese"),
+            "response_format": "wav",
+        }
+        try:
+            duration_seconds = synthesize_voice_design_qwen3(
+                design_request,
+                output_path=output_path,
+                service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
+            )
+            generation_status = "succeeded"
+            generation_note = "已调用本地 Qwen3-TTS VoiceDesign 模型生成试听音色。"
+            model_requirement = None
+        except TTSServiceError as exc:
+            duration_seconds = _write_substitute_wav(output_path)
+            generation_status = "substitute"
+            generation_note = f"没有成功调用 VoiceDesign 模型，已生成本地占位 wav 供流程预览：{exc}"
+            model_requirement = (
+                "需要下载并启动 Qwen3-TTS-12Hz-1.7B-VoiceDesign；"
+                "当前 Qwen3-TTS-12Hz-1.7B-Base 主要支持有参考音频的 voice cloning。"
+            )
         resource = VoiceResource(
             voice_id=preview_id,
             name=name,
@@ -309,7 +332,9 @@ def create_app() -> FastAPI:
             "voice": _voice_to_dict(resource),
             "audio_url": f"/outputs/audio/{preview_id}.wav",
             "duration_seconds": duration_seconds,
-            "generation_note": "local deterministic substitute preview; save only after audition",
+            "generation_status": generation_status,
+            "generation_note": generation_note,
+            "model_requirement": model_requirement,
         }
 
     @app.patch("/api/voice-resources/{voice_id}")

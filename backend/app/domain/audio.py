@@ -195,6 +195,47 @@ def synthesize_local_qwen3(
     return validate_wav_duration(output_path)
 
 
+def synthesize_voice_design_qwen3(
+    request_payload: dict[str, Any],
+    *,
+    output_path: Path,
+    service_base_url: str | None = None,
+) -> float:
+    text = str(request_payload.get("input") or "").strip()
+    instruct = str(request_payload.get("instruct") or request_payload.get("design_prompt") or "").strip()
+    if not text:
+        raise TTSServiceError("voice design requires input text")
+    if not instruct:
+        raise TTSServiceError("voice design requires instruct description")
+
+    payload = {
+        "input": text,
+        "instruct": instruct,
+        "language": request_payload.get("language", "Chinese"),
+        "response_format": request_payload.get("response_format", "wav"),
+    }
+    base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
+        "/"
+    )
+    http_request = urllib.request.Request(
+        f"{base_url}/v1/audio/voice-design",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(http_request, timeout=120) as response:
+            audio_bytes = response.read()
+    except Exception as exc:
+        raise TTSServiceError(f"local Qwen3-TTS VoiceDesign request failed: {exc}") from exc
+
+    if not audio_bytes:
+        raise TTSServiceError("local Qwen3-TTS VoiceDesign returned empty audio")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(audio_bytes)
+    return validate_wav_duration(output_path)
+
+
 def validate_wav_duration(output_path: Path, *, min_duration_seconds: float = 0.5) -> float:
     try:
         with wave.open(str(output_path), "rb") as wav_file:

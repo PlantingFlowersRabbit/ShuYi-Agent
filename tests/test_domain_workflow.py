@@ -10,6 +10,7 @@ from backend.app.domain.audio import (
     VoiceJob,
     build_tts_request,
     model_control_note,
+    synthesize_voice_design_qwen3,
     validate_wav_duration,
 )
 from backend.app.domain.llm import OpenAICompatibleSegmentationClient, build_segmentation_messages
@@ -583,15 +584,25 @@ def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync():
     assert created["voice_id"] not in remaining_ids
 
 
-def test_fastapi_v0_14_generated_voice_preview_then_explicit_save(tmp_path):
-    """Covers v0.14 generated voice preview, progress-ready audio URL, and explicit save boundary."""
+def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substitute(tmp_path):
+    """Covers v0.141 generated voice preview using VoiceDesign when the service supports it."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     from backend.app.api import app as app_module
     from backend.app.api.app import create_app
 
-    with patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path):
+    calls = []
+
+    def fake_voice_design(request, *, output_path, service_base_url=None):
+        calls.append({"request": request, "output_path": output_path, "service_base_url": service_base_url})
+        write_valid_wav(output_path)
+        return 0.75
+
+    with (
+        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "synthesize_voice_design_qwen3", fake_voice_design),
+    ):
         client = TestClient(create_app())
         before_count = len(client.get("/api/voice-resources").json()["voices"])
         generated = client.post(
@@ -612,7 +623,10 @@ def test_fastapi_v0_14_generated_voice_preview_then_explicit_save(tmp_path):
         assert voice["reference_text"] == "这是一段用于试听新音色的语音。"
         assert voice["reference_audio_path"].endswith(".wav")
         assert data["audio_url"].startswith("/outputs/audio/")
-        assert data["generation_note"]
+        assert data["generation_status"] == "succeeded"
+        assert "VoiceDesign" in data["generation_note"]
+        assert calls[0]["request"]["input"] == "这是一段用于试听新音色的语音。"
+        assert calls[0]["request"]["instruct"] == "沉稳、叙事、颗粒感轻"
         assert before_count == after_generate_count
 
         saved = client.post(
@@ -627,6 +641,80 @@ def test_fastapi_v0_14_generated_voice_preview_then_explicit_save(tmp_path):
         )
         assert saved.status_code == 200
         assert len(saved.json()["voices"]) == before_count + 1
+
+
+def test_fastapi_v0_141_generated_voice_substitute_explains_required_model(tmp_path):
+    """Covers v0.141 fallback explanation when VoiceDesign is unavailable."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    def unavailable_voice_design(request, *, output_path, service_base_url=None):
+        raise TTSServiceError("voice design endpoint unavailable")
+
+    with (
+        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "synthesize_voice_design_qwen3", unavailable_voice_design),
+    ):
+        client = TestClient(create_app())
+        generated = client.post(
+            "/api/voice-resources/generate",
+            json={
+                "name": "生成旁白",
+                "description": "沉稳、叙事、颗粒感轻",
+                "reference_text": "这是一段用于试听新音色的语音。",
+            },
+        )
+
+    assert generated.status_code == 200
+    data = generated.json()
+    assert data["generation_status"] == "substitute"
+    assert "没有成功调用 VoiceDesign 模型" in data["generation_note"]
+    assert "Qwen3-TTS-12Hz-1.7B-VoiceDesign" in data["model_requirement"]
+    assert validate_wav_duration(Path(data["voice"]["reference_audio_path"])) == 0.75
+
+
+def test_voice_design_request_uses_qwen_endpoint_when_available(tmp_path):
+    """Covers v0.141 VoiceDesign model request shape."""
+    audio_bytes = tmp_path / "design.wav"
+    write_valid_wav(audio_bytes)
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return audio_bytes.read_bytes()
+
+    def fake_urlopen(request, timeout=120):
+        captured["url"] = request.full_url
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    with patch("backend.app.domain.audio.urllib.request.urlopen", fake_urlopen):
+        output = tmp_path / "preview.wav"
+        duration = synthesize_voice_design_qwen3(
+            {
+                "input": "这是一段用于试听新音色的语音。",
+                "instruct": "沉稳、叙事、颗粒感轻",
+                "language": "Chinese",
+                "response_format": "wav",
+            },
+            output_path=output,
+            service_base_url="http://127.0.0.1:7811",
+        )
+
+    assert duration == 0.75
+    assert captured["url"] == "http://127.0.0.1:7811/v1/audio/voice-design"
+    assert captured["payload"]["input"] == "这是一段用于试听新音色的语音。"
+    assert captured["payload"]["instruct"] == "沉稳、叙事、颗粒感轻"
 
 
 def test_fastapi_v0_14_reference_audio_upload_saves_local_file(tmp_path):

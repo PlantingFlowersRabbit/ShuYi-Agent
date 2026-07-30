@@ -825,21 +825,32 @@ function App() {
     }
   }
 
-  async function saveVoiceResource(payload: Partial<VoiceResource>) {
-    const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/api/voice-resources", {
-      method: "POST",
-      body: JSON.stringify(toApiVoice(payload)),
-    });
-    setVoices(data.voices.map(fromApiVoice));
-    setApiStatus(`音色已保存：${data.voice.name}`);
+  async function saveVoiceResource(payload: Partial<VoiceResource>): Promise<boolean> {
+    try {
+      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/api/voice-resources", {
+        method: "POST",
+        body: JSON.stringify(toApiVoice(payload)),
+      });
+      setVoices(data.voices.map(fromApiVoice));
+      setApiStatus(`保存音色成功：${data.voice.name}`);
+      return true;
+    } catch (error) {
+      setApiStatus(`保存音色失败：${String(error)}`);
+      return false;
+    }
   }
 
   async function updateVoiceResource(voice: VoiceResource) {
-    const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/api/voice-resources/${voice.voiceId}`, {
-      method: "PATCH",
-      body: JSON.stringify(toApiVoice(voice)),
-    });
-    setVoices(data.voices.map(fromApiVoice));
+    try {
+      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>(`/api/voice-resources/${voice.voiceId}`, {
+        method: "PATCH",
+        body: JSON.stringify(toApiVoice(voice)),
+      });
+      setVoices(data.voices.map(fromApiVoice));
+      setApiStatus(`保存音色成功：${data.voice.name}`);
+    } catch (error) {
+      setApiStatus(`保存音色失败：${String(error)}`);
+    }
   }
 
   async function handleReferenceAudioFile(event: ChangeEvent<HTMLInputElement>) {
@@ -866,21 +877,34 @@ function App() {
   async function generateVoiceResource() {
     setGeneratedVoiceProgress(12);
     setApiStatus("正在根据音色描述生成试听音色");
-    const data = await requestJson<{ voice: ApiVoiceResource; audio_url: string; generation_note: string }>(
-      "/api/voice-resources/generate",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          name: generatedVoice.name,
-          description: generatedVoice.description,
-          reference_text: generatedVoice.referenceText || DEFAULT_GENERATED_VOICE_TEXT,
-        }),
-      },
-    );
-    setGeneratedVoiceProgress(100);
-    setGeneratedVoicePreview(fromApiVoice(data.voice));
-    setGeneratedVoicePreviewUrl(data.audio_url);
-    setApiStatus(`试听生成音色已完成：${data.voice.name}；满意后点击保存音色`);
+    try {
+      const data = await requestJson<{
+        voice: ApiVoiceResource;
+        audio_url: string;
+        generation_status: "succeeded" | "substitute";
+        generation_note: string;
+        model_requirement?: string | null;
+      }>(
+        "/api/voice-resources/generate",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: generatedVoice.name,
+            description: generatedVoice.description,
+            reference_text: generatedVoice.referenceText || DEFAULT_GENERATED_VOICE_TEXT,
+          }),
+        },
+      );
+      setGeneratedVoiceProgress(100);
+      setGeneratedVoicePreview(fromApiVoice(data.voice));
+      setGeneratedVoicePreviewUrl(data.audio_url);
+      const requirement = data.model_requirement ? `；${data.model_requirement}` : "";
+      const prefix = data.generation_status === "substitute" ? "生成音色使用占位预览" : "生成音色成功";
+      setApiStatus(`${prefix}：${data.generation_note}${requirement}`);
+    } catch (error) {
+      setGeneratedVoiceProgress(100);
+      setApiStatus(`生成音色失败：${String(error)}`);
+    }
   }
 
   async function saveGeneratedVoiceResource() {
@@ -888,61 +912,88 @@ function App() {
       setApiStatus("请先点击生成音色并试听结果");
       return;
     }
-    await saveVoiceResource(generatedVoicePreview);
-    setGeneratedVoicePreview(null);
-    setGeneratedVoicePreviewUrl("");
-    setGeneratedVoiceProgress(0);
+    if (await saveVoiceResource(generatedVoicePreview)) {
+      setGeneratedVoicePreview(null);
+      setGeneratedVoicePreviewUrl("");
+      setGeneratedVoiceProgress(0);
+    }
   }
 
   async function deleteSelectedVoices() {
-    let remaining = voices;
-    for (const voice of voices.filter((item) => selectedVoiceIds[item.voiceId])) {
-      const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/api/voice-resources/${voice.voiceId}`, {
-        method: "DELETE",
-      });
-      remaining = data.voices.map(fromApiVoice);
+    const selected = voices.filter((item) => selectedVoiceIds[item.voiceId]);
+    if (selected.length === 0) {
+      setApiStatus("删除选中音色失败：请先勾选至少一个音色");
+      return;
     }
-    setVoices(remaining);
-    setSelectedVoiceIds({});
+    try {
+      let remaining = voices;
+      for (const voice of selected) {
+        const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/api/voice-resources/${voice.voiceId}`, {
+          method: "DELETE",
+        });
+        remaining = data.voices.map(fromApiVoice);
+      }
+      setVoices(remaining);
+      setSelectedVoiceIds({});
+      setApiStatus(`删除选中音色成功：${selected.length} 个`);
+    } catch (error) {
+      setApiStatus(`删除选中音色失败：${String(error)}`);
+    }
   }
 
   async function saveRemoteModelConfig() {
-    const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
-      method: "PATCH",
-      body: JSON.stringify({ llm: modelConfig.llm }),
-    });
-    setModelConfig(normalizeModelConfig(data.config));
-    setApiStatus("远端模型配置保存成功");
+    try {
+      const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
+        method: "PATCH",
+        body: JSON.stringify({ llm: modelConfig.llm }),
+      });
+      setModelConfig(normalizeModelConfig(data.config));
+      setApiStatus("远端模型配置保存成功");
+    } catch (error) {
+      setApiStatus(`远端模型配置保存失败：${String(error)}`);
+    }
   }
 
   async function saveLocalModelConfig() {
-    const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
-      method: "PATCH",
-      body: JSON.stringify({ tts: modelConfig.tts }),
-    });
-    setModelConfig(normalizeModelConfig(data.config));
-    setApiStatus("本地模型配置保存成功");
+    try {
+      const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
+        method: "PATCH",
+        body: JSON.stringify({ tts: modelConfig.tts }),
+      });
+      setModelConfig(normalizeModelConfig(data.config));
+      setApiStatus("本地模型配置保存成功");
+    } catch (error) {
+      setApiStatus(`本地模型配置保存失败：${String(error)}`);
+    }
   }
 
   async function testRemoteModelLink() {
-    const data = await requestJson<{ message: string }>("/api/model-config/llm/test", {
-      method: "POST",
-      body: JSON.stringify({ llm: modelConfig.llm }),
-    });
-    setApiStatus(data.message || "远端模型连接成功");
+    try {
+      const data = await requestJson<{ message: string }>("/api/model-config/llm/test", {
+        method: "POST",
+        body: JSON.stringify({ llm: modelConfig.llm }),
+      });
+      setApiStatus(data.message || "远端模型连接成功");
+    } catch (error) {
+      setApiStatus(`测试链接失败：${String(error)}`);
+    }
   }
 
   async function startLocalTtsService() {
-    const data = await requestJson<{ message: string }>("/api/model-config/tts/start", {
-      method: "POST",
-      body: JSON.stringify({ tts: modelConfig.tts }),
-    });
-    setApiStatus(data.message || "本地 TTS 服务启动成功");
+    try {
+      const data = await requestJson<{ message: string }>("/api/model-config/tts/start", {
+        method: "POST",
+        body: JSON.stringify({ tts: modelConfig.tts }),
+      });
+      setApiStatus(data.message || "本地 TTS 服务启动成功");
+    } catch (error) {
+      setApiStatus(`启动服务失败：${String(error)}`);
+    }
   }
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.14 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.141 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1168,6 +1219,7 @@ function App() {
                                   }
                                 />
                                 仅使用声纹
+                                <small>只使用从参考音频提取的说话人声纹 embedding，尽量忽略参考音频里的情绪和语调。</small>
                               </label>
                               <label>
                                 语速
@@ -1240,6 +1292,7 @@ function App() {
       <main className="library-page">
         <section className="panel">
           <div className="section-title">音色资源库列表</div>
+          <small className="status-message" aria-label="音色资源库反馈">{apiStatus}</small>
           <div className="voice-grid">
             {voices.map((voice) => (
               <article className="voice-card" key={voice.voiceId}>
@@ -1355,6 +1408,10 @@ function App() {
 
           <div className="panel">
             <div className="section-title">生成资源到资源库列表</div>
+            <small>
+              当前 Base 模型不会凭描述生成新音色；若返回占位预览，请下载并启动 Qwen3-TTS-12Hz-1.7B-VoiceDesign。
+              没有成功调用 VoiceDesign 模型时，会显示模型需求并播放本地占位预览。
+            </small>
             <input
               placeholder="音色名称"
               value={generatedVoice.name}
@@ -1394,6 +1451,7 @@ function App() {
       <main className="model-page">
         <section className="panel">
           <div className="section-title">远端模型</div>
+          <small className="status-message" aria-label="模型配置反馈">{apiStatus}</small>
           <label>
             Base URL
             <input
@@ -1468,7 +1526,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.14</h1>
+        <h1>NovelVoice-Agent v0.141</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

@@ -114,6 +114,32 @@ async def speech_json(payload: dict):
             pass
 
 
+@app.post("/v1/audio/voice-design")
+async def voice_design_json(payload: dict):
+    text = payload.get("input", "")
+    instruct = payload.get("instruct") or payload.get("design_prompt") or ""
+    language = payload.get("language", "Chinese")
+    response_format = payload.get("response_format", "wav")
+    if not text or not instruct:
+        raise HTTPException(status_code=400, detail="input and instruct are required")
+
+    try:
+        wavs, sr = await asyncio.to_thread(
+            model.generate_voice_design,
+            text=text,
+            language=language,
+            instruct=instruct,
+        )
+        return encode_audio_response(wavs[0], sr, response_format)
+    except AttributeError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail="loaded Qwen3-TTS model does not provide generate_voice_design; use Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 def encode_audio_response(wav, sr, response_format: str) -> Response:
     fmt = response_format.lower()
     if fmt not in {"wav", "flac", "ogg"}:
