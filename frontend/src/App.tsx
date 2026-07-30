@@ -11,6 +11,24 @@ type Chapter = {
   bodyEnd?: number;
 };
 
+type ChapterHeadingMatch = {
+  index: number;
+  text: string;
+  title: string;
+};
+
+type UploadedNovelFile = {
+  filename: string;
+  contentBase64: string;
+  kind: "epub";
+};
+
+type NovelFileUpload = {
+  text: string;
+  preview: string;
+  uploadedFile: UploadedNovelFile | null;
+};
+
 type ApiChapter = {
   chapter_id: string;
   title: string;
@@ -213,29 +231,113 @@ function makeNovelPreview(text: string): string {
   return `${trimmed.slice(0, MAX_NOVEL_PREVIEW_CHARS)}\n\n……仅展示开头预览，完整小说已保留用于章节划分。`;
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return window.btoa(binary);
+}
+
+async function decodeNovelTextFile(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  return decodeNovelTextBuffer(buffer);
+}
+
+function decodeNovelTextBuffer(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    const legacyChineseDecoders = [
+      new TextDecoder("gb18030"),
+      new TextDecoder("gbk"),
+      new TextDecoder("big5"),
+    ];
+    for (const decoder of legacyChineseDecoders) {
+      try {
+        return decoder.decode(bytes);
+      } catch {
+        // Try the next legacy Chinese encoding supported by the browser.
+      }
+    }
+  }
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+async function readNovelFileUpload(file: File): Promise<NovelFileUpload> {
+  const buffer = await file.arrayBuffer();
+  const isEpub = file.name.toLowerCase().endsWith(".epub") || file.type === "application/epub+zip";
+  if (isEpub) {
+    return {
+      text: "",
+      preview: `已上传 EPUB：${file.name}\n\n点击“AI章节划分”后将由后端解析 EPUB 目录和正文。`,
+      uploadedFile: {
+        filename: file.name,
+        contentBase64: arrayBufferToBase64(buffer),
+        kind: "epub",
+      },
+    };
+  }
+  const text = decodeNovelTextBuffer(buffer);
+  return { text, preview: makeNovelPreview(text), uploadedFile: null };
+}
+
+function findChapterHeadingMatches(text: string): ChapterHeadingMatch[] {
+  const headingPatterns = [
+    /^[ \t]*((?:第[一二三四五六七八九十百千万零〇两\d]+[章节回][^\n\r]{0,80}))\r?$/gm,
+    /^[ \t]*((?:第[一二三四五六七八九十百千万零〇两\d]+[卷部篇][ \t　]+[^\n\r]{1,80}))\r?$/gm,
+    /^[ \t]*(\d{1,4}[.．、](?!\d|[0-9]*[%％])[^\n\r]{0,60})\r?$/gm,
+  ];
+  const candidates: ChapterHeadingMatch[][] = [];
+  for (const pattern of headingPatterns) {
+    const matches = Array.from(text.matchAll(pattern)).map((match) => ({
+      index: match.index ?? 0,
+      text: match[0],
+      title: match[1].trim(),
+    }));
+    if (matches.length > 0) candidates.push(matches);
+  }
+  return candidates.sort((left, right) => compareChapterHeadingMatches(text, right, left))[0] ?? [];
+}
+
+function compareChapterHeadingMatches(text: string, left: ChapterHeadingMatch[], right: ChapterHeadingMatch[]): number {
+  const leftScore = chapterHeadingScore(text, left);
+  const rightScore = chapterHeadingScore(text, right);
+  return leftScore[0] - rightScore[0] || leftScore[1] - rightScore[1] || leftScore[2] - rightScore[2];
+}
+
+function chapterHeadingScore(text: string, matches: ChapterHeadingMatch[]): [number, number, number] {
+  const nonEmptyBodies = matches.filter((match, index) => {
+    const next = matches[index + 1];
+    const body = text.slice(match.index + match.text.length, next?.index ?? text.length).trim();
+    return body.length > 0;
+  }).length;
+  const firstIndex = matches[0]?.index ?? text.length;
+  return [nonEmptyBodies, matches.length, -firstIndex];
+}
+
 function parseChapters(text: string): Chapter[] {
-  const headingPattern =
-    /^[ \t]*((?:第[一二三四五六七八九十百千万零〇两\d]+[章节回][^\n\r]*)|(?:\d+[.．、][^\n\r]*))$/gm;
-  const matches = Array.from(text.matchAll(headingPattern));
+  const matches = findChapterHeadingMatches(text);
   if (matches.length === 0) {
     return text.trim() ? [{ chapterId: "chapter-0001", title: "未分章正文", body: text.trim() }] : [];
   }
   return matches.map((match, index) => {
     const next = matches[index + 1];
-    const bodyStart = (match.index ?? 0) + match[0].length;
+    const bodyStart = match.index + match.text.length;
     const bodyEnd = next?.index ?? text.length;
     return {
       chapterId: `chapter-${String(index + 1).padStart(4, "0")}`,
-      title: match[1].trim(),
+      title: match.title,
       body: text.slice(bodyStart, bodyEnd).replace(/^-{3,}\s*/, "").trim(),
     };
   });
 }
 
 function parseChapterIndex(text: string): Chapter[] {
-  const headingPattern =
-    /^[ \t]*((?:第[一二三四五六七八九十百千万零〇两\d]+[章节回][^\n\r]*)|(?:\d+[.．、][^\n\r]*))$/gm;
-  const matches = Array.from(text.matchAll(headingPattern));
+  const matches = findChapterHeadingMatches(text);
   if (matches.length === 0) {
     const stripped = text.trim();
     return stripped
@@ -246,9 +348,9 @@ function parseChapterIndex(text: string): Chapter[] {
     const next = matches[index + 1];
     return {
       chapterId: `chapter-${String(index + 1).padStart(4, "0")}`,
-      title: match[1].trim(),
+      title: match.title,
       body: "",
-      bodyStart: (match.index ?? 0) + match[0].length,
+      bodyStart: match.index + match.text.length,
       bodyEnd: next?.index ?? text.length,
     };
   });
@@ -491,6 +593,7 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const voiceAudioInputRef = useRef<HTMLInputElement>(null);
   const fullNovelTextRef = useRef(sampleNovel);
+  const uploadedNovelFileRef = useRef<UploadedNovelFile | null>(null);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState(() => makeNovelPreview(sampleNovel));
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -579,9 +682,10 @@ function App() {
     if (!file) return;
     setUploadProgress(8);
     setApiStatus(`正在读取小说：${file.name}`);
-    const text = await file.text();
-    fullNovelTextRef.current = text;
-    setNovelPreview(makeNovelPreview(text));
+    const upload = await readNovelFileUpload(file);
+    fullNovelTextRef.current = upload.text;
+    uploadedNovelFileRef.current = upload.uploadedFile;
+    setNovelPreview(upload.preview);
     setChapters([]);
     setActiveChapterId("");
     setParagraphs([]);
@@ -599,10 +703,19 @@ function App() {
     setChapterSplitProgress(12);
     setApiStatus("AI章节划分智能体正在检查可复用脚本");
     try {
-      const data = await requestJson<ApiChapterSplitResponse>("/api/novels/ai-chapter-split", {
-        method: "POST",
-        body: JSON.stringify({ text: fullNovelTextRef.current }),
-      });
+      const uploadedFile = uploadedNovelFileRef.current;
+      const data = uploadedFile
+        ? await requestJson<ApiChapterSplitResponse>("/api/novels/ai-chapter-split-file", {
+            method: "POST",
+            body: JSON.stringify({
+              filename: uploadedFile.filename,
+              content_base64: uploadedFile.contentBase64,
+            }),
+          })
+        : await requestJson<ApiChapterSplitResponse>("/api/novels/ai-chapter-split", {
+            method: "POST",
+            body: JSON.stringify({ text: fullNovelTextRef.current }),
+          });
       setChapterSplitProgress(84);
       const parsed = data.chapters.map(fromApiChapter);
       const scriptName = data.agent.script_path?.split(/[\\/]/).pop() ?? "未记录脚本";
@@ -1087,7 +1200,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.20 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.22 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1104,7 +1217,7 @@ function App() {
               className="hidden-input"
               aria-label="上传小说"
               type="file"
-              accept=".txt,text/plain"
+              accept=".txt,.epub,text/plain,application/epub+zip"
               onChange={handleTxtFile}
             />
             <ProgressBar label="上传小说进度" value={uploadProgress} />
@@ -1678,7 +1791,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.20</h1>
+        <h1>NovelVoice-Agent v0.22</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

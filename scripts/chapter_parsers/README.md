@@ -1,6 +1,6 @@
 # Chapter Parser Scripts
 
-v0.20 AI章节划分智能体会先执行本目录中的 `*.py` 脚本。脚本从 stdin 读取完整 txt 小说，并输出：
+v0.22 AI章节划分智能体会先执行本目录中的 `*.py` 脚本。脚本从 stdin 读取完整小说文本（TXT 或 EPUB 提取后的文本），并输出：
 
 ```json
 {"chapters":[{"chapter_id":"chapter-0001","title":"章节标题","body":"章节正文"}]}

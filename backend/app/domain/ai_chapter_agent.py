@@ -291,7 +291,10 @@ class AiChapterSplitAgent:
         trace: list[str] = []
         failed_attempts: list[str] = []
 
-        scripts = sorted(path for path in self.scripts_dir.glob("*.py") if path.is_file())
+        scripts = sorted(
+            (path for path in self.scripts_dir.glob("*.py") if path.is_file()),
+            key=lambda path: (path.name.startswith("agent_generated_"), path.name),
+        )
         for script_path in scripts:
             chapters, error = self._run_script(script_path, text)
             if error:

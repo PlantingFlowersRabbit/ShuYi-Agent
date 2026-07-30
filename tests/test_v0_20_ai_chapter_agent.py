@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import pytest
+
+VOLUME_STYLE_TEXT = """第一卷 KEYWORDS
+卷首说明。
+第四节课发生了些许事件。
+
+第一卷 插图
+
+第一卷 日本的社会结构
+社会结构正文。
+
+第一卷 欢迎来到梦幻般的校园生活
+校园生活正文。
+""".replace("\n", "\r\n")
 
 BOOK_STYLE_TEXT = """Book 1: Arrival
 The door opened.
@@ -56,6 +72,37 @@ print(json.dumps({"chapters": chapters}, ensure_ascii=False))
     assert result.script_path and result.script_path.name == "book_style.py"
     assert [chapter.title for chapter in result.chapters] == ["Book 1: Arrival", "Book 2: Departure"]
     assert result.validation.ok is True
+
+
+def test_v0_20_default_parser_handles_repeated_volume_title_headings_first(tmp_path):
+    """The curated parser covers 1973-style 第X卷 title headings before bad generated scripts."""
+    from backend.app.domain.ai_chapter_agent import AiChapterSplitAgent, ChapterSplitSkill
+
+    scripts_dir = tmp_path / "chapter_parsers"
+    scripts_dir.mkdir()
+    parser_source = Path(__file__).resolve().parents[1] / "scripts/chapter_parsers/chinese_numeric_headings.py"
+    shutil.copy(parser_source, scripts_dir / "chinese_numeric_headings.py")
+    (scripts_dir / "agent_generated_bad.py").write_text(
+        """import json
+print(json.dumps({"chapters": []}, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+
+    class ExplodingSkill(ChapterSplitSkill):
+        def create_parser_script(self, *args, **kwargs):  # pragma: no cover - must not run.
+            raise AssertionError("curated parser should handle volume headings")
+
+    result = AiChapterSplitAgent(scripts_dir=scripts_dir, skill=ExplodingSkill()).split(VOLUME_STYLE_TEXT)
+
+    assert result.status == "script_reused"
+    assert result.script_path and result.script_path.name == "chinese_numeric_headings.py"
+    assert result.trace == ["chinese_numeric_headings.py reused"]
+    assert [chapter.title for chapter in result.chapters] == [
+        "第一卷 KEYWORDS",
+        "第一卷 日本的社会结构",
+        "第一卷 欢迎来到梦幻般的校园生活",
+    ]
 
 
 def test_v0_20_agent_reflects_and_saves_new_script_when_existing_script_fails(tmp_path):

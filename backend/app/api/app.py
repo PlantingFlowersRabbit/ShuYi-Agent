@@ -28,6 +28,7 @@ from backend.app.domain.audio import (
 )
 from backend.app.domain.llm import MissingProviderCredential, OpenAICompatibleSegmentationClient
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
+from backend.app.domain.novel_files import NovelFileError, extract_novel_file
 from backend.app.domain.providers import default_provider_registry
 from backend.app.domain.roles import RoleCard, RoleCollection, default_role_cards
 from backend.app.domain.segmentation import repair_json_output_once, validate_segmentation_result
@@ -115,7 +116,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.20 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.22 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
@@ -149,42 +150,24 @@ def create_app() -> FastAPI:
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
             raise HTTPException(status_code=400, detail="text is required")
-        provider = _chapter_agent_provider_from_config(app)
-        skill = ChapterSplitSkill(
-            provider=provider,
-            api_key_lookup=_chapter_agent_api_key_lookup_from_config(app),
-        )
-        agent = AiChapterSplitAgent(scripts_dir=CHAPTER_PARSER_SCRIPT_DIR, skill=skill)
-        try:
-            result = await asyncio.to_thread(agent.split, text)
-        except MissingProviderCredential as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"AI chapter split failed: {exc}") from exc
-        if not result.validation.ok:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": "AI chapter split validation failed",
-                    "errors": result.validation.errors,
-                    "trace": result.trace,
-                },
-            )
+        return await _run_ai_chapter_split(app, text)
 
-        state = _state(app)
-        state["chapters"] = result.chapters
-        state["workbenches"] = {
-            chapter.chapter_id: ChapterWorkbench.from_chapter(chapter) for chapter in result.chapters
-        }
-        return {
-            "chapters": [_chapter_to_dict(chapter) for chapter in result.chapters],
-            "agent": {
-                "status": result.status,
-                "script_path": str(result.script_path) if result.script_path else None,
-                "trace": result.trace,
-                "validation_errors": result.validation.errors,
-            },
-        }
+    @app.post("/api/novels/ai-chapter-split-file")
+    async def ai_chapter_split_file(payload: dict[str, Any]) -> dict[str, Any]:
+        filename = str(payload.get("filename") or "").strip()
+        content_base64 = payload.get("content_base64")
+        if not filename:
+            raise HTTPException(status_code=400, detail="filename is required")
+        if not isinstance(content_base64, str) or not content_base64.strip():
+            raise HTTPException(status_code=400, detail="content_base64 is required")
+        try:
+            data = base64.b64decode(content_base64, validate=True)
+            extracted = extract_novel_file(filename=filename, data=data)
+        except (ValueError, NovelFileError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        response = await _run_ai_chapter_split(app, extracted.text)
+        response["source"] = {"filename": filename, "kind": extracted.kind}
+        return response
 
     @app.get("/api/chapters")
     async def list_chapters() -> dict[str, Any]:
@@ -587,6 +570,45 @@ def create_app() -> FastAPI:
         }
 
     return app
+
+
+async def _run_ai_chapter_split(app: FastAPI, text: str) -> dict[str, Any]:
+    provider = _chapter_agent_provider_from_config(app)
+    skill = ChapterSplitSkill(
+        provider=provider,
+        api_key_lookup=_chapter_agent_api_key_lookup_from_config(app),
+    )
+    agent = AiChapterSplitAgent(scripts_dir=CHAPTER_PARSER_SCRIPT_DIR, skill=skill)
+    try:
+        result = await asyncio.to_thread(agent.split, text)
+    except MissingProviderCredential as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AI chapter split failed: {exc}") from exc
+    if not result.validation.ok:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "AI chapter split validation failed",
+                "errors": result.validation.errors,
+                "trace": result.trace,
+            },
+        )
+
+    state = _state(app)
+    state["chapters"] = result.chapters
+    state["workbenches"] = {
+        chapter.chapter_id: ChapterWorkbench.from_chapter(chapter) for chapter in result.chapters
+    }
+    return {
+        "chapters": [_chapter_to_dict(chapter) for chapter in result.chapters],
+        "agent": {
+            "status": result.status,
+            "script_path": str(result.script_path) if result.script_path else None,
+            "trace": result.trace,
+            "validation_errors": result.validation.errors,
+        },
+    }
 
 
 def _write_substitute_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> float:
