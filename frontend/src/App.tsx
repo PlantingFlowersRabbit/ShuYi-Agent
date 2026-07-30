@@ -148,6 +148,11 @@ type ModelConfig = {
   };
 };
 
+type LocalTtsStartResponse = {
+  message: string;
+  progress?: number;
+};
+
 const sampleNovel = `1.变成蘑菇的公爵千金
 “放开我！你们是谁？快放开我！”
 
@@ -627,6 +632,8 @@ function App() {
   const [segmentationProgress, setSegmentationProgress] = useState(0);
   const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
+  const [localTtsStartProgress, setLocalTtsStartProgress] = useState(0);
+  const [localTtsStarting, setLocalTtsStarting] = useState(false);
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
@@ -1187,20 +1194,34 @@ function App() {
   }
 
   async function startLocalTtsService() {
+    if (localTtsStarting) return;
+    setLocalTtsStarting(true);
+    setLocalTtsStartProgress(8);
+    setApiStatus("正在启动本地 TTS 服务并加载 Base/VoiceDesign 模型");
+    let currentProgress = 8;
+    const progressTimer = window.setInterval(() => {
+      currentProgress = Math.min(95, currentProgress + (currentProgress < 60 ? 7 : 3));
+      setLocalTtsStartProgress(currentProgress);
+    }, 1000);
     try {
-      const data = await requestJson<{ message: string }>("/api/model-config/tts/start", {
+      const data = await requestJson<LocalTtsStartResponse>("/api/model-config/tts/start", {
         method: "POST",
         body: JSON.stringify({ tts: modelConfig.tts }),
       });
-      setApiStatus(data.message || "本地 TTS 服务启动成功");
+      setLocalTtsStartProgress(data.progress ?? 100);
+      setApiStatus(data.message || "本地 TTS 服务启动成功，模型加载完成");
     } catch (error) {
+      setLocalTtsStartProgress(100);
       setApiStatus(`启动服务失败：${String(error)}`);
+    } finally {
+      window.clearInterval(progressTimer);
+      setLocalTtsStarting(false);
     }
   }
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.22 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.23 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1733,10 +1754,11 @@ function App() {
             <button className="tool-button teal" type="button" onClick={() => void saveLocalModelConfig()}>
               保存模型配置
             </button>
-            <button className="tool-button purple" type="button" onClick={() => void startLocalTtsService()}>
-              启动服务
+            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void startLocalTtsService()}>
+              {localTtsStarting ? "启动中" : "启动服务"}
             </button>
           </div>
+          <ProgressBar label="启动服务进度" value={localTtsStartProgress} />
         </section>
 
         <section className="panel">
@@ -1791,7 +1813,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.22</h1>
+        <h1>NovelVoice-Agent v0.23</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

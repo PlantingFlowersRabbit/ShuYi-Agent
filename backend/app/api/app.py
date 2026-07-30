@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 import wave
 from dataclasses import asdict
@@ -48,6 +51,7 @@ REAL_VOICE_ROOT = Path(os.environ.get("NOVELVOICE_REAL_VOICE_ROOT", "/Users/gaoj
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base"
 DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 
 
 def _chapter_to_dict(chapter: Chapter) -> dict[str, Any]:
@@ -116,7 +120,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.22 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.23 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
@@ -461,12 +465,40 @@ def create_app() -> FastAPI:
         if not model_path:
             raise HTTPException(status_code=400, detail="model_path is required")
         voice_design_model_path = str(config.get("voice_design_model_path") or "").strip()
+        base_url = str(config.get("base_url") or "http://127.0.0.1:7811")
+        _state(app)["model_config"]["tts"] = config
         current = _state(app).get("tts_process")
         if current is not None and current.poll() is None:
-            return {"ok": True, "message": "本地 TTS 服务已在运行", "pid": current.pid}
+            try:
+                health = await asyncio.to_thread(_wait_for_tts_ready, current, base_url)
+            except TimeoutError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except RuntimeError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            return {
+                "ok": True,
+                "message": "本地 TTS 服务已在运行，模型加载完成，VoiceDesign 已就绪",
+                "pid": current.pid,
+                "health": health,
+                "progress": 100,
+            }
 
         python_bin = os.environ.get("QWEN3_TTS_PYTHON", sys.executable)
-        base_url = str(config.get("base_url") or "http://127.0.0.1:7811")
+        current_health = await asyncio.to_thread(_fetch_tts_health, base_url)
+        if _is_tts_ready(current_health):
+            return {
+                "ok": True,
+                "message": "本地 TTS 服务已在运行，模型加载完成，VoiceDesign 已就绪",
+                "pid": None,
+                "health": current_health,
+                "progress": 100,
+            }
+        if current_health.get("reachable"):
+            raise HTTPException(
+                status_code=503,
+                detail=_format_tts_not_ready_message(current_health),
+            )
+
         port = _port_from_base_url(base_url)
         command = [
             python_bin,
@@ -487,10 +519,18 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"本地 TTS 服务启动失败：{exc}") from exc
         _state(app)["tts_process"] = process
+        try:
+            health = await asyncio.to_thread(_wait_for_tts_ready, process, base_url)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {
             "ok": True,
-            "message": "本地 TTS 服务启动成功，模型可能仍在加载",
+            "message": "本地 TTS 服务启动成功，模型加载完成，VoiceDesign 已就绪",
             "pid": process.pid,
+            "health": health,
+            "progress": 100,
         }
 
     @app.post("/api/utterances/{utterance_id}/speech")
@@ -706,6 +746,84 @@ def _test_models_endpoint(request: urllib.request.Request) -> None:
 
 def _start_tts_process(command: list[str]) -> subprocess.Popen:
     return subprocess.Popen(command, cwd=str(ROOT))
+
+
+def _tts_startup_timeout_seconds() -> float:
+    raw_value = os.environ.get("NOVELVOICE_TTS_STARTUP_TIMEOUT_SECONDS", "")
+    if not raw_value:
+        return DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS
+    try:
+        return max(0.01, float(raw_value))
+    except ValueError:
+        return DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS
+
+
+def _tts_root_url(base_url: str) -> str:
+    root = base_url.rstrip("/")
+    return root.removesuffix("/v1")
+
+
+def _fetch_tts_health(base_url: str) -> dict[str, Any]:
+    health_url = f"{_tts_root_url(base_url)}/health"
+    request = urllib.request.Request(health_url, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return {
+            "reachable": False,
+            "ready": False,
+            "error": str(exc),
+            "health_url": health_url,
+        }
+    if not isinstance(payload, dict):
+        payload = {"raw": payload}
+    return {
+        **payload,
+        "reachable": True,
+        "ready": _is_tts_ready(payload),
+        "health_url": health_url,
+    }
+
+
+def _is_tts_ready(health: dict[str, Any]) -> bool:
+    return (
+        bool(health.get("ok"))
+        and bool(health.get("voice_clone"))
+        and bool(health.get("voice_design"))
+        and bool(health.get("voice_design_capable"))
+    )
+
+
+def _format_tts_not_ready_message(health: dict[str, Any]) -> str:
+    if health.get("reachable"):
+        return (
+            "本地 TTS 服务尚未完成启动：模型加载未完成或 VoiceDesign 模型未就绪；"
+            "请确认 Qwen3-TTS-12Hz-1.7B-VoiceDesign 权重路径正确，并等待启动进度完成。"
+        )
+    return (
+        "本地 TTS 服务尚未完成启动：模型加载仍在进行或服务端口暂未响应；"
+        f"最近一次健康检查错误：{health.get('error', 'unknown')}"
+    )
+
+
+def _wait_for_tts_ready(
+    process: subprocess.Popen | None,
+    base_url: str,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    timeout = _tts_startup_timeout_seconds() if timeout_seconds is None else timeout_seconds
+    deadline = time.monotonic() + timeout
+    last_health: dict[str, Any] = {"reachable": False, "error": "health check has not run"}
+    while True:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(f"本地 TTS 服务启动失败：进程已退出，退出码 {process.poll()}")
+        last_health = _fetch_tts_health(base_url)
+        if _is_tts_ready(last_health):
+            return last_health
+        if time.monotonic() >= deadline:
+            raise TimeoutError(_format_tts_not_ready_message(last_health))
+        time.sleep(min(1.0, max(0.01, deadline - time.monotonic())))
 
 
 def _role_payload_with_resource(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:

@@ -1,3 +1,5 @@
+import asyncio
+import base64
 import json
 import sys
 import types
@@ -560,6 +562,44 @@ def test_v0_12_voice_clone_request_keeps_controls_out_of_qwen_payload(tmp_path):
     assert "volume" not in captured["payload"]
 
 
+def test_synthesize_local_qwen3_preserves_reference_audio_suffix_for_json_clone(tmp_path):
+    """Covers v0.23 MP3 reference audio going through the JSON voice-clone path."""
+    reference_audio = tmp_path / "reference.mp3"
+    reference_audio.write_bytes(b"ID3 fake mp3 bytes")
+    service_audio = tmp_path / "service.wav"
+    write_valid_wav(service_audio)
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return service_audio.read_bytes()
+
+    def fake_urlopen(http_request, timeout=120):
+        captured["payload"] = json.loads(http_request.data.decode("utf-8"))
+        return FakeResponse()
+
+    with patch("backend.app.domain.audio.urllib.request.urlopen", fake_urlopen):
+        synthesize_local_qwen3(
+            {
+                "input": "目标生成台词",
+                "audio_sample_path": str(reference_audio),
+                "ref_text": "参考文本",
+                "language": "Auto",
+                "response_format": "wav",
+            },
+            output_path=tmp_path / "out.wav",
+            service_base_url="http://127.0.0.1:7811",
+        )
+
+    assert captured["payload"]["audio_sample_suffix"] == ".mp3"
+
+
 def test_fastapi_app_exposes_v0_11_resource_boundaries():
     """Covers architecture API boundary for the v0.11 manual workbench."""
     pytest.importorskip("fastapi")
@@ -886,17 +926,75 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
         def poll(self):
             return None
 
+    class FakeHealthResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok":true,"voice_clone":true,"voice_design":true,"voice_design_capable":true}'
+
+    health_attempts = {"count": 0}
+
+    def fake_health_urlopen(request, timeout=10):
+        health_attempts["count"] += 1
+        if health_attempts["count"] == 1:
+            raise OSError("connection refused")
+        return FakeHealthResponse()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_health_urlopen)
     monkeypatch.setattr(app_module.subprocess, "Popen", lambda *args, **kwargs: calls.append(args) or FakeProcess())
     start = client.post("/api/model-config/tts/start", json={})
     assert start.status_code == 200
     assert start.json()["ok"] is True
-    assert "启动" in start.json()["message"]
+    assert "模型加载完成" in start.json()["message"]
     assert calls
     command = calls[0][0]
     assert "--model-path" in command
     assert "--voice-design-model-path" in command
     assert "/models/qwen3-tts" in command
     assert "/models/qwen3-tts-voice-design" in command
+
+
+def test_fastapi_v0_23_tts_start_waits_for_health_before_reporting_success(monkeypatch):
+    """Covers v0.23 startup feedback: Popen alone is not a successful local TTS start."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    class FakeProcess:
+        pid = 5252
+
+        def poll(self):
+            return None
+
+    monkeypatch.setenv("NOVELVOICE_TTS_STARTUP_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(app_module.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+    monkeypatch.setattr(
+        app_module.urllib.request,
+        "urlopen",
+        lambda request, timeout=10: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/model-config/tts/start",
+        json={
+            "tts": {
+                "base_url": "http://127.0.0.1:7811",
+                "model_path": "/models/qwen3-tts",
+                "voice_design_model_path": "/models/qwen3-tts-voice-design",
+            },
+        },
+    )
+
+    assert response.status_code == 503
+    assert "尚未完成启动" in response.text
+    assert "模型加载" in response.text
 
 
 def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
@@ -1044,6 +1142,16 @@ def write_valid_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: 
         wav_file.writeframes(b"\x00\x00" * frame_count)
 
 
+def install_python_multipart_stub(monkeypatch) -> None:
+    python_multipart = types.ModuleType("python_multipart")
+    python_multipart.__version__ = "0.0.20"
+    python_multipart.__all__ = []
+    python_multipart_parser = types.ModuleType("python_multipart.multipart")
+    python_multipart_parser.parse_options_header = lambda value: (value, {})
+    monkeypatch.setitem(sys.modules, "python_multipart", python_multipart)
+    monkeypatch.setitem(sys.modules, "python_multipart.multipart", python_multipart_parser)
+
+
 def test_wav_duration_validation_rejects_invalid_and_short_audio(tmp_path):
     """Covers AC-AUDIO-06 regression behavior for decode and duration checks."""
     valid = tmp_path / "valid.wav"
@@ -1102,7 +1210,7 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
 
 def test_qwen3_tts_server_reuses_voice_clone_prompt_for_same_reference(tmp_path, monkeypatch):
     """Covers v0.12 reusable prompt behavior in the local Base model service."""
-    monkeypatch.setitem(sys.modules, "python_multipart", types.SimpleNamespace(__version__="0.0.20"))
+    install_python_multipart_stub(monkeypatch)
 
     from backend.tts import qwen3_tts_server as server
 
@@ -1157,6 +1265,83 @@ def test_qwen3_tts_server_reuses_voice_clone_prompt_for_same_reference(tmp_path,
         assert call["voice_clone_prompt"] == {"cached": 1}
         assert "ref_audio" not in call
         assert "ref_text" not in call
+
+
+def test_qwen3_tts_server_supports_x_vector_only_mode_prompt_argument(tmp_path, monkeypatch):
+    """Covers v0.23 Qwen3 create_voice_clone_prompt argument name used by the local runtime."""
+    install_python_multipart_stub(monkeypatch)
+
+    from backend.tts import qwen3_tts_server as server
+
+    reference = tmp_path / "reference.wav"
+    write_valid_wav(reference)
+    audio_bytes = reference.read_bytes()
+
+    class FakeCloneModel:
+        def __init__(self):
+            self.x_vector_only_mode = None
+
+        def create_voice_clone_prompt(self, *, ref_audio, ref_text, x_vector_only_mode=False):
+            assert Path(ref_audio).exists()
+            assert ref_text == "这是一段短参考音频。"
+            self.x_vector_only_mode = x_vector_only_mode
+            return {"cached": "modern"}
+
+        def generate_voice_clone(self, **kwargs):
+            return [kwargs["voice_clone_prompt"]], 24000
+
+    model = FakeCloneModel()
+    server.voice_clone_prompt_cache.clear()
+
+    result = server.generate_voice_clone_with_reusable_prompt(
+        model,
+        text="目标台词",
+        language="Auto",
+        reference_path=str(reference),
+        reference_audio=audio_bytes,
+        reusable_prompt="这是一段短参考音频。",
+        x_vector_only=True,
+    )
+
+    assert result == ([{"cached": "modern"}], 24000)
+    assert model.x_vector_only_mode is True
+
+
+def test_qwen3_tts_server_json_voice_clone_uses_reference_audio_suffix(monkeypatch):
+    """Covers v0.23 JSON voice-clone temp file suffix preservation for MP3 references."""
+    install_python_multipart_stub(monkeypatch)
+
+    from backend.tts import qwen3_tts_server as server
+
+    captured = {}
+
+    def fake_generate_voice_clone(model, **kwargs):
+        captured["reference_path"] = kwargs["reference_path"]
+        captured["reference_audio"] = kwargs["reference_audio"]
+        return ["wav"], 24000
+
+    def fake_encode_audio_response(wav, sr, response_format):
+        return {"wav": wav, "sr": sr, "response_format": response_format}
+
+    monkeypatch.setattr(server, "generate_voice_clone_with_reusable_prompt", fake_generate_voice_clone)
+    monkeypatch.setattr(server, "encode_audio_response", fake_encode_audio_response)
+
+    response = asyncio.run(
+        server.speech_json(
+            {
+                "input": "目标生成台词",
+                "audio_sample": base64.b64encode(b"ID3 fake mp3 bytes").decode("ascii"),
+                "audio_sample_suffix": ".mp3",
+                "ref_text": "参考文本",
+                "language": "Auto",
+                "response_format": "wav",
+            }
+        )
+    )
+
+    assert response == {"wav": "wav", "sr": 24000, "response_format": "wav"}
+    assert Path(captured["reference_path"]).suffix == ".mp3"
+    assert captured["reference_audio"] == b"ID3 fake mp3 bytes"
 
 
 def test_fastapi_tts_endpoint_returns_substitute_audio_when_local_service_is_down(tmp_path):

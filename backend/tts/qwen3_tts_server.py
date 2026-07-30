@@ -31,6 +31,7 @@ app = FastAPI(title="NovelVoice Qwen3-TTS Server")
 voice_clone_model = None
 voice_design_model = None
 voice_clone_prompt_cache: dict[str, Any] = {}
+REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
 
 
 def load_model(model_path: str):
@@ -75,12 +76,30 @@ def get_or_create_voice_clone_prompt(
         return None
     cache_key = _voice_clone_prompt_cache_key(reference_audio, reusable_prompt, x_vector_only)
     if cache_key not in voice_clone_prompt_cache:
-        voice_clone_prompt_cache[cache_key] = model.create_voice_clone_prompt(
+        voice_clone_prompt_cache[cache_key] = create_voice_clone_prompt(
+            model,
+            reference_path=reference_path,
+            reusable_prompt=reusable_prompt,
+            x_vector_only=x_vector_only,
+        )
+    return voice_clone_prompt_cache[cache_key]
+
+
+def create_voice_clone_prompt(model, *, reference_path: str, reusable_prompt: str, x_vector_only: bool):
+    try:
+        return model.create_voice_clone_prompt(
+            ref_audio=reference_path,
+            ref_text=reusable_prompt,
+            x_vector_only_mode=x_vector_only,
+        )
+    except TypeError as exc:
+        if "x_vector_only_mode" not in str(exc):
+            raise
+        return model.create_voice_clone_prompt(
             ref_audio=reference_path,
             ref_text=reusable_prompt,
             x_vector_only=x_vector_only,
         )
-    return voice_clone_prompt_cache[cache_key]
 
 
 def generate_voice_clone_with_reusable_prompt(
@@ -127,10 +146,14 @@ async def startup():
 
 @app.get("/health")
 async def health():
+    voice_clone_ready = voice_clone_model is not None
+    voice_design_loaded = voice_design_model is not None
+    voice_design_capable = voice_design_loaded and hasattr(voice_design_model, "generate_voice_design")
     return {
-        "ok": voice_clone_model is not None,
-        "voice_clone": voice_clone_model is not None,
-        "voice_design": voice_design_model is not None,
+        "ok": voice_clone_ready and voice_design_capable,
+        "voice_clone": voice_clone_ready,
+        "voice_design": voice_design_loaded,
+        "voice_design_capable": voice_design_capable,
     }
 
 
@@ -182,7 +205,8 @@ async def speech_json(payload: dict):
         raise HTTPException(status_code=400, detail="input and audio_sample are required")
 
     reference_audio = base64.b64decode(audio_sample)
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as reference:
+    suffix = safe_reference_audio_suffix(payload.get("audio_sample_suffix") or payload.get("audio_sample_format"))
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as reference:
         reference.write(reference_audio)
         reference_path = reference.name
 
@@ -205,6 +229,15 @@ async def speech_json(payload: dict):
             os.remove(reference_path)
         except OSError:
             pass
+
+
+def safe_reference_audio_suffix(value: Any) -> str:
+    suffix = str(value or "").strip().lower()
+    if not suffix.startswith("."):
+        suffix = Path(f"reference.{suffix}").suffix.lower()
+    if suffix not in REFERENCE_AUDIO_SUFFIXES:
+        return ".wav"
+    return suffix
 
 
 @app.post("/v1/audio/voice-design")

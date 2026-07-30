@@ -217,6 +217,7 @@ def synthesize_local_qwen3(
     payload = {
         "input": request_payload["input"],
         "audio_sample": base64.b64encode(reference_audio.read_bytes()).decode("ascii"),
+        "audio_sample_suffix": _safe_reference_audio_suffix(reference_audio.suffix),
         "ref_text": request_payload["ref_text"],
         "language": request_payload.get("language", "Auto"),
         "response_format": request_payload.get("response_format", "wav"),
@@ -299,3 +300,10 @@ def validate_wav_duration(output_path: Path, *, min_duration_seconds: float = 0.
             f"generated audio duration must be > {min_duration_seconds}s, got {duration:.3f}s"
         )
     return duration
+
+
+def _safe_reference_audio_suffix(suffix: str) -> str:
+    normalized = suffix.strip().lower()
+    if normalized not in {".wav", ".mp3", ".flac", ".ogg", ".m4a"}:
+        return ".wav"
+    return normalized
