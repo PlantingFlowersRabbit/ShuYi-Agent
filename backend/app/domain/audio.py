@@ -16,6 +16,11 @@ class TTSServiceError(RuntimeError):
     pass
 
 
+DEFAULT_EMOTION_OPTIONS = ["", "中性", "开心", "悲伤", "愤怒", "害怕", "惊讶", "温柔", "紧张", "严肃"]
+DEFAULT_LANGUAGE_OPTIONS = ["Chinese", "English"]
+DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。"
+
+
 @dataclass(frozen=True)
 class VoiceJob:
     voice_job_id: str
@@ -30,9 +35,47 @@ class VoiceJob:
     output_path: str
     status: str
     error: str | None
+    emotion: str = ""
+    speed: float = 1.0
+    volume: float = 1.0
+    language: str = "Chinese"
+    other_control_text: str | None = None
+    x_vector_only: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _bounded_float(value: Any, *, default: float, minimum: float, maximum: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(numeric, minimum), maximum)
+
+
+def _normalized_language(value: Any, default: str) -> str:
+    language = str(value or default).strip()
+    return language if language in DEFAULT_LANGUAGE_OPTIONS else default
+
+
+def _control_instruct(*, emotion: str, other_control_text: str, speed: float, volume: float) -> str:
+    parts: list[str] = []
+    if emotion:
+        parts.append(f"情绪：{emotion}")
+    if other_control_text:
+        parts.append(other_control_text)
+    if speed != 1.0:
+        parts.append(f"语速倍率：{speed:.1f}")
+    if volume != 1.0:
+        parts.append(f"音量倍率：{volume:.1f}")
+    return "；".join(parts)
+
+
+def model_control_note(voice_mode: str) -> str:
+    if voice_mode == "voice_design":
+        return "Qwen3-TTS VoiceDesign / Instruct 路径支持中文自然语言控制文本。"
+    return "本地 Qwen3-TTS-12Hz-1.7B-Base voice cloning 路径使用参考音频、参考文本、language 和 x_vector_only；中文情绪与其他控制文本会保留在请求追踪中。"
 
 
 def build_tts_request(
@@ -47,7 +90,25 @@ def build_tts_request(
         raise ValueError("utterance text is required")
 
     voice_mode = utterance.get("voice_mode") or role.voice_mode
-    emotion_control_text = (utterance.get("design_prompt") or utterance.get("emotion_control_text") or "").strip()
+    emotion = str(utterance.get("emotion") or "").strip()
+    other_control_text = (
+        utterance.get("other_control_text")
+        or utterance.get("emotion_control_text")
+        or utterance.get("design_prompt")
+        or ""
+    )
+    other_control_text = str(other_control_text).strip()
+    language_value = _normalized_language(utterance.get("language"), language)
+    x_vector_only = bool(utterance.get("x_vector_only", False))
+    speed = _bounded_float(utterance.get("speed"), default=1.0, minimum=0.5, maximum=2.0)
+    volume = _bounded_float(utterance.get("volume"), default=1.0, minimum=0.0, maximum=2.0)
+    control_instruct = _control_instruct(
+        emotion=emotion,
+        other_control_text=other_control_text,
+        speed=speed,
+        volume=volume,
+    )
+
     if voice_mode == "voice_cloning":
         if not role.reference_audio_path:
             raise ValueError("voice cloning requires reference audio")
@@ -57,23 +118,33 @@ def build_tts_request(
             "input": text,
             "audio_sample_path": role.reference_audio_path,
             "ref_text": role.reference_text,
-            "language": language,
+            "language": language_value,
             "response_format": response_format,
-            "x_vector_only": False,
+            "x_vector_only": x_vector_only,
+            "emotion": emotion,
+            "other_control_text": other_control_text,
+            "control_instruct": control_instruct,
+            "speed": speed,
+            "volume": volume,
         }
-        if emotion_control_text:
-            payload["emotion_control_text"] = emotion_control_text
+        if control_instruct:
+            payload["emotion_control_text"] = control_instruct
         return payload
 
     if voice_mode == "voice_design":
-        design_prompt = utterance.get("design_prompt") or role.design_prompt
+        design_prompt = other_control_text or utterance.get("design_prompt") or role.design_prompt
         if not design_prompt:
             raise ValueError("voice design requires design prompt")
         return {
             "input": text,
             "design_prompt": design_prompt,
-            "language": language,
+            "language": language_value,
             "response_format": response_format,
+            "emotion": emotion,
+            "other_control_text": other_control_text,
+            "control_instruct": control_instruct or str(design_prompt),
+            "speed": speed,
+            "volume": volume,
         }
 
     raise ValueError(f"Unsupported voice mode: {voice_mode}")

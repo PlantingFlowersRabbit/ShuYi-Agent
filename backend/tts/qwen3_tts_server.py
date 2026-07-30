@@ -8,11 +8,10 @@ from pathlib import Path
 
 import soundfile as sf
 import torch
+import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from qwen_tts import Qwen3TTSModel
-import uvicorn
-
 
 app = FastAPI(title="NovelVoice Qwen3-TTS Server")
 model = None
@@ -51,7 +50,7 @@ async def health():
 @app.post("/v1/audio/speech/upload")
 async def speech_upload(
     input: str = Form(...),
-    voice_file: UploadFile = File(...),
+    voice_file: UploadFile = File(...),  # noqa: B008
     ref_text: str = Form(""),
     language: str = Form("Chinese"),
     response_format: str = Form("wav"),
@@ -159,4 +158,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

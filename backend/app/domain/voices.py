@@ -22,7 +22,7 @@ class VoiceResource:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def with_updates(self, **updates: Any) -> "VoiceResource":
+    def with_updates(self, **updates: Any) -> VoiceResource:
         return replace(self, **updates)
 
 

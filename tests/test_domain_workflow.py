@@ -9,6 +9,7 @@ from backend.app.domain.audio import (
     TTSServiceError,
     VoiceJob,
     build_tts_request,
+    model_control_note,
     validate_wav_duration,
 )
 from backend.app.domain.llm import OpenAICompatibleSegmentationClient, build_segmentation_messages
@@ -228,6 +229,92 @@ def test_llm_segmentation_client_builds_openai_compatible_request():
     assert captured["payload"]["messages"] == messages
 
 
+def test_v0_14_segmentation_prompt_targets_speaker_units_not_mechanical_sentences():
+    """Covers v0.14 speaker-unit segmentation requirements for Qwen/Qwen3-8B."""
+    paragraph = "“别笑了，引来魔物就麻烦了。”佩罗不耐烦地打断了笑声，“就这了，把她放下来。”"
+    messages = build_segmentation_messages(
+        chapter_title="1.变成蘑菇的公爵千金",
+        paragraph_id="p-0001",
+        paragraph_text=paragraph,
+        known_roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "peruo", "name": "佩罗"}],
+    )
+    prompt = messages[-1]["content"]
+
+    assert "以说话人/角色为单位" in prompt
+    assert "不是按句号机械拆分" in prompt
+    assert "双引号" in prompt
+    assert "“别笑了，引来魔物就麻烦了。”" in prompt
+    assert "佩罗不耐烦地打断了笑声" in prompt
+    assert "“就这了，把她放下来。”" in prompt
+    assert "Qwen/Qwen3-8B" in prompt
+
+
+def test_v0_14_multi_speaker_segmentation_result_preserves_text_conservation():
+    """Covers v0.14 validation for dialogue / narration / dialogue speaker units."""
+    paragraph = "“别笑了，引来魔物就麻烦了。”佩罗不耐烦地打断了笑声，“就这了，把她放下来。”"
+    raw = json.dumps(
+        {
+            "paragraph_id": "p-0001",
+            "utterances": [
+                {
+                    "utterance_id": "p-0001-u-001",
+                    "speaker_name": "佩罗",
+                    "speaker_role_id": "peruo",
+                    "voice_mode": "voice_cloning",
+                    "text": "“别笑了，引来魔物就麻烦了。”",
+                    "emotion": "",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.88,
+                    "needs_human_review": False,
+                },
+                {
+                    "utterance_id": "p-0001-u-002",
+                    "speaker_name": "旁白",
+                    "speaker_role_id": "narrator",
+                    "voice_mode": "voice_cloning",
+                    "text": "佩罗不耐烦地打断了笑声，",
+                    "emotion": "",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.82,
+                    "needs_human_review": False,
+                },
+                {
+                    "utterance_id": "p-0001-u-003",
+                    "speaker_name": "佩罗",
+                    "speaker_role_id": "peruo",
+                    "voice_mode": "voice_cloning",
+                    "text": "“就这了，把她放下来。”",
+                    "emotion": "",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.88,
+                    "needs_human_review": False,
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    result = validate_segmentation_result(
+        paragraph_id="p-0001",
+        paragraph_text=paragraph,
+        raw_output=raw,
+        known_roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "peruo", "name": "佩罗"}],
+    )
+
+    assert result.ok is True
+    assert [item["text"] for item in result.utterances] == [
+        "“别笑了，引来魔物就麻烦了。”",
+        "佩罗不耐烦地打断了笑声，",
+        "“就这了，把她放下来。”",
+    ]
+
+
 def test_segmentation_schema_text_conservation_and_unknown_role_review():
     """Covers AC-FLOW-07 and AC-LLM-02 through AC-LLM-07."""
     paragraph = "他说：“你好。”"
@@ -338,6 +425,12 @@ def test_tts_request_validation_and_voice_job_traceability():
         "utterance_id": "p-0001-u-001",
         "text": "待合成文本",
         "voice_mode": "voice_cloning",
+        "emotion": "紧张",
+        "other_control_text": "压低声音，像在躲避追兵。",
+        "language": "Chinese",
+        "x_vector_only": True,
+        "speed": 1.2,
+        "volume": 0.8,
     }
 
     request = build_tts_request(utterance, narrator)
@@ -345,6 +438,16 @@ def test_tts_request_validation_and_voice_job_traceability():
     assert request["audio_sample_path"].endswith(".wav")
     assert request["ref_text"]
     assert request["response_format"] == "wav"
+    assert request["language"] == "Chinese"
+    assert request["x_vector_only"] is True
+    assert request["emotion"] == "紧张"
+    assert request["other_control_text"] == "压低声音，像在躲避追兵。"
+    assert request["speed"] == 1.2
+    assert request["volume"] == 0.8
+    assert "紧张" in request["control_instruct"]
+    assert "压低声音" in request["control_instruct"]
+    assert "Qwen3-TTS-12Hz-1.7B-Base" in model_control_note("voice_cloning")
+    assert "中文自然语言" in model_control_note("voice_design")
 
     missing_reference = narrator.with_updates(reference_audio_path=None)
     with pytest.raises(ValueError, match="reference audio"):
@@ -357,7 +460,15 @@ def test_tts_request_validation_and_voice_job_traceability():
         reference_text=None,
     )
     with pytest.raises(ValueError, match="design prompt"):
-        build_tts_request({**utterance, "voice_mode": "voice_design"}, design_role)
+        build_tts_request(
+            {
+                "utterance_id": "p-0001-u-001",
+                "text": "待合成文本",
+                "voice_mode": "voice_design",
+                "other_control_text": "",
+            },
+            design_role,
+        )
 
     job = VoiceJob(
         voice_job_id="vj-0001",
@@ -397,6 +508,7 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
         ("/api/novels/parse", "POST"),
         ("/api/chapters", "GET"),
         ("/api/chapters/{chapter_id}", "GET"),
+        ("/api/chapters/{chapter_id}/paragraphs", "PUT"),
         ("/api/paragraphs/{paragraph_id}", "PATCH"),
         ("/api/paragraphs/{paragraph_id}/segment", "POST"),
         ("/api/roles", "GET"),
@@ -405,11 +517,14 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
         ("/api/voice-resources", "GET"),
         ("/api/voice-resources", "POST"),
         ("/api/voice-resources/generate", "POST"),
+        ("/api/voice-resources/reference-audio", "POST"),
         ("/api/voice-resources/{voice_id}", "PATCH"),
         ("/api/voice-resources/{voice_id}", "DELETE"),
         ("/api/voice-resources/{voice_id}/audio", "GET"),
         ("/api/model-config", "GET"),
         ("/api/model-config", "PATCH"),
+        ("/api/model-config/llm/test", "POST"),
+        ("/api/model-config/tts/start", "POST"),
         ("/api/utterances/{utterance_id}/speech", "POST"),
     ]
     for path, method in expected:
@@ -468,26 +583,86 @@ def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync():
     assert created["voice_id"] not in remaining_ids
 
 
-def test_fastapi_v0_11_generated_voice_and_model_config_boundaries():
-    """Covers v0.11 generated voice substitute and model config API boundaries."""
+def test_fastapi_v0_14_generated_voice_preview_then_explicit_save(tmp_path):
+    """Covers v0.14 generated voice preview, progress-ready audio URL, and explicit save boundary."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    with patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path):
+        client = TestClient(create_app())
+        before_count = len(client.get("/api/voice-resources").json()["voices"])
+        generated = client.post(
+            "/api/voice-resources/generate",
+            json={
+                "name": "生成旁白",
+                "description": "沉稳、叙事、颗粒感轻",
+                "reference_text": "这是一段用于试听新音色的语音。",
+            },
+        )
+        after_generate_count = len(client.get("/api/voice-resources").json()["voices"])
+
+        assert generated.status_code == 200
+        data = generated.json()
+        voice = data["voice"]
+        assert voice["generated"] is True
+        assert voice["voice_id"].startswith("preview-")
+        assert voice["reference_text"] == "这是一段用于试听新音色的语音。"
+        assert voice["reference_audio_path"].endswith(".wav")
+        assert data["audio_url"].startswith("/outputs/audio/")
+        assert data["generation_note"]
+        assert before_count == after_generate_count
+
+        saved = client.post(
+            "/api/voice-resources",
+            json={
+                "name": voice["name"],
+                "description": voice["description"],
+                "reference_text": voice["reference_text"],
+                "reference_audio_path": voice["reference_audio_path"],
+                "generated": True,
+            },
+        )
+        assert saved.status_code == 200
+        assert len(saved.json()["voices"]) == before_count + 1
+
+
+def test_fastapi_v0_14_reference_audio_upload_saves_local_file(tmp_path):
+    """Covers v0.14 file-picker style reference audio ingestion without typing a path."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    with patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path):
+        client = TestClient(create_app())
+        response = client.post(
+            "/api/voice-resources/reference-audio",
+            json={
+                "filename": "角色 试听.wav",
+                "data_base64": "UklGRgAAAAA=",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["reference_audio_path"].startswith(str(tmp_path))
+    assert data["filename"].endswith(".wav")
+    assert Path(data["reference_audio_path"]).exists()
+
+
+def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatch):
+    """Covers v0.14 split model-config save/test/start API behavior."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
     from backend.app.api.app import create_app
 
     client = TestClient(create_app())
-    generated = client.post(
-        "/api/voice-resources/generate",
-        json={
-            "name": "生成旁白",
-            "description": "沉稳、叙事、颗粒感轻",
-        },
-    )
-    assert generated.status_code == 200
-    voice = generated.json()["voice"]
-    assert voice["generated"] is True
-    assert "生成旁白" in voice["reference_text"]
-    assert voice["reference_audio_path"].endswith(".wav") or voice["reference_audio_path"].endswith(".mp3")
 
     config_response = client.get("/api/model-config")
     assert config_response.status_code == 200
@@ -498,7 +673,7 @@ def test_fastapi_v0_11_generated_voice_and_model_config_boundaries():
     assert config["tts"]["base_url"] == "http://127.0.0.1:7811"
     assert config["tts"]["model_path"] == ""
 
-    patched = client.patch(
+    remote_save = client.patch(
         "/api/model-config",
         json={
             "llm": {
@@ -506,18 +681,90 @@ def test_fastapi_v0_11_generated_voice_and_model_config_boundaries():
                 "model": "remote-test-model",
                 "api_key": "test-placeholder-key",
             },
+        },
+    )
+    assert remote_save.status_code == 200
+    updated = remote_save.json()["config"]
+    assert updated["llm"]["base_url"] == "https://api.example.test/v1"
+    assert updated["llm"]["model"] == "remote-test-model"
+    assert updated["llm"]["api_key"] == "test-placeholder-key"
+
+    local_save = client.patch(
+        "/api/model-config",
+        json={
             "tts": {
                 "base_url": "http://127.0.0.1:7811",
                 "model_path": "/models/qwen3-tts",
             },
         },
     )
-    assert patched.status_code == 200
-    updated = patched.json()["config"]
-    assert updated["llm"]["base_url"] == "https://api.example.test/v1"
-    assert updated["llm"]["model"] == "remote-test-model"
-    assert updated["llm"]["api_key"] == "test-placeholder-key"
+    assert local_save.status_code == 200
+    updated = local_save.json()["config"]
     assert updated["tts"]["model_path"] == "/models/qwen3-tts"
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"data":[]}'
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", lambda request, timeout=10: FakeResponse())
+    test_link = client.post("/api/model-config/llm/test", json={})
+    assert test_link.status_code == 200
+    assert test_link.json()["ok"] is True
+    assert "远端模型连接成功" in test_link.json()["message"]
+
+    calls = []
+
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(app_module.subprocess, "Popen", lambda *args, **kwargs: calls.append(args) or FakeProcess())
+    start = client.post("/api/model-config/tts/start", json={})
+    assert start.status_code == 200
+    assert start.json()["ok"] is True
+    assert "启动" in start.json()["message"]
+    assert calls
+
+
+def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
+    """Covers v0.14 fix for stale backend paragraph state after local edits/deletes."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api.app import create_app
+
+    client = TestClient(create_app())
+    response = client.put(
+        "/api/chapters/chapter-0001/paragraphs",
+        json={
+            "title": "1.变成蘑菇的公爵千金",
+            "paragraphs": [
+                {
+                    "paragraph_id": "p-0002",
+                    "text": "一醒来就发现自己被装麻袋了的伊南娜竭力扭动身体。",
+                    "collapsed": False,
+                    "deleted": False,
+                }
+            ],
+            "confirm": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["can_segment"] is True
+    assert [paragraph["paragraph_id"] for paragraph in data["paragraphs"]] == ["p-0002"]
+    missing_key = client.post("/api/paragraphs/p-0002/segment", json={})
+    assert missing_key.status_code == 503
+    assert "paragraph not found" not in missing_key.text
 
 
 def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkeypatch):

@@ -78,6 +78,7 @@ small {
 
 .app-shell {
   height: 100vh;
+  min-width: 1180px;
   overflow: hidden;
 }
 
@@ -190,7 +191,8 @@ small {
 .toolbar-row,
 .gate,
 .paragraph-toolbar,
-.inline-select {
+.inline-select,
+.utterance-toolbar {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -414,6 +416,25 @@ small {
   font-size: 13px;
 }
 
+.utterance-toolbar {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+}
+
+.utterance-toolbar strong {
+  margin-right: auto;
+  color: #475569;
+  font-size: 12px;
+}
+
+.utterance-toolbar button {
+  background: #f8fafc;
+  color: #334155;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .paragraph-utterances {
   display: grid;
   gap: 10px;
@@ -478,6 +499,11 @@ small {
   width: auto;
 }
 
+.utterance-check {
+  align-content: center;
+  min-height: 62px;
+}
+
 label {
   display: grid;
   gap: 6px;
@@ -497,32 +523,7 @@ label {
   gap: 10px;
 }
 
-@media (max-width: 920px) {
-  .topbar,
-  .chapter-header {
-    display: grid;
-  }
-
-  .workbench,
-  .two-column,
-  .model-page {
-    grid-template-columns: 1fr;
-  }
-
-  .utterance-card {
-    grid-template-columns: 1fr;
-  }
-
-  .empty-state p {
-    max-width: 260px;
-    word-break: break-all;
-  }
-
-  .topbar {
-    padding-inline: 14px;
-  }
-
-  .tabbar button {
-    padding-inline: 14px;
-  }
+.generated-preview {
+  display: grid;
+  gap: 8px;
 }
