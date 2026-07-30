@@ -12,10 +12,12 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.app.domain.ai_chapter_agent import AiChapterSplitAgent, ChapterSplitSkill
 from backend.app.domain.audio import (
     DEFAULT_GENERATED_VOICE_TEXT,
     TTSServiceError,
@@ -37,8 +39,10 @@ from backend.app.domain.voices import (
 )
 
 ROOT = Path(__file__).resolve().parents[3]
+LOCAL_DOTENV = dotenv_values(ROOT / ".env")
 OUTPUT_AUDIO_DIR = ROOT / "outputs/audio"
 OUTPUT_VOICE_RESOURCE_DIR = ROOT / "outputs/voice-resources"
+CHAPTER_PARSER_SCRIPT_DIR = ROOT / "scripts/chapter_parsers"
 REAL_VOICE_ROOT = Path(os.environ.get("NOVELVOICE_REAL_VOICE_ROOT", "/Users/gaojing/Downloads/真实测试样本/音频"))
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base"
@@ -64,6 +68,7 @@ def _voice_to_dict(voice: VoiceResource) -> dict[str, Any]:
 def _default_model_config() -> dict[str, Any]:
     providers = default_provider_registry()
     siliconflow = providers["siliconflow-qwen3-8b"]
+    deepseek = providers["deepseek-harness"]
     return {
         "llm": {
             "base_url": siliconflow["base_url"],
@@ -77,6 +82,11 @@ def _default_model_config() -> dict[str, Any]:
                 "QWEN3_TTS_VOICE_DESIGN_MODEL_PATH",
                 DEFAULT_VOICE_DESIGN_MODEL_PATH,
             ),
+        },
+        "chapter_agent": {
+            "base_url": deepseek["base_url"],
+            "model": deepseek["model"],
+            "api_key": "",
         },
     }
 
@@ -105,7 +115,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.12 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.20 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
@@ -133,6 +143,48 @@ def create_app() -> FastAPI:
             chapter.chapter_id: ChapterWorkbench.from_chapter(chapter) for chapter in chapters
         }
         return {"chapters": [_chapter_to_dict(chapter) for chapter in chapters]}
+
+    @app.post("/api/novels/ai-chapter-split")
+    async def ai_chapter_split(payload: dict[str, Any]) -> dict[str, Any]:
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=400, detail="text is required")
+        provider = _chapter_agent_provider_from_config(app)
+        skill = ChapterSplitSkill(
+            provider=provider,
+            api_key_lookup=_chapter_agent_api_key_lookup_from_config(app),
+        )
+        agent = AiChapterSplitAgent(scripts_dir=CHAPTER_PARSER_SCRIPT_DIR, skill=skill)
+        try:
+            result = await asyncio.to_thread(agent.split, text)
+        except MissingProviderCredential as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"AI chapter split failed: {exc}") from exc
+        if not result.validation.ok:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "AI chapter split validation failed",
+                    "errors": result.validation.errors,
+                    "trace": result.trace,
+                },
+            )
+
+        state = _state(app)
+        state["chapters"] = result.chapters
+        state["workbenches"] = {
+            chapter.chapter_id: ChapterWorkbench.from_chapter(chapter) for chapter in result.chapters
+        }
+        return {
+            "chapters": [_chapter_to_dict(chapter) for chapter in result.chapters],
+            "agent": {
+                "status": result.status,
+                "script_path": str(result.script_path) if result.script_path else None,
+                "trace": result.trace,
+                "validation_errors": result.validation.errors,
+            },
+        }
 
     @app.get("/api/chapters")
     async def list_chapters() -> dict[str, Any]:
@@ -393,6 +445,13 @@ def create_app() -> FastAPI:
                 if key in {"base_url", "model_path", "voice_design_model_path"}
             }
             config["tts"] = {**config["tts"], **tts_updates}
+        if isinstance(payload.get("chapter_agent"), dict):
+            chapter_agent_updates = {
+                key: value
+                for key, value in payload["chapter_agent"].items()
+                if key in {"base_url", "model", "api_key"}
+            }
+            config["chapter_agent"] = {**config["chapter_agent"], **chapter_agent_updates}
         return {"config": config}
 
     @app.post("/api/model-config/llm/test")
@@ -583,6 +642,23 @@ def _api_key_lookup_from_config(app: FastAPI):
     def lookup(name: str) -> str | None:
         configured = str(_state(app)["model_config"]["llm"].get("api_key") or "").strip()
         return configured or os.environ.get(name)
+
+    return lookup
+
+
+def _chapter_agent_provider_from_config(app: FastAPI) -> dict[str, Any]:
+    provider = default_provider_registry()["deepseek-harness"]
+    config = _state(app)["model_config"]["chapter_agent"]
+    provider["base_url"] = config.get("base_url") or provider["base_url"]
+    provider["model"] = config.get("model") or provider["model"]
+    return provider
+
+
+def _chapter_agent_api_key_lookup_from_config(app: FastAPI):
+    def lookup(name: str) -> str | None:
+        configured = str(_state(app)["model_config"]["chapter_agent"].get("api_key") or "").strip()
+        dotenv_value = LOCAL_DOTENV.get(name)
+        return configured or os.environ.get(name) or (str(dotenv_value).strip() if dotenv_value else None)
 
     return lookup
 

@@ -26,6 +26,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/development/v0.14-verification.md",
         "spec/v0.141-harness.md",
         "docs/development/v0.141-verification.md",
+        "spec/v0.20-harness.md",
+        "docs/development/v0.20-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -40,7 +42,7 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.12" in app
+    assert "NovelVoice-Agent v0.20" in app
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
@@ -125,8 +127,10 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.12" in app
-    assert "划分章节" in app
+    assert "NovelVoice-Agent v0.20" in app
+    assert "AI章节划分" in app
+    assert "runAiChapterSplit" in app
+    assert '"/api/novels/ai-chapter-split"' in app
     assert "确认划分章节" not in app
     assert "chapterSplitProgress" in app
     assert "章节划分进度" in app
@@ -145,12 +149,25 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     assert "body {" in styles and "overflow: hidden" in styles
 
 
+def test_frontend_v0_20_model_config_exposes_deepseek_chapter_agent():
+    """Covers v0.20 DeepSeek chapter split agent configuration in the model page."""
+    app = read("frontend/src/App.tsx")
+    package_json = read("frontend/package.json")
+
+    assert '"version": "0.20.0"' in package_json
+    assert "chapter_agent" in app
+    assert "AI章节划分智能体" in app
+    assert "https://api.deepseek.com" in app
+    assert "deepseek-v4-flash" in app
+    assert "章节划分智能体配置保存成功" in app
+
+
 def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     """Covers v0.14 Qwen segmentation, labeled controls, and subpage scrolling."""
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.12" in app
+    assert "NovelVoice-Agent v0.20" in app
     assert "runQwenSegmentation" in app
     assert "Qwen/Qwen3-8B" in app
     assert "已根据 Qwen/Qwen3-8B 生成可编辑语句草稿" in app

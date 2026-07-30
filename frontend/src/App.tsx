@@ -17,6 +17,16 @@ type ApiChapter = {
   body: string;
 };
 
+type ApiChapterSplitResponse = {
+  chapters: ApiChapter[];
+  agent: {
+    status: string;
+    script_path: string | null;
+    trace: string[];
+    validation_errors: string[];
+  };
+};
+
 type ParagraphModule = {
   paragraphId: string;
   text: string;
@@ -113,6 +123,11 @@ type ModelConfig = {
     model_path: string;
     voice_design_model_path: string;
   };
+  chapter_agent: {
+    base_url: string;
+    model: string;
+    api_key: string;
+  };
 };
 
 const sampleNovel = `1.变成蘑菇的公爵千金
@@ -179,6 +194,11 @@ const defaultModelConfig: ModelConfig = {
     base_url: "http://127.0.0.1:7811",
     model_path: DEFAULT_BASE_MODEL_PATH,
     voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
+  },
+  chapter_agent: {
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+    api_key: "",
   },
 };
 
@@ -417,6 +437,11 @@ function normalizeModelConfig(config: Partial<ModelConfig>): ModelConfig {
       model_path: config.tts?.model_path ?? defaultModelConfig.tts.model_path,
       voice_design_model_path: config.tts?.voice_design_model_path ?? defaultModelConfig.tts.voice_design_model_path,
     },
+    chapter_agent: {
+      base_url: config.chapter_agent?.base_url ?? defaultModelConfig.chapter_agent.base_url,
+      model: config.chapter_agent?.model ?? defaultModelConfig.chapter_agent.model,
+      api_key: config.chapter_agent?.api_key ?? "",
+    },
   };
 }
 
@@ -566,16 +591,33 @@ function App() {
     setSegmentationProgress(0);
     setVoiceGenerationProgress(0);
     setUploadProgress(62);
-    setApiStatus("小说已上传，仅展示开头预览；点击“划分章节”生成章节目录");
+    setApiStatus("小说已上传，仅展示开头预览；点击“AI章节划分”生成章节目录");
     setUploadProgress(100);
   }
 
-  function splitChapters() {
+  async function runAiChapterSplit() {
     setChapterSplitProgress(12);
-    const parsed = parseChapterIndex(fullNovelTextRef.current);
-    setChapterSplitProgress(76);
-    applyChapters(parsed, "章节目录已划分；选择左侧章节后才加载该章正文");
-    setChapterSplitProgress(100);
+    setApiStatus("AI章节划分智能体正在检查可复用脚本");
+    try {
+      const data = await requestJson<ApiChapterSplitResponse>("/api/novels/ai-chapter-split", {
+        method: "POST",
+        body: JSON.stringify({ text: fullNovelTextRef.current }),
+      });
+      setChapterSplitProgress(84);
+      const parsed = data.chapters.map(fromApiChapter);
+      const scriptName = data.agent.script_path?.split(/[\\/]/).pop() ?? "未记录脚本";
+      const agentStatus =
+        data.agent.status === "script_reused"
+          ? `AI章节划分完成：已复用 ${scriptName}`
+          : `AI章节划分完成：已生成并保存 ${scriptName}`;
+      applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
+    } catch (error) {
+      setChapterSplitProgress(76);
+      const parsed = parseChapterIndex(fullNovelTextRef.current);
+      applyChapters(parsed, `AI章节划分失败，已使用本地章节索引兜底：${String(error)}`);
+    } finally {
+      setChapterSplitProgress(100);
+    }
   }
 
   async function selectChapter(chapterId: string) {
@@ -1006,6 +1048,19 @@ function App() {
     }
   }
 
+  async function saveChapterAgentModelConfig() {
+    try {
+      const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
+        method: "PATCH",
+        body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
+      });
+      setModelConfig(normalizeModelConfig(data.config));
+      setApiStatus("章节划分智能体配置保存成功");
+    } catch (error) {
+      setApiStatus(`章节划分智能体配置保存失败：${String(error)}`);
+    }
+  }
+
   async function testRemoteModelLink() {
     try {
       const data = await requestJson<{ message: string }>("/api/model-config/llm/test", {
@@ -1032,7 +1087,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.12 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.20 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1040,8 +1095,8 @@ function App() {
               <button className="tool-button sky" type="button" onClick={() => fileInputRef.current?.click()}>
                 上传小说
               </button>
-              <button className="tool-button amber" type="button" onClick={splitChapters}>
-                划分章节
+              <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
+                AI章节划分
               </button>
             </div>
             <input
@@ -1136,7 +1191,7 @@ function App() {
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>尚未划分章节</h2>
-              <p>上传小说后点击左侧“划分章节”，右侧暂不渲染具体章节内容。</p>
+              <p>上传小说后点击左侧“AI章节划分”，右侧暂不渲染具体章节内容。</p>
             </div>
           ) : !activeChapter ? (
             <div className="empty-state">
@@ -1570,6 +1625,52 @@ function App() {
             </button>
           </div>
         </section>
+
+        <section className="panel">
+          <div className="section-title">AI章节划分智能体</div>
+          <label>
+            Base URL
+            <input
+              value={modelConfig.chapter_agent.base_url}
+              onChange={(event) =>
+                setModelConfig((current) => ({
+                  ...current,
+                  chapter_agent: { ...current.chapter_agent, base_url: event.target.value },
+                }))
+              }
+            />
+          </label>
+          <label>
+            模型名称
+            <input
+              value={modelConfig.chapter_agent.model}
+              onChange={(event) =>
+                setModelConfig((current) => ({
+                  ...current,
+                  chapter_agent: { ...current.chapter_agent, model: event.target.value },
+                }))
+              }
+            />
+          </label>
+          <label>
+            api_key
+            <input
+              type="password"
+              value={modelConfig.chapter_agent.api_key}
+              onChange={(event) =>
+                setModelConfig((current) => ({
+                  ...current,
+                  chapter_agent: { ...current.chapter_agent, api_key: event.target.value },
+                }))
+              }
+            />
+          </label>
+          <div className="toolbar-row">
+            <button className="tool-button teal" type="button" onClick={() => void saveChapterAgentModelConfig()}>
+              保存智能体配置
+            </button>
+          </div>
+        </section>
       </main>
     );
   }
@@ -1577,7 +1678,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.12</h1>
+        <h1>NovelVoice-Agent v0.20</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

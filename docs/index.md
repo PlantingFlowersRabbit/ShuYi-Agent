@@ -22,6 +22,8 @@
 | [docs/development/v0.14-verification.md](./development/v0.14-verification.md) | v0.14 段落确认、Qwen 划分、UI、音色生成和模型启动验证要求。 |
 | [spec/v0.141-harness.md](../spec/v0.141-harness.md) | v0.141 反馈显示、VoiceDesign 调用/降级说明和仅使用声纹注释规格。 |
 | [docs/development/v0.141-verification.md](./development/v0.141-verification.md) | v0.141 模型配置、音色资源库、生成音色和声纹注释验证要求。 |
+| [spec/v0.20-harness.md](../spec/v0.20-harness.md) | v0.20 AI 章节划分智能体、脚本复用、DeepSeek 配置和验证规格。 |
+| [docs/development/v0.20-verification.md](./development/v0.20-verification.md) | v0.20 LangChain agent、章节解析脚本、UI 和真实模型验证要求。 |
 | [docs/experience-library/README.md](./experience-library/README.md) | 经验库入口，说明经验和规则怎么记录、怎么复用。 |
 | [docs/experience-library/active-rules.md](./experience-library/active-rules.md) | 当前开发前必须主动遵守的规则。 |
 | [docs/experience-library/lessons.md](./experience-library/lessons.md) | 已发生问题和处理经验记录。 |

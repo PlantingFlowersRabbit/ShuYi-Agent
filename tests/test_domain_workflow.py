@@ -573,6 +573,7 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
 
     expected = [
         ("/api/novels/parse", "POST"),
+        ("/api/novels/ai-chapter-split", "POST"),
         ("/api/chapters", "GET"),
         ("/api/chapters/{chapter_id}", "GET"),
         ("/api/chapters/{chapter_id}/paragraphs", "PUT"),

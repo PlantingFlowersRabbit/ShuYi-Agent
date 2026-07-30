@@ -1,7 +1,7 @@
 [project]
 name = "novelvoice-agent"
-version = "0.12.0"
-description = "Harness-first novel dubbing assistant with v0.12 Qwen3-TTS voice clone and VoiceDesign routing."
+version = "0.20.0"
+description = "Harness-first novel dubbing assistant with v0.20 DeepSeek AI chapter splitting agent."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
@@ -14,6 +14,9 @@ dev = [
 backend = [
   "fastapi>=0.115",
   "httpx>=0.27",
+  "langchain>=0.3",
+  "langchain-openai>=0.3",
+  "python-dotenv>=1.0",
   "uvicorn[standard]>=0.30",
 ]
 tts = [

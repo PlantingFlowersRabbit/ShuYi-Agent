@@ -20,6 +20,7 @@ coverage/
 # Local models and large generated outputs
 models/**/*
 !models/README.md
+scripts/chapter_parsers/agent_generated_*.py
 outputs/**/*
 !outputs/README.md
 *.safetensors
