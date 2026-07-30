@@ -4,10 +4,12 @@ import asyncio
 import base64
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -18,10 +20,16 @@ from typing import Any
 
 from dotenv import dotenv_values
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.domain.ai_chapter_agent import AiChapterSplitAgent, ChapterSplitSkill
+from backend.app.domain.ai_one_click_workflow import (
+    AiOneClickWorkflow,
+    AiSegmentationService,
+    LangChainRoleAnalysisSkill,
+    create_whole_paragraph_utterance_drafts,
+)
 from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangChainSegmentationSkill
 from backend.app.domain.audio import (
     DEFAULT_GENERATED_VOICE_TEXT,
@@ -162,7 +170,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.242 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.25 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
@@ -181,6 +189,7 @@ def create_app() -> FastAPI:
         "voice_previews": {},
         "tts_process": None,
         "model_config": _default_model_config(),
+        "ai_one_click_workflows": {},
     }
 
     @app.post("/api/novels/parse")
@@ -261,11 +270,96 @@ def create_app() -> FastAPI:
         state["workbenches"][chapter_id] = workbench
         if not any(chapter.chapter_id == chapter_id for chapter in state["chapters"]):
             state["chapters"].append(chapter)
-        return {
+        response = {
             "chapter": _chapter_to_dict(chapter),
             "paragraphs": [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
             "can_segment": workbench.can_segment,
         }
+        if payload.get("confirm") is True:
+            response["utterance_drafts"] = create_whole_paragraph_utterance_drafts(
+                workbench.visible_paragraphs
+            )
+        return response
+
+    @app.post("/api/chapters/{chapter_id}/ai-one-click-analysis/start")
+    async def start_ai_one_click_analysis(chapter_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        state = _state(app)
+        workbench = state["workbenches"].get(chapter_id)
+        if workbench is None:
+            raise HTTPException(status_code=404, detail="chapter not found")
+        workflow = _create_ai_one_click_workflow(app)
+        try:
+            result = workflow.start_role_analysis(
+                chapter_id=chapter_id,
+                chapter_title=workbench.chapter.title,
+                paragraphs=[_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
+                existing_roles=[role.to_dict() for role in state["roles"].list()],
+            )
+        except MissingProviderCredential as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"AI role analysis failed: {exc}") from exc
+        state["ai_one_click_workflows"][result.thread_id] = workflow
+        return result.to_dict()
+
+    @app.post("/api/ai-one-click-analysis/{thread_id}/roles-completed")
+    async def complete_ai_one_click_roles(thread_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        workflow = _ai_one_click_workflow(app, thread_id)
+        roles = _roles_for_ai_one_click_payload(app, payload or {})
+        try:
+            result = workflow.resume_after_roles(
+                thread_id=thread_id,
+                roles=roles,
+                existing_utterances_by_paragraph=_utterances_by_paragraph_from_payload(payload or {}),
+            )
+        except MissingProviderCredential as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"AI one-click workflow failed: {exc}") from exc
+        status_code = 422 if result.status == "failed" else 200
+        if status_code != 200:
+            raise HTTPException(status_code=status_code, detail=result.to_dict())
+        return result.to_dict()
+
+    @app.post("/api/ai-one-click-analysis/{thread_id}/roles-completed-stream")
+    async def complete_ai_one_click_roles_stream(thread_id: str, payload: dict[str, Any] | None = None):
+        workflow = _ai_one_click_workflow(app, thread_id)
+        roles = _roles_for_ai_one_click_payload(app, payload or {})
+        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+
+        async def stream_events():
+            events: queue.Queue[dict[str, Any]] = queue.Queue()
+
+            def emit_role_selected(event: dict[str, Any]) -> None:
+                events.put({"event": "role_selected", "data": event})
+
+            def run_workflow() -> None:
+                try:
+                    result = workflow.resume_after_roles(
+                        thread_id=thread_id,
+                        roles=roles,
+                        existing_utterances_by_paragraph=utterances_by_paragraph,
+                        on_role_selected=emit_role_selected,
+                    )
+                    event_name = "completed" if result.status == "completed" else "failed"
+                    events.put({"event": event_name, "data": result.to_dict()})
+                except (MissingProviderCredential, KeyError, TypeError, ValueError, RuntimeError) as exc:
+                    events.put({"event": "failed", "data": {"message": str(exc)}})
+
+            threading.Thread(target=run_workflow, daemon=True).start()
+            while True:
+                item = await asyncio.to_thread(events.get)
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+                if item["event"] in {"completed", "failed"}:
+                    break
+
+        return StreamingResponse(stream_events(), media_type="application/x-ndjson")
 
     @app.patch("/api/paragraphs/{paragraph_id}")
     async def update_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -725,6 +819,49 @@ async def _run_ai_chapter_split(app: FastAPI, text: str) -> dict[str, Any]:
             "validation_errors": result.validation.errors,
         },
     }
+
+
+def _create_ai_one_click_workflow(app: FastAPI) -> AiOneClickWorkflow:
+    provider = _segmentation_provider_from_config(app)
+    return AiOneClickWorkflow(
+        role_skill=LangChainRoleAnalysisSkill(
+            provider=provider,
+            api_key_lookup=_api_key_lookup_from_config(app),
+        ),
+        segmentation_service=AiSegmentationService(
+            provider=provider,
+            api_key_lookup=_api_key_lookup_from_config(app),
+        ),
+    )
+
+
+def _ai_one_click_workflow(app: FastAPI, thread_id: str) -> AiOneClickWorkflow:
+    workflow = _state(app)["ai_one_click_workflows"].get(thread_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="AI one-click workflow thread not found")
+    return workflow
+
+
+def _roles_for_ai_one_click_payload(app: FastAPI, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_roles = payload.get("roles")
+    collection = _state(app)["roles"]
+    if isinstance(raw_roles, list):
+        for raw_role in raw_roles:
+            if isinstance(raw_role, dict) and raw_role.get("role_id"):
+                collection.upsert(_role_payload_with_resource(app, raw_role))
+    return [role.to_dict() for role in collection.list()]
+
+
+def _utterances_by_paragraph_from_payload(payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    raw = payload.get("utterances_by_paragraph")
+    if not isinstance(raw, dict):
+        return {}
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for paragraph_id, utterances in raw.items():
+        if not isinstance(utterances, list):
+            continue
+        normalized[str(paragraph_id)] = [dict(item) for item in utterances if isinstance(item, dict)]
+    return normalized
 
 
 def _write_substitute_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> float:

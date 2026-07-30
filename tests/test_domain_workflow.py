@@ -532,6 +532,220 @@ def test_segmentation_allows_one_json_repair_attempt_only():
     assert failed.error_code == "invalid_json"
 
 
+def test_v0_25_whole_paragraph_drafts_are_backend_reusable():
+    """v0.25 requires confirm flow and LangGraph workflow to share backend draft creation."""
+    from backend.app.domain.ai_one_click_workflow import create_whole_paragraph_utterance_drafts
+    from backend.app.domain.novel import ParagraphModule
+
+    paragraphs = [
+        ParagraphModule(paragraph_id="p-0001", text="旁白第一段。", confirmed=True),
+        ParagraphModule(paragraph_id="p-0002", text="“你好。”", confirmed=True),
+    ]
+
+    drafts = create_whole_paragraph_utterance_drafts(paragraphs)
+
+    assert [draft["utterance_id"] for draft in drafts] == ["p-0001-u-001", "p-0002-u-001"]
+    assert [draft["paragraph_id"] for draft in drafts] == ["p-0001", "p-0002"]
+    assert [draft["text"] for draft in drafts] == ["旁白第一段。", "“你好。”"]
+    assert all(draft["speaker_role_id"] is None for draft in drafts)
+    assert all(draft["needs_human_review"] is True for draft in drafts)
+
+
+def test_v0_25_role_analysis_workflow_pauses_with_human_editable_candidates():
+    """The LangGraph workflow first returns role suggestions and waits for role-list edits."""
+    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow, RoleAnalysisCandidate
+
+    class FakeSkill:
+        def analyze_roles(self, **kwargs):
+            assert "伊南娜" in kwargs["chapter_text"]
+            return [
+                RoleAnalysisCandidate(
+                    name="伊南娜",
+                    aliases=["公爵千金"],
+                    gender="女",
+                    profile="被绑架的公爵千金，紧张但倔强",
+                    voice_direction="年轻女性，惊慌但清晰",
+                    evidence=["伊南娜竭力扭动身体"],
+                    confidence=0.84,
+                    needs_human_review=True,
+                )
+            ]
+
+    workflow = AiOneClickWorkflow(role_skill=FakeSkill(), segmentation_service=None)
+    result = workflow.start_role_analysis(
+        chapter_id="chapter-0001",
+        chapter_title="1.变成蘑菇的公爵千金",
+        paragraphs=[{"paragraph_id": "p-0001", "text": "伊南娜竭力扭动身体。"}],
+        existing_roles=[{"role_id": "narrator", "name": "旁白"}],
+    )
+
+    assert result.status == "waiting_for_roles"
+    assert result.thread_id
+    assert result.message == "请先把所需角色添加到角色列表中，或绑定到已有角色。"
+    assert result.role_candidates[0].name == "伊南娜"
+    assert result.role_candidates[0].needs_human_review is True
+
+
+def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_paragraphs_and_streams_updates():
+    """Resume creates drafts, segments ambiguous paragraphs, and assigns only blank role_id values."""
+    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow, RoleSelectionResult
+    from backend.app.domain.segmentation import SegmentationValidationResult
+
+    class FakeRoleSkill:
+        def analyze_roles(self, **kwargs):
+            return []
+
+        def choose_role(self, *, utterance, roles, paragraph_text, chapter_title):
+            if utterance["text"].startswith("旁白"):
+                return RoleSelectionResult(
+                    role_id="narrator",
+                    speaker_name="旁白",
+                    confidence=0.91,
+                    needs_human_review=False,
+                    reason="narration",
+                )
+            if "你好" in utterance["text"]:
+                return RoleSelectionResult(
+                    role_id="hero",
+                    speaker_name="伊南娜",
+                    confidence=0.76,
+                    needs_human_review=True,
+                    reason="dialogue cue",
+                )
+            return RoleSelectionResult(
+                role_id=None,
+                speaker_name="未知角色",
+                confidence=0.2,
+                needs_human_review=True,
+                reason="unclear",
+            )
+
+        def needs_segmentation(self, *, utterance, paragraph_text, roles):
+            return "“你好。”她挥手。" in utterance["text"]
+
+    class FakeSegmentationService:
+        def __init__(self):
+            self.calls = []
+
+        def segment_paragraph(self, *, chapter_title, paragraph_id, paragraph_text, known_roles):
+            self.calls.append(paragraph_id)
+            return SegmentationValidationResult(
+                ok=True,
+                paragraph_id=paragraph_id,
+                utterances=[
+                    {
+                        "utterance_id": f"{paragraph_id}-u-001",
+                        "paragraph_id": paragraph_id,
+                        "speaker_name": "伊南娜",
+                        "speaker_role_id": None,
+                        "voice_mode": "voice_cloning",
+                        "text": "“你好。”",
+                        "emotion": "neutral",
+                        "speed": 1.0,
+                        "volume": 1.0,
+                        "design_prompt": None,
+                        "confidence": 0.8,
+                        "needs_human_review": True,
+                    },
+                    {
+                        "utterance_id": f"{paragraph_id}-u-002",
+                        "paragraph_id": paragraph_id,
+                        "speaker_name": "旁白",
+                        "speaker_role_id": "narrator",
+                        "voice_mode": "voice_cloning",
+                        "text": "她挥手。",
+                        "emotion": "neutral",
+                        "speed": 1.0,
+                        "volume": 1.0,
+                        "design_prompt": None,
+                        "confidence": 0.8,
+                        "needs_human_review": False,
+                    },
+                ],
+            )
+
+    events = []
+    service = FakeSegmentationService()
+    workflow = AiOneClickWorkflow(role_skill=FakeRoleSkill(), segmentation_service=service)
+    start = workflow.start_role_analysis(
+        chapter_id="chapter-0001",
+        chapter_title="第一章",
+        paragraphs=[
+            {"paragraph_id": "p-0001", "text": "旁白第一段。"},
+            {"paragraph_id": "p-0002", "text": "“你好。”她挥手。"},
+        ],
+        existing_roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "hero", "name": "伊南娜"}],
+    )
+
+    result = workflow.resume_after_roles(
+        thread_id=start.thread_id,
+        roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "hero", "name": "伊南娜"}],
+        existing_utterances_by_paragraph={
+            "p-0001": [
+                {
+                    "utterance_id": "p-0001-u-001",
+                    "paragraph_id": "p-0001",
+                    "text": "旁白第一段。",
+                    "speaker_role_id": "narrator",
+                    "speaker_name": "旁白",
+                }
+            ]
+        },
+        on_role_selected=events.append,
+    )
+
+    assert result.status == "completed"
+    assert service.calls == ["p-0002"]
+    assert result.utterances_by_paragraph["p-0001"][0]["speaker_role_id"] == "narrator"
+    assert result.utterances_by_paragraph["p-0002"][0]["speaker_role_id"] == "hero"
+    assert result.utterances_by_paragraph["p-0002"][1]["speaker_role_id"] == "narrator"
+    assert [event["utterance_id"] for event in events] == ["p-0002-u-001"]
+    assert events[0]["speaker_role_id"] == "hero"
+
+
+def test_v0_25_workflow_returns_readable_failure_when_segmentation_validation_fails():
+    """Invalid model output must not be silently rewritten or accepted."""
+    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow, RoleSelectionResult
+    from backend.app.domain.segmentation import SegmentationValidationResult
+
+    class FakeRoleSkill:
+        def analyze_roles(self, **kwargs):
+            return []
+
+        def choose_role(self, **kwargs):
+            return RoleSelectionResult(None, "未知角色", 0.2, True, "ambiguous")
+
+        def needs_segmentation(self, **kwargs):
+            return True
+
+    class FailingSegmentationService:
+        def segment_paragraph(self, **kwargs):
+            return SegmentationValidationResult(
+                ok=False,
+                paragraph_id=kwargs["paragraph_id"],
+                raw_output="{bad json",
+                error_code="invalid_json",
+                error="Expecting property name enclosed in double quotes",
+            )
+
+    workflow = AiOneClickWorkflow(role_skill=FakeRoleSkill(), segmentation_service=FailingSegmentationService())
+    start = workflow.start_role_analysis(
+        chapter_id="chapter-0001",
+        chapter_title="第一章",
+        paragraphs=[{"paragraph_id": "p-0001", "text": "“你好。”她挥手。"}],
+        existing_roles=[],
+    )
+
+    result = workflow.resume_after_roles(thread_id=start.thread_id, roles=[], existing_utterances_by_paragraph={})
+
+    assert result.status == "failed"
+    assert result.failure is not None
+    assert result.failure["paragraph_id"] == "p-0001"
+    assert result.failure["error_code"] == "invalid_json"
+    assert "Expecting property name" in result.failure["message"]
+    assert result.utterances_by_paragraph == {}
+
+
 def test_tts_request_validation_and_voice_job_traceability():
     """Covers AC-ROLE-03, AC-ROLE-04, and AC-AUDIO-07."""
     roles = RoleCollection(default_role_cards())
@@ -726,8 +940,11 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
         ("/api/chapters", "GET"),
         ("/api/chapters/{chapter_id}", "GET"),
         ("/api/chapters/{chapter_id}/paragraphs", "PUT"),
+        ("/api/chapters/{chapter_id}/ai-one-click-analysis/start", "POST"),
         ("/api/paragraphs/{paragraph_id}", "PATCH"),
         ("/api/paragraphs/{paragraph_id}/segment", "POST"),
+        ("/api/ai-one-click-analysis/{thread_id}/roles-completed", "POST"),
+        ("/api/ai-one-click-analysis/{thread_id}/roles-completed-stream", "POST"),
         ("/api/roles", "GET"),
         ("/api/roles", "POST"),
         ("/api/roles/{role_id}", "PATCH"),
@@ -1358,9 +1575,86 @@ def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
     data = response.json()
     assert data["can_segment"] is True
     assert [paragraph["paragraph_id"] for paragraph in data["paragraphs"]] == ["p-0002"]
+    assert data["utterance_drafts"][0]["utterance_id"] == "p-0002-u-001"
+    assert data["utterance_drafts"][0]["text"] == "一醒来就发现自己被装麻袋了的伊南娜竭力扭动身体。"
+    assert data["utterance_drafts"][0]["speaker_role_id"] is None
     missing_key = client.post("/api/paragraphs/p-0002/segment", json={})
     assert missing_key.status_code == 503
     assert "paragraph not found" not in missing_key.text
+
+
+def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role_events(monkeypatch):
+    """Covers v0.25 API wiring for role analysis pause and streamed role-selection updates."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api.app import create_app
+    from backend.app.domain.ai_one_click_workflow import (
+        LangChainRoleAnalysisSkill,
+        RoleAnalysisCandidate,
+        RoleSelectionResult,
+    )
+
+    def fake_analyze_roles(self, **kwargs):
+        assert kwargs["chapter_id"] == "chapter-0001"
+        return [
+            RoleAnalysisCandidate(
+                name="旁白",
+                aliases=[],
+                gender=None,
+                profile="叙述者",
+                voice_direction="沉稳清晰",
+                evidence=["旁白第一段。"],
+                confidence=0.9,
+                needs_human_review=True,
+            )
+        ]
+
+    def fake_needs_segmentation(self, **kwargs):
+        return False
+
+    def fake_choose_role(self, **kwargs):
+        return RoleSelectionResult(
+            role_id="narrator",
+            speaker_name="旁白",
+            confidence=0.88,
+            needs_human_review=False,
+            reason="叙述文本",
+        )
+
+    monkeypatch.setattr(LangChainRoleAnalysisSkill, "analyze_roles", fake_analyze_roles)
+    monkeypatch.setattr(LangChainRoleAnalysisSkill, "needs_segmentation", fake_needs_segmentation)
+    monkeypatch.setattr(LangChainRoleAnalysisSkill, "choose_role", fake_choose_role)
+
+    client = TestClient(create_app())
+    sync = client.put(
+        "/api/chapters/chapter-0001/paragraphs",
+        json={
+            "title": "第一章",
+            "paragraphs": [{"paragraph_id": "p-0001", "text": "旁白第一段。"}],
+            "confirm": False,
+        },
+    )
+    assert sync.status_code == 200
+
+    started = client.post("/api/chapters/chapter-0001/ai-one-click-analysis/start", json={})
+    assert started.status_code == 200
+    start_data = started.json()
+    assert start_data["status"] == "waiting_for_roles"
+    assert start_data["role_candidates"][0]["name"] == "旁白"
+    assert "添加到角色列表" in start_data["message"]
+
+    streamed = client.post(
+        f"/api/ai-one-click-analysis/{start_data['thread_id']}/roles-completed-stream",
+        json={"utterances_by_paragraph": {}},
+    )
+    assert streamed.status_code == 200
+    lines = [json.loads(line) for line in streamed.text.splitlines() if line.strip()]
+    assert lines[0]["event"] == "role_selected"
+    assert lines[0]["data"]["utterance_id"] == "p-0001-u-001"
+    assert lines[0]["data"]["speaker_role_id"] == "narrator"
+    assert lines[-1]["event"] == "completed"
+    assert lines[-1]["data"]["utterances_by_paragraph"]["p-0001"][0]["speaker_role_id"] == "narrator"
 
 
 def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkeypatch):

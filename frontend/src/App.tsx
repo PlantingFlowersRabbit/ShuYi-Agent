@@ -120,6 +120,52 @@ type ApiUtterance = {
   speed: number;
   volume: number;
   design_prompt: string | null;
+  confidence?: number;
+  needs_human_review?: boolean;
+};
+
+type ApiChapterParagraphsResponse = {
+  paragraphs: ApiParagraph[];
+  can_segment: boolean;
+  utterance_drafts?: ApiUtterance[];
+};
+
+type AiRoleCandidate = {
+  name: string | null;
+  aliases: string[];
+  gender: string | null;
+  profile: string | null;
+  voice_direction: string | null;
+  evidence: string[];
+  confidence: number;
+  needs_human_review: boolean;
+};
+
+type AiOneClickStartResponse = {
+  status: string;
+  thread_id: string;
+  message: string;
+  role_candidates: AiRoleCandidate[];
+};
+
+type AiRoleSelectionEvent = {
+  paragraph_id: string;
+  utterance_id: string;
+  text: string;
+  speaker_role_id: string | null;
+  speaker_name: string;
+  confidence: number;
+  needs_human_review: boolean;
+  reason: string;
+};
+
+type AiOneClickResumeResponse = {
+  status: string;
+  thread_id: string;
+  message: string;
+  utterances_by_paragraph: Record<string, ApiUtterance[]>;
+  role_selection_events: AiRoleSelectionEvent[];
+  failure?: { paragraph_id: string; error_code: string; message: string } | null;
 };
 
 type ModelConfig = {
@@ -408,6 +454,39 @@ function toApiVoice(voice: Partial<VoiceResource>): Record<string, unknown> {
   };
 }
 
+function toApiRole(role: RoleCard): Record<string, unknown> {
+  return {
+    role_id: role.roleId,
+    name: role.name,
+    description: role.description,
+    voice_mode: role.voiceMode,
+    voice_resource_id: role.voiceResourceId,
+    reference_audio_path: role.referenceAudioPath,
+    reference_text: role.referenceText,
+    design_prompt: role.designPrompt || null,
+  };
+}
+
+function utteranceGroupsToApi(groups: Record<string, UtteranceDraft[]>): Record<string, Record<string, unknown>[]> {
+  return Object.fromEntries(
+    Object.entries(groups).map(([paragraphId, utterances]) => [
+      paragraphId,
+      utterances.map((utterance) => ({
+        utterance_id: utterance.utteranceId,
+        paragraph_id: paragraphId,
+        text: utterance.text,
+        speaker_name: utterance.speakerName,
+        speaker_role_id: utterance.roleId || null,
+        voice_mode: "voice_cloning",
+        emotion: "neutral",
+        speed: 1.0,
+        volume: 1.0,
+        design_prompt: null,
+      })),
+    ]),
+  );
+}
+
 function voiceAudioSrc(voice: VoiceResource): string {
   return `/api/voice-resources/${voice.voiceId}/audio`;
 }
@@ -482,6 +561,24 @@ function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
 function makeWholeParagraphUtteranceGroups(paragraphs: ParagraphModule[]): Record<string, UtteranceDraft[]> {
   return Object.fromEntries(
     paragraphs.map((paragraph) => [paragraph.paragraphId, [makeUtteranceDraft(paragraph)]]),
+  );
+}
+
+function apiUtterancesToGroups(
+  groups: Record<string, ApiUtterance[]>,
+  paragraphs: ParagraphModule[],
+  roles: RoleCard[],
+): Record<string, UtteranceDraft[]> {
+  return Object.fromEntries(
+    Object.entries(groups).map(([paragraphId, utterances]) => {
+      const paragraph = paragraphs.find((item) => item.paragraphId === paragraphId) ?? {
+        paragraphId,
+        text: "",
+        collapsed: false,
+        deleted: false,
+      };
+      return [paragraphId, utterances.map((utterance) => fromApiUtterance(utterance, paragraph, roles))];
+    }),
   );
 }
 
@@ -573,6 +670,10 @@ function App() {
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
   const [localTtsStartProgress, setLocalTtsStartProgress] = useState(0);
   const [localTtsStarting, setLocalTtsStarting] = useState(false);
+  const [aiRoleCandidates, setAiRoleCandidates] = useState<AiRoleCandidate[]>([]);
+  const [aiOneClickThreadId, setAiOneClickThreadId] = useState("");
+  const [aiOneClickWaitingForRoles, setAiOneClickWaitingForRoles] = useState(false);
+  const [aiOneClickRunning, setAiOneClickRunning] = useState(false);
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
@@ -580,6 +681,13 @@ function App() {
     () => roles.map((role) => ({ value: role.roleId, label: role.name })),
     [roles],
   );
+
+  function resetAiOneClickState() {
+    setAiRoleCandidates([]);
+    setAiOneClickThreadId("");
+    setAiOneClickWaitingForRoles(false);
+    setAiOneClickRunning(false);
+  }
 
   useEffect(() => {
     requestJson<{ voices: ApiVoiceResource[] }>("/api/voice-resources")
@@ -621,6 +729,7 @@ function App() {
     setChapterBackendSynced(false);
     setUtterancesByParagraph({});
     setGeneratingUtteranceIds({});
+    resetAiOneClickState();
     setApiStatus(status);
   }
 
@@ -642,6 +751,7 @@ function App() {
     setSegmentationProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
+    resetAiOneClickState();
     setUploadProgress(62);
     setApiStatus("小说已上传，仅展示开头预览；点击“AI章节划分”生成章节目录");
     setUploadProgress(100);
@@ -693,12 +803,15 @@ function App() {
     setSegmentationProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
+    resetAiOneClickState();
     setApiStatus(`已加载章节：${chapter.title}`);
   }
 
-  async function syncCurrentChapterParagraphs(confirm = false): Promise<{ paragraphs: ParagraphModule[]; canSegment: boolean }> {
+  async function syncCurrentChapterParagraphs(
+    confirm = false,
+  ): Promise<{ paragraphs: ParagraphModule[]; canSegment: boolean; utteranceDrafts: ApiUtterance[] }> {
     if (!activeChapter) throw new Error("请选择章节");
-    const data = await requestJson<{ paragraphs: ApiParagraph[]; can_segment: boolean }>(
+    const data = await requestJson<ApiChapterParagraphsResponse>(
       `/api/chapters/${activeChapter.chapterId}/paragraphs`,
       {
         method: "PUT",
@@ -718,7 +831,11 @@ function App() {
     setParagraphs(syncedParagraphs);
     setConfirmed(data.can_segment);
     setChapterBackendSynced(true);
-    return { paragraphs: syncedParagraphs, canSegment: data.can_segment };
+    return {
+      paragraphs: syncedParagraphs,
+      canSegment: data.can_segment,
+      utteranceDrafts: data.utterance_drafts ?? [],
+    };
   }
 
   function updateParagraph(paragraphId: string, updates: Partial<ParagraphModule>) {
@@ -732,6 +849,7 @@ function App() {
       setChapterBackendSynced(false);
       setUtterancesByParagraph({});
       setGeneratingUtteranceIds({});
+      resetAiOneClickState();
     }
   }
 
@@ -740,7 +858,13 @@ function App() {
     setApiStatus("正在同步当前章节段落并确认");
     try {
       const synced = await syncCurrentChapterParagraphs(true);
-      setUtterancesByParagraph(makeWholeParagraphUtteranceGroups(synced.paragraphs));
+      const draftsByParagraph = Object.fromEntries(
+        synced.paragraphs.map((paragraph) => [
+          paragraph.paragraphId,
+          synced.utteranceDrafts.filter((utterance) => utterance.paragraph_id === paragraph.paragraphId),
+        ]),
+      );
+      setUtterancesByParagraph(apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles));
       setApiStatus("段落已确认，已默认按整段落生成语句文本；每段可单独使用 AI语句划分");
     } catch (error) {
       setConfirmed(false);
@@ -832,6 +956,118 @@ function App() {
       .play()
       .then(() => setApiStatus(`正在播放音色：${voice.name}`))
       .catch((error) => setApiStatus(`播放音色失败：${String(error)}`));
+  }
+
+  async function runAiOneClickAnalysis() {
+    if (!activeChapter || visibleParagraphs.length === 0) return;
+    setAiOneClickRunning(true);
+    setSegmentationProgress(8);
+    setApiStatus("AI一键分析正在同步当前章节并分析角色");
+    try {
+      await syncCurrentChapterParagraphs(false);
+      const data = await requestJson<AiOneClickStartResponse>(
+        `/api/chapters/${activeChapter.chapterId}/ai-one-click-analysis/start`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      setAiOneClickThreadId(data.thread_id);
+      setAiRoleCandidates(data.role_candidates);
+      setAiOneClickWaitingForRoles(true);
+      setSegmentationProgress(35);
+      setApiStatus(`${data.message} 请在角色列表中新增角色或绑定已有角色后点击“角色列表添加完成”。`);
+    } catch (error) {
+      resetAiOneClickState();
+      setSegmentationProgress(100);
+      setApiStatus(`AI一键分析角色分析失败：${String(error)}`);
+    } finally {
+      setAiOneClickRunning(false);
+    }
+  }
+
+  async function completeAiRoleListAndResumeWorkflow() {
+    if (!aiOneClickThreadId) return;
+    setAiOneClickRunning(true);
+    setAiOneClickWaitingForRoles(false);
+    setSegmentationProgress(45);
+    setApiStatus("角色列表已确认，AI一键分析正在划分语句并选择空角色");
+    try {
+      const response = await fetch(`/api/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          roles: roles.map(toApiRole),
+          utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      if (!response.body) throw new Error("AI一键分析没有返回流式响应");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          handleAiOneClickStreamEvent(JSON.parse(line));
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) handleAiOneClickStreamEvent(JSON.parse(buffer));
+    } catch (error) {
+      setAiOneClickWaitingForRoles(true);
+      setSegmentationProgress(100);
+      setApiStatus(`AI一键分析语句划分/角色选择失败：${String(error)}`);
+    } finally {
+      setAiOneClickRunning(false);
+    }
+  }
+
+  function handleAiOneClickStreamEvent(event: { event: string; data: any }) {
+    if (event.event === "role_selected") {
+      applyAiRoleSelectionEvent(event.data as AiRoleSelectionEvent);
+      setSegmentationProgress((current) => Math.min(95, Math.max(current + 5, 55)));
+      return;
+    }
+    if (event.event === "completed") {
+      const data = event.data as AiOneClickResumeResponse;
+      setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, roles));
+      setConfirmed(true);
+      setChapterBackendSynced(true);
+      setAiOneClickWaitingForRoles(false);
+      setSegmentationProgress(100);
+      setApiStatus(data.message);
+      return;
+    }
+    if (event.event === "failed") {
+      const message = event.data?.failure?.message ?? event.data?.message ?? "模型输出未通过校验";
+      setAiOneClickWaitingForRoles(true);
+      setSegmentationProgress(100);
+      setApiStatus(`AI一键分析失败：${message}`);
+    }
+  }
+
+  function applyAiRoleSelectionEvent(event: AiRoleSelectionEvent) {
+    setUtterancesByParagraph((current) => {
+      const list = current[event.paragraph_id] ?? [];
+      const role = roles.find((item) => item.roleId === event.speaker_role_id);
+      const next: UtteranceDraft = {
+        utteranceId: event.utterance_id,
+        paragraphId: event.paragraph_id,
+        text: event.text,
+        roleId: role?.roleId ?? event.speaker_role_id ?? "",
+        speakerName: event.speaker_name || role?.name || "",
+        audioStatus: event.needs_human_review ? "AI已选择角色，请人工确认" : "AI已选择角色",
+      };
+      const found = list.some((item) => item.utteranceId === event.utterance_id);
+      return {
+        ...current,
+        [event.paragraph_id]: found
+          ? list.map((item) => (item.utteranceId === event.utterance_id ? { ...item, ...next } : item))
+          : [...list, next],
+      };
+    });
   }
 
   async function runAiSegmentationForParagraph(paragraphId: string) {
@@ -1177,7 +1413,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.242 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.25 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1273,6 +1509,33 @@ function App() {
                 );
               })}
             </div>
+            {aiRoleCandidates.length > 0 && (
+              <div className="role-analysis-panel" aria-label="AI角色候选建议">
+                <div className="section-title">AI角色候选建议</div>
+                <small>请先把所需角色添加到角色列表中，或绑定到已有角色。模型建议仅作参考。</small>
+                {aiRoleCandidates.map((candidate, index) => (
+                  <article className="role-candidate-card" key={`${candidate.name ?? "unknown"}-${index}`}>
+                    <strong>{candidate.name ?? "未知角色"}</strong>
+                    <p>别名/称呼：{candidate.aliases.length ? candidate.aliases.join("、") : "待确认"}</p>
+                    <p>性别：{candidate.gender ?? "待确认"}</p>
+                    <p>人设/身份/性格：{candidate.profile ?? "待确认"}</p>
+                    <p>推荐音色方向：{candidate.voice_direction ?? "待确认"}</p>
+                    <p>证据片段：{candidate.evidence.join(" / ") || "待确认"}</p>
+                    <p>置信度：{Math.round(candidate.confidence * 100)}%；{candidate.needs_human_review ? "需要人工确认" : "仍可人工编辑"}</p>
+                  </article>
+                ))}
+                {aiOneClickWaitingForRoles && (
+                  <button
+                    className="tool-button amber"
+                    type="button"
+                    disabled={aiOneClickRunning}
+                    onClick={() => void completeAiRoleListAndResumeWorkflow()}
+                  >
+                    角色列表添加完成
+                  </button>
+                )}
+              </div>
+            )}
           </section>
         </aside>
 
@@ -1297,6 +1560,14 @@ function App() {
                   <h2>{activeChapter.title}</h2>
                 </div>
                 <div className="gate">
+                  <button
+                    className="tool-button purple"
+                    type="button"
+                    onClick={() => void runAiOneClickAnalysis()}
+                    disabled={aiOneClickRunning || visibleParagraphs.length === 0}
+                  >
+                    AI一键分析
+                  </button>
                   <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
                     确认无误
                   </button>
@@ -1701,7 +1972,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.242</h1>
+        <h1>NovelVoice-Agent v0.25</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

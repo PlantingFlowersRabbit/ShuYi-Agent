@@ -2,18 +2,18 @@
 
 ## 目标
 
-NovelVoice-Agent 是一个小说辅助生成故事配音的 agent 项目。v0.242 在既有 TTS 启动就绪门禁和段落内 AI 语句划分基础上，精简音频生成控件、默认不预选角色、补强并发生成可播放性、统一音色目录，并改善长文本 TTS 错误反馈。
+NovelVoice-Agent 是一个小说辅助生成故事配音的 agent 项目。v0.25 在既有段落内 AI 语句划分基础上，新增选中章节的 AI一键分析 LangGraph 工作流，先分析角色候选并等待人工补全角色，再完成语句划分和空角色语句选择。
 
 本仓库的 harness 目标不是一次性自动化全流程，而是让后续 AI worker 能稳定理解项目边界、测试口径、资源来源、模型合约和人机协作流程，避免未来接入更强自动化或 harness 工程时大规模推倒重来。
 
 ## 仓库结构
 
-- `spec/`：当前版本目标、产品范围、架构边界、LLM 语句划分合约和音频合成合约；v0.242 为当前增量目标，沿用现有 harness 文档和用户需求。
+- `spec/`：当前版本目标、产品范围、架构边界、LLM 语句划分合约和音频合成合约；v0.25 为当前增量目标，沿用现有 harness 文档和用户需求。
 - `assets/`：测试验收素材、素材来源、许可证和资源使用说明。
 - `assets/samples/novels/`：小型小说 txt 样本，用于章节和段落正则测试。
 - `assets/samples/voices/`：小型可再分发参考音频样本，用于 voice cloning 烟测。
 - `backend/`：FastAPI 后端代码目录，包含小说、角色、音色资源、模型配置、语句划分和音频接口边界。
-- `frontend/`：React + Vite + TypeScript 前端代码目录，当前提供 v0.242 三页面工作台。
+- `frontend/`：React + Vite + TypeScript 前端代码目录，当前提供 v0.25 三页面工作台。
 - `scripts/`：后续下载、资源校验、测试辅助脚本目录。
 - `models/`：本地模型说明或 gitignored symlink，不能提交大型模型权重。
 - `outputs/`：合成音频和验收输出目录，默认不提交生成产物。
@@ -24,7 +24,7 @@ NovelVoice-Agent 是一个小说辅助生成故事配音的 agent 项目。v0.24
 
 ## 实现约束
 
-- v0.242 仍是人工主导版本，不实现全自动 harness 编排，不自动批量生成整章音频，不自动替用户确认段落。
+- v0.25 仍是人工主导版本，不实现全自动 harness 编排，不自动批量生成整章音频，不自动替用户确认段落；AI一键分析也不得自动生成音频。
 - 前端默认使用 React + Vite + TypeScript；后端默认使用 Python + FastAPI + uv。
 - 模型调用必须通过 OpenAI-compatible provider registry，不能把 `base_url`、模型名、API key 和超时重试策略散落到 UI 或业务代码里。
 - 语句划分默认 provider 为 SiliconFlow：`base_url="https://api.siliconflow.cn/v1"`，`model="Qwen/Qwen3-8B"`。
