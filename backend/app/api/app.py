@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.domain.ai_chapter_agent import AiChapterSplitAgent, ChapterSplitSkill
+from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangChainSegmentationSkill
 from backend.app.domain.audio import (
     DEFAULT_GENERATED_VOICE_TEXT,
     TTSServiceError,
@@ -29,12 +30,11 @@ from backend.app.domain.audio import (
     synthesize_local_qwen3,
     synthesize_voice_design_qwen3,
 )
-from backend.app.domain.llm import MissingProviderCredential, OpenAICompatibleSegmentationClient
+from backend.app.domain.llm import MissingProviderCredential
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
 from backend.app.domain.novel_files import NovelFileError, extract_novel_file
 from backend.app.domain.providers import default_provider_registry
 from backend.app.domain.roles import RoleCard, RoleCollection, default_role_cards
-from backend.app.domain.segmentation import repair_json_output_once, validate_segmentation_result
 from backend.app.domain.voices import (
     VoiceResource,
     VoiceResourceCollection,
@@ -120,7 +120,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.23 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.24 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
@@ -245,9 +245,11 @@ def create_app() -> FastAPI:
         roles = [role.to_dict() for role in _state(app)["roles"].list()]
         provider = _segmentation_provider_from_config(app)
         try:
-            raw_output = OpenAICompatibleSegmentationClient(
-                provider=provider,
-                api_key_lookup=_api_key_lookup_from_config(app),
+            agent_result = AiSegmentationAgent(
+                skill=LangChainSegmentationSkill(
+                    provider=provider,
+                    api_key_lookup=_api_key_lookup_from_config(app),
+                )
             ).segment(
                 chapter_title=workbench.chapter.title,
                 paragraph_id=paragraph_id,
@@ -258,13 +260,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"LLM segmentation failed: {exc}") from exc
-        result = validate_segmentation_result(
-            paragraph_id=paragraph_id,
-            paragraph_text=paragraph.text,
-            raw_output=str(raw_output),
-            known_roles=roles,
-            repair_json=repair_json_output_once,
-        )
+        result = agent_result.validation
         return {
             "ok": result.ok,
             "paragraph_id": result.paragraph_id,
@@ -273,6 +269,10 @@ def create_app() -> FastAPI:
             "error": result.error,
             "repaired": result.repaired,
             "raw_output": result.raw_output,
+            "agent": {
+                "reflection_count": agent_result.reflection_count,
+                "trace": agent_result.trace,
+            },
         }
 
     @app.api_route("/api/roles", methods=["GET", "POST"])
@@ -538,7 +538,7 @@ def create_app() -> FastAPI:
         role_id = payload.get("role_id")
         if not role_id:
             raise HTTPException(status_code=400, detail="role_id is required")
-        role = _state(app)["roles"].get(str(role_id))
+        role = _speech_role_from_payload(app, _state(app)["roles"].get(str(role_id)), payload)
         utterance = {
             "utterance_id": utterance_id,
             "text": payload.get("text", ""),
@@ -836,3 +836,14 @@ def _role_payload_with_resource(app: FastAPI, payload: dict[str, Any]) -> dict[s
         updates["design_prompt"] = None
         updates["voice_mode"] = "voice_cloning"
     return updates
+
+
+def _speech_role_from_payload(app: FastAPI, role: RoleCard, payload: dict[str, Any]) -> RoleCard:
+    voice_resource_id = payload.get("voice_resource_id")
+    if not voice_resource_id:
+        return role
+    try:
+        voice = _state(app)["voices"].get(str(voice_resource_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail="voice resource not found") from exc
+    return _role_with_voice(role, voice)

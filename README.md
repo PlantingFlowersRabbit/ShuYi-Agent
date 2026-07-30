@@ -2,11 +2,11 @@
 
 小说辅助生成故事配音的 agent 项目。
 
-v0.23 修复本地 Qwen3-TTS 启动反馈：启动服务必须等 Base 与 VoiceDesign 模型加载完成且 `/health` 确认 VoiceDesign 可用后才算成功，并在模型配置页显示启动进度。
+v0.24 调整 AI 语句划分工作流：确认段落后默认生成整段落语句文本，每个段落内提供 `AI语句划分`，后端使用 LangChain + reflection 调用 SiliconFlow `Qwen/Qwen3-8B`，并修复新音色绑定角色后音频生成未使用当前参考音频的问题。
 
 ## 当前状态
 
-- 规格和验收文档已在 `spec/` 与 `docs/` 中建立，当前版本目标见 `spec/v0.23-harness.md`。
+- 规格和验收文档已在 `spec/` 与 `docs/` 中建立，当前版本目标见 `spec/v0.24-harness.md`。
 - 样本小说和可再分发音频素材在 `assets/samples/`；真实本地测试样本默认位于 `/Users/gaojing/Downloads/真实测试样本`。
 - 本地 Qwen3-TTS 服务脚本在 `backend/tts/qwen3_tts_server.py`。
 - 前端 React + Vite 工作台在 `frontend/`，后端 FastAPI 边界在 `backend/app/api/app.py`。
@@ -18,7 +18,7 @@ AI worker 进入仓库后先读：
 
 1. `AGENTS.md`
 2. `docs/development/acceptance-standard.md`
-3. 当前任务相关 `spec/*.md`，v0.23 默认读 `spec/v0.23-harness.md`
+3. 当前任务相关 `spec/*.md`，v0.24 默认读 `spec/v0.24-harness.md`
 4. `docs/experience-library/active-rules.md`
 
 ## 验证
@@ -27,4 +27,4 @@ AI worker 进入仓库后先读：
 python3 scripts/validate_harness.py
 ```
 
-该脚本检查 harness 文件、docs 索引、manifest 和入库样本音频解码；真实 UI、模型和 TTS 仍需按 `docs/development/v0.23-verification.md` 取证。
+该脚本检查 harness 文件、docs 索引、manifest 和入库样本音频解码；真实 UI、模型和 TTS 仍需按 `docs/development/v0.24-verification.md` 取证。

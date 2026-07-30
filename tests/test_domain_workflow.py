@@ -235,6 +235,113 @@ def test_llm_segmentation_client_builds_openai_compatible_request():
     assert captured["payload"]["messages"] == messages
 
 
+def test_v0_24_ai_segmentation_agent_reflects_once_for_text_conservation():
+    """Covers v0.24 LangChain/reflection segmentation agent behavior."""
+    from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent
+
+    paragraph = "“别笑了，引来魔物就麻烦了。”佩罗不耐烦地打断了笑声，“就这了，把她放下来。”"
+    known_roles = [{"role_id": "narrator", "name": "旁白"}, {"role_id": "peruo", "name": "佩罗"}]
+    invalid_first_pass = json.dumps(
+        {
+            "paragraph_id": "p-0001",
+            "utterances": [
+                {
+                    "utterance_id": "p-0001-u-001",
+                    "speaker_name": "佩罗",
+                    "speaker_role_id": "peruo",
+                    "voice_mode": "voice_cloning",
+                    "text": "“别笑了，引来魔物就麻烦了。”",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.8,
+                    "needs_human_review": False,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    reflected_output = json.dumps(
+        {
+            "paragraph_id": "p-0001",
+            "utterances": [
+                {
+                    "utterance_id": "p-0001-u-001",
+                    "speaker_name": "佩罗",
+                    "speaker_role_id": "peruo",
+                    "voice_mode": "voice_cloning",
+                    "text": "“别笑了，引来魔物就麻烦了。”",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.9,
+                    "needs_human_review": False,
+                },
+                {
+                    "utterance_id": "p-0001-u-002",
+                    "speaker_name": "旁白",
+                    "speaker_role_id": "narrator",
+                    "voice_mode": "voice_cloning",
+                    "text": "佩罗不耐烦地打断了笑声，",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.85,
+                    "needs_human_review": False,
+                },
+                {
+                    "utterance_id": "p-0001-u-003",
+                    "speaker_name": "佩罗",
+                    "speaker_role_id": "peruo",
+                    "voice_mode": "voice_cloning",
+                    "text": "“就这了，把她放下来。”",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.9,
+                    "needs_human_review": False,
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    class FakeSkill:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def segment(self, **kwargs):
+            self.calls.append("segment")
+            return invalid_first_pass
+
+        def reflect(self, **kwargs):
+            self.calls.append(f"reflect:{kwargs['validation'].error_code}")
+            return reflected_output
+
+    skill = FakeSkill()
+    agent = AiSegmentationAgent(skill=skill)
+
+    result = agent.segment(
+        chapter_title="第一章",
+        paragraph_id="p-0001",
+        paragraph_text=paragraph,
+        known_roles=known_roles,
+    )
+
+    assert result.validation.ok is True
+    assert result.reflection_count == 1
+    assert skill.calls == ["segment", "reflect:text_conservation_failed"]
+    assert [utterance["text"] for utterance in result.validation.utterances] == [
+        "“别笑了，引来魔物就麻烦了。”",
+        "佩罗不耐烦地打断了笑声，",
+        "“就这了，把她放下来。”",
+    ]
+
+
 def test_v0_14_segmentation_prompt_targets_speaker_units_not_mechanical_sentences():
     """Covers v0.14 speaker-unit segmentation requirements for Qwen/Qwen3-8B."""
     paragraph = "“别笑了，引来魔物就麻烦了。”佩罗不耐烦地打断了笑声，“就这了，把她放下来。”"
@@ -784,6 +891,76 @@ def test_fastapi_v0_141_generated_voice_substitute_explains_required_model(tmp_p
     assert validate_wav_duration(Path(data["voice"]["reference_audio_path"])) == 0.75
 
 
+def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
+    """Covers v0.24 role-to-voice sync when a newly selected voice is used for speech."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    reference_audio = tmp_path / "preview-0002.wav"
+    write_valid_wav(reference_audio)
+    captured = {}
+
+    def fake_synthesize(request, *, output_path, service_base_url=None):
+        captured["request"] = request
+        captured["service_base_url"] = service_base_url
+        write_valid_wav(output_path)
+        return 0.75
+
+    with (
+        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "synthesize_local_qwen3", fake_synthesize),
+    ):
+        client = TestClient(create_app())
+        voice_response = client.post(
+            "/api/voice-resources",
+            json={
+                "voice_id": "voice-male-2",
+                "name": "男2",
+                "description": "雄壮苍老的声音",
+                "reference_text": "这是一段用于试听新音色的语音。",
+                "reference_audio_path": str(reference_audio),
+                "generated": True,
+            },
+        )
+        assert voice_response.status_code == 200
+
+        stale_role = client.post(
+            "/api/roles",
+            json={
+                "role_id": "narrator_2",
+                "name": "旁白2",
+                "description": "仍停留在旧音色的服务端角色缓存",
+                "voice_mode": "voice_cloning",
+                "voice_resource_id": "voice-male-narrator",
+                "reference_audio_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
+                "reference_text": "齐心协力",
+                "design_prompt": None,
+            },
+        )
+        assert stale_role.status_code == 200
+
+        speech = client.post(
+            "/api/utterances/p-0001-u-001/speech",
+            json={
+                "role_id": "narrator_2",
+                "voice_resource_id": "voice-male-2",
+                "text": "待合成文本",
+                "voice_mode": "voice_cloning",
+                "language": "Auto",
+            },
+        )
+
+    assert speech.status_code == 200
+    data = speech.json()
+    assert captured["request"]["audio_sample_path"] == str(reference_audio)
+    assert captured["request"]["ref_text"] == "这是一段用于试听新音色的语音。"
+    assert data["voice_job"]["reference_audio_path"] == str(reference_audio)
+    assert data["voice_job"]["reference_text"] == "这是一段用于试听新音色的语音。"
+
+
 def test_voice_design_request_uses_qwen_endpoint_when_available(tmp_path):
     """Covers v0.141 VoiceDesign model request shape."""
     audio_bytes = tmp_path / "design.wav"
@@ -1091,7 +1268,7 @@ def test_fastapi_segmentation_uses_provider_and_repairs_once(monkeypatch):
     from fastapi.testclient import TestClient
 
     from backend.app.api.app import create_app
-    from backend.app.domain.llm import OpenAICompatibleSegmentationClient
+    from backend.app.domain.ai_segmentation_agent import LangChainSegmentationSkill
 
     monkeypatch.setenv("SILICONFLOW_API_KEY", "test-token")
 
@@ -1118,7 +1295,7 @@ def test_fastapi_segmentation_uses_provider_and_repairs_once(monkeypatch):
 }}
 ```"""
 
-    with patch.object(OpenAICompatibleSegmentationClient, "segment", fake_segment):
+    with patch.object(LangChainSegmentationSkill, "segment", fake_segment):
         client = TestClient(create_app())
         assert client.post("/api/novels/parse", json={"text": "第一章 初遇\n他说：“你好。”"}).status_code == 200
         assert client.patch("/api/paragraphs/p-0001", json={"confirm_all": True}).status_code == 200

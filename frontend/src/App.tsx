@@ -511,6 +511,15 @@ function makeUtteranceDraft(paragraph: ParagraphModule, roles: RoleCard[]): Utte
   };
 }
 
+function makeWholeParagraphUtteranceGroups(
+  paragraphs: ParagraphModule[],
+  roles: RoleCard[],
+): Record<string, UtteranceDraft[]> {
+  return Object.fromEntries(
+    paragraphs.map((paragraph) => [paragraph.paragraphId, [makeUtteranceDraft(paragraph, roles)]]),
+  );
+}
+
 function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
   const fallbackRole = roles[0];
   const role = roles.find((item) => item.roleId === utterance.speaker_role_id) ?? fallbackRole;
@@ -754,7 +763,7 @@ function App() {
     setApiStatus(`已加载章节：${chapter.title}`);
   }
 
-  async function syncCurrentChapterParagraphs(confirm = false) {
+  async function syncCurrentChapterParagraphs(confirm = false): Promise<{ paragraphs: ParagraphModule[]; canSegment: boolean }> {
     if (!activeChapter) throw new Error("请选择章节");
     const data = await requestJson<{ paragraphs: ApiParagraph[]; can_segment: boolean }>(
       `/api/chapters/${activeChapter.chapterId}/paragraphs`,
@@ -772,9 +781,11 @@ function App() {
         }),
       },
     );
-    setParagraphs(data.paragraphs.map(fromApiParagraph));
+    const syncedParagraphs = data.paragraphs.map(fromApiParagraph);
+    setParagraphs(syncedParagraphs);
     setConfirmed(data.can_segment);
     setChapterBackendSynced(true);
+    return { paragraphs: syncedParagraphs, canSegment: data.can_segment };
   }
 
   function updateParagraph(paragraphId: string, updates: Partial<ParagraphModule>) {
@@ -794,8 +805,9 @@ function App() {
     if (visibleParagraphs.length === 0) return;
     setApiStatus("正在同步当前章节段落并确认");
     try {
-      await syncCurrentChapterParagraphs(true);
-      setApiStatus("段落已确认，可以使用 Qwen/Qwen3-8B 执行语句划分");
+      const synced = await syncCurrentChapterParagraphs(true);
+      setUtterancesByParagraph(makeWholeParagraphUtteranceGroups(synced.paragraphs, roles));
+      setApiStatus("段落已确认，已默认按整段落生成语句文本；每段可单独使用 AI语句划分");
     } catch (error) {
       setConfirmed(false);
       setChapterBackendSynced(false);
@@ -818,29 +830,24 @@ function App() {
   }
 
   function updateRole(roleId: string, updates: Partial<RoleCard>) {
-    let updatedRole: RoleCard | undefined;
-    setRoles((current) =>
-      current.map((role) => {
-        if (role.roleId !== roleId) return role;
-        const merged = { ...role, ...updates };
-        updatedRole = updates.voiceResourceId ? applyVoiceToRole(merged, updates.voiceResourceId) : merged;
-        return updatedRole;
+    const currentRole = roles.find((role) => role.roleId === roleId);
+    if (!currentRole) return;
+    const merged = { ...currentRole, ...updates };
+    const updatedRole =
+      updates.voiceResourceId !== undefined ? applyVoiceToRole(merged, updates.voiceResourceId) : merged;
+    setRoles((current) => current.map((role) => (role.roleId === roleId ? updatedRole : role)));
+    requestJson(`/api/roles/${roleId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: updatedRole.name,
+        description: updatedRole.description,
+        voice_mode: updatedRole.voiceMode,
+        voice_resource_id: updatedRole.voiceResourceId,
+        reference_audio_path: updatedRole.referenceAudioPath,
+        reference_text: updatedRole.referenceText,
+        design_prompt: updatedRole.designPrompt || null,
       }),
-    );
-    if (updatedRole) {
-      requestJson(`/api/roles/${roleId}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: updatedRole.name,
-          description: updatedRole.description,
-          voice_mode: updatedRole.voiceMode,
-          voice_resource_id: updatedRole.voiceResourceId,
-          reference_audio_path: updatedRole.referenceAudioPath,
-          reference_text: updatedRole.referenceText,
-          design_prompt: updatedRole.designPrompt || null,
-        }),
-      }).catch((error) => setApiStatus(`角色同步失败：${String(error)}`));
-    }
+    }).catch((error) => setApiStatus(`角色同步失败：${String(error)}`));
   }
 
   async function addRole() {
@@ -893,34 +900,42 @@ function App() {
       .catch((error) => setApiStatus(`播放音色失败：${String(error)}`));
   }
 
-  async function runSegmentation() {
-    if (!confirmed) return;
-    setApiStatus("正在使用 Qwen/Qwen3-8B 进行说话人粒度语句划分");
-    setSegmentationProgress(0);
-    if (!chapterBackendSynced) {
-      await syncCurrentChapterParagraphs(true);
+  async function runAiSegmentationForParagraph(paragraphId: string) {
+    const target = visibleParagraphs.find((paragraph) => paragraph.paragraphId === paragraphId);
+    if (!target) return;
+    if (!confirmed) {
+      setApiStatus("请先点击确认无误，再使用 AI语句划分");
+      return;
     }
-    await runQwenSegmentation();
-  }
-
-  async function runQwenSegmentation() {
-    const grouped: Record<string, UtteranceDraft[]> = {};
+    setApiStatus(`AI语句划分智能体正在分析 ${paragraphId}`);
+    setSegmentationProgress(0);
     try {
-      for (const [index, paragraph] of visibleParagraphs.entries()) {
-        const data = await requestJson<{ ok: boolean; utterances: ApiUtterance[]; error?: string }>(
-          `/api/paragraphs/${paragraph.paragraphId}/segment`,
-          { method: "POST", body: JSON.stringify({}) },
-        );
-        grouped[paragraph.paragraphId] = data.ok
-          ? data.utterances.map((utterance) => fromApiUtterance(utterance, paragraph, roles))
-          : [{ ...makeUtteranceDraft(paragraph, roles), audioStatus: `语句划分失败，请手动编辑：${data.error ?? "模型输出未通过校验"}` }];
-        setSegmentationProgress(Math.round(((index + 1) / visibleParagraphs.length) * 100));
+      let paragraph = target;
+      if (!chapterBackendSynced) {
+        const synced = await syncCurrentChapterParagraphs(true);
+        paragraph = synced.paragraphs.find((item) => item.paragraphId === paragraphId) ?? target;
       }
-      setUtterancesByParagraph(grouped);
-      setApiStatus("已根据 Qwen/Qwen3-8B 生成可编辑语句草稿；子语句已嵌套在对应段落内");
+      const data = await requestJson<{ ok: boolean; utterances: ApiUtterance[]; error?: string }>(
+        `/api/paragraphs/${paragraph.paragraphId}/segment`,
+        { method: "POST", body: JSON.stringify({}) },
+      );
+      const nextUtterances = data.ok
+        ? data.utterances.map((utterance) => fromApiUtterance(utterance, paragraph, roles))
+        : [
+            {
+              ...makeUtteranceDraft(paragraph, roles),
+              audioStatus: `AI语句划分失败，请手动编辑：${data.error ?? "模型输出未通过校验"}`,
+            },
+          ];
+      setUtterancesByParagraph((current) => ({
+        ...current,
+        [paragraph.paragraphId]: nextUtterances,
+      }));
+      setSegmentationProgress(100);
+      setApiStatus(`已完成 ${paragraph.paragraphId} 的 AI语句划分；结果可继续人工编辑`);
     } catch (error) {
       setSegmentationProgress(100);
-      setApiStatus(`语句划分失败：请检查远端模型配置、api_key 和网络连接。${String(error)}`);
+      setApiStatus(`AI语句划分失败：请检查远端模型配置、api_key 和网络连接。${String(error)}`);
     }
   }
 
@@ -1000,6 +1015,7 @@ function App() {
           method: "POST",
           body: JSON.stringify({
             role_id: role.roleId,
+            voice_resource_id: role.voiceResourceId,
             text: utterance.text,
             voice_mode: role.voiceMode,
             language: utterance.language,
@@ -1221,7 +1237,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.23 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.24 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1243,7 +1259,7 @@ function App() {
             />
             <ProgressBar label="上传小说进度" value={uploadProgress} />
             <ProgressBar label="章节划分进度" value={chapterSplitProgress} />
-            <ProgressBar label="语句划分进度" value={segmentationProgress} />
+            <ProgressBar label="AI语句划分进度" value={segmentationProgress} />
             <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
             <div className="novel-preview" aria-label="小说开头预览">
               {novelPreview}
@@ -1344,10 +1360,7 @@ function App() {
                   <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
                     确认无误
                   </button>
-                  <button className="tool-button purple" type="button" onClick={() => void runSegmentation()} disabled={!confirmed}>
-                    语句划分
-                  </button>
-                  <span>{confirmed ? "已确认，可以执行语句划分" : "确认前不能执行语句划分"}</span>
+                  <span>{confirmed ? "已确认，已生成整段落语句文本" : "确认前不能执行 AI语句划分"}</span>
                 </div>
               </header>
 
@@ -1356,6 +1369,14 @@ function App() {
                   <article className="paragraph-card" key={paragraph.paragraphId}>
                     <div className="paragraph-toolbar">
                       <strong>{paragraph.paragraphId}</strong>
+                      <button
+                        className="tool-button purple"
+                        type="button"
+                        onClick={() => void runAiSegmentationForParagraph(paragraph.paragraphId)}
+                        disabled={!confirmed}
+                      >
+                        AI语句划分
+                      </button>
                       <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { collapsed: !paragraph.collapsed })}>
                         {paragraph.collapsed ? "展开" : "折叠"}
                       </button>
@@ -1813,7 +1834,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.23</h1>
+        <h1>NovelVoice-Agent v0.24</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

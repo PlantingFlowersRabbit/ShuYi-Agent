@@ -28,6 +28,8 @@
 | [docs/development/v0.22-verification.md](./development/v0.22-verification.md) | v0.22 EPUB/TXT 文件输入、章节划分智能体和真实样本验证要求。 |
 | [spec/v0.23-harness.md](../spec/v0.23-harness.md) | v0.23 本地 TTS 启动健康检查、VoiceDesign 就绪门禁和启动进度规格。 |
 | [docs/development/v0.23-verification.md](./development/v0.23-verification.md) | v0.23 TTS 启动进度、模型加载完成和 VoiceDesign 生成验证要求。 |
+| [spec/v0.24-harness.md](../spec/v0.24-harness.md) | v0.24 AI 语句划分、LangChain reflection 和当前音色引用修复规格。 |
+| [docs/development/v0.24-verification.md](./development/v0.24-verification.md) | v0.24 整段落默认草稿、段落内 AI语句划分和音色引用验证要求。 |
 | [docs/experience-library/README.md](./experience-library/README.md) | 经验库入口，说明经验和规则怎么记录、怎么复用。 |
 | [docs/experience-library/active-rules.md](./experience-library/active-rules.md) | 当前开发前必须主动遵守的规则。 |
 | [docs/experience-library/lessons.md](./experience-library/lessons.md) | 已发生问题和处理经验记录。 |

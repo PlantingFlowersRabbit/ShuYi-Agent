@@ -41,7 +41,7 @@ outputs/
 
 - 小说解析模块只负责 txt、章节和段落正则，不调用 LLM。
 - 角色模块只负责角色卡数据和素材引用，不生成音频。
-- 语句划分模块只负责 LLM prompt、JSON schema、repair 和文本守恒校验。
+- AI 语句划分模块负责 LangChain agent 调用、reflection 修复、LLM prompt、JSON schema、repair 和文本守恒校验。
 - 音频模块只负责 TTS 请求、输出文件、试听 URL 和音频元数据。
 - UI 模块只负责交互和编辑状态，不硬编码 provider 密钥、模型路径或 TTS 细节。
 - provider registry 负责 `base_url`、`api_key`、`model`、`timeout`、`max_retries`、`extra_body`。
@@ -102,4 +102,3 @@ outputs/
 - `POST /api/utterances/{utterance_id}/speech`
 
 v0.1 实现时可调整路径细节，但不能破坏对象边界。
-

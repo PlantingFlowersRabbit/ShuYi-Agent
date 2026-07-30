@@ -32,6 +32,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/development/v0.22-verification.md",
         "spec/v0.23-harness.md",
         "docs/development/v0.23-verification.md",
+        "spec/v0.24-harness.md",
+        "docs/development/v0.24-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -43,10 +45,12 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     styles = read("frontend/src/styles.css")
     package_json = read("frontend/package.json")
     vite_config = read("frontend/vite.config.ts")
+    index_html = read("frontend/index.html")
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.23" in app
+    assert "NovelVoice-Agent v0.24" in app
+    assert "NovelVoice-Agent v0.24" in index_html
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
@@ -63,7 +67,7 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     assert "语音具体内容" in app
     assert "当前章节" in app
     assert "确认无误" in app
-    assert "语句划分" in app
+    assert "AI语句划分" in app
     assert "utterancesByParagraph" in app
     assert "paragraph-utterances" in app
     assert "音色名称" in app
@@ -113,7 +117,7 @@ def test_frontend_v0_11_progress_and_large_upload_guardrails():
 
     assert "progress-bar" in app
     assert "上传小说进度" in app
-    assert "语句划分进度" in app
+    assert "AI语句划分进度" in app
     assert "语音生成进度" in app
     assert "MAX_NOVEL_PREVIEW_CHARS" in app
     assert "novelPreview" in app
@@ -131,7 +135,7 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.23" in app
+    assert "NovelVoice-Agent v0.24" in app
     assert "AI章节划分" in app
     assert "runAiChapterSplit" in app
     assert '"/api/novels/ai-chapter-split"' in app
@@ -158,7 +162,7 @@ def test_frontend_v0_20_model_config_exposes_deepseek_chapter_agent():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.23.0"' in package_json
+    assert '"version": "0.24.0"' in package_json
     assert "chapter_agent" in app
     assert "AI章节划分智能体" in app
     assert "https://api.deepseek.com" in app
@@ -182,7 +186,7 @@ def test_frontend_v0_22_uploads_epub_to_ai_chapter_agent_file_endpoint():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.23.0"' in package_json
+    assert '"version": "0.24.0"' in package_json
     assert 'accept=".txt,.epub,text/plain,application/epub+zip"' in app
     assert "uploadedNovelFileRef" in app
     assert "readNovelFileUpload" in app
@@ -196,10 +200,10 @@ def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.23" in app
-    assert "runQwenSegmentation" in app
+    assert "NovelVoice-Agent v0.24" in app
+    assert "runAiSegmentationForParagraph" in app
     assert "Qwen/Qwen3-8B" in app
-    assert "已根据 Qwen/Qwen3-8B 生成可编辑语句草稿" in app
+    assert "AI语句划分智能体正在分析" in app
     assert "`/api/paragraphs/${paragraph.paragraphId}/segment`" in app
     assert "createLocalUtteranceDrafts" not in app
     assert "splitIntoSubSentences" not in app
@@ -213,6 +217,25 @@ def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     assert ".model-page" in styles
     assert "height: calc(100vh - 62px)" in styles
     assert "overflow-y: auto" in styles
+
+
+def test_frontend_v0_24_paragraph_local_ai_segmentation_defaults():
+    """Covers v0.24 default whole-paragraph drafts and paragraph-local AI segmentation."""
+    app = read("frontend/src/App.tsx")
+
+    for term in [
+        "makeWholeParagraphUtteranceGroups",
+        "已默认按整段落生成语句文本",
+        "每段可单独使用 AI语句划分",
+        "runAiSegmentationForParagraph(paragraph.paragraphId)",
+        "AI语句划分",
+        "确认前不能执行 AI语句划分",
+        "voice_resource_id: role.voiceResourceId",
+    ]:
+        assert term in app
+
+    assert "onClick={() => void runSegmentation()}" not in app
+    assert "runQwenSegmentation" not in app
 
 
 def test_frontend_v0_14_audio_module_controls_and_no_mobile_layout():
