@@ -111,6 +111,7 @@ type ModelConfig = {
   tts: {
     base_url: string;
     model_path: string;
+    voice_design_model_path: string;
   };
 };
 
@@ -123,11 +124,22 @@ const sampleNovel = `1.变成蘑菇的公爵千金
 
 const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
+const DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base";
+const DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
 
 const EMOTION_OPTIONS = ["", "中性", "开心", "悲伤", "愤怒", "害怕", "惊讶", "温柔", "紧张", "严肃"];
 const LANGUAGE_OPTIONS = [
+  { value: "Auto", label: "Auto" },
   { value: "Chinese", label: "中文" },
   { value: "English", label: "英文" },
+  { value: "German", label: "德语" },
+  { value: "Italian", label: "意大利语" },
+  { value: "Portuguese", label: "葡萄牙语" },
+  { value: "Spanish", label: "西班牙语" },
+  { value: "Japanese", label: "日语" },
+  { value: "Korean", label: "韩语" },
+  { value: "French", label: "法语" },
+  { value: "Russian", label: "俄语" },
 ];
 
 const defaultVoices: VoiceResource[] = [
@@ -165,7 +177,8 @@ const defaultModelConfig: ModelConfig = {
   },
   tts: {
     base_url: "http://127.0.0.1:7811",
-    model_path: "",
+    model_path: DEFAULT_BASE_MODEL_PATH,
+    voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
   },
 };
 
@@ -362,7 +375,7 @@ function makeUtteranceDraft(paragraph: ParagraphModule, roles: RoleCard[]): Utte
     voiceMode: role.voiceMode,
     voiceResourceId: role.voiceResourceId,
     emotion: "",
-    language: "Chinese",
+    language: "Auto",
     xVectorOnly: false,
     speed: 1,
     volume: 1,
@@ -383,7 +396,7 @@ function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, r
     voiceMode: role.voiceMode,
     voiceResourceId: role.voiceResourceId,
     emotion: utterance.emotion || "",
-    language: "Chinese",
+    language: "Auto",
     xVectorOnly: false,
     speed: utterance.speed ?? 1,
     volume: utterance.volume ?? 1,
@@ -401,9 +414,37 @@ function normalizeModelConfig(config: Partial<ModelConfig>): ModelConfig {
     },
     tts: {
       base_url: config.tts?.base_url ?? defaultModelConfig.tts.base_url,
-      model_path: config.tts?.model_path ?? "",
+      model_path: config.tts?.model_path ?? defaultModelConfig.tts.model_path,
+      voice_design_model_path: config.tts?.voice_design_model_path ?? defaultModelConfig.tts.voice_design_model_path,
     },
   };
+}
+
+function buildDeferredControlInstruct(utterance: UtteranceDraft): string {
+  const emotionMap: Record<string, string> = {
+    中性: "自然地说",
+    开心: "开心地说",
+    悲伤: "悲伤地说",
+    愤怒: "愤怒地说",
+    害怕: "害怕地说",
+    惊讶: "惊讶地说",
+    温柔: "温柔地说",
+    紧张: "紧张地说",
+    严肃: "严肃地说",
+  };
+  const parts: string[] = [];
+  if (emotionMap[utterance.emotion]) parts.push(emotionMap[utterance.emotion]);
+  if (utterance.speed <= 0.5) parts.push("较慢地说");
+  else if (utterance.speed < 1) parts.push("稍慢地说");
+  else if (utterance.speed >= 2) parts.push("很快地说");
+  else if (utterance.speed >= 1.5) parts.push("较快地说");
+  else if (utterance.speed > 1) parts.push("稍快地说");
+  if (utterance.volume <= 0.5) parts.push("小声地说");
+  else if (utterance.volume < 1) parts.push("稍微小声地说");
+  else if (utterance.volume >= 1.5) parts.push("大声地说");
+  else if (utterance.volume > 1) parts.push("稍微大声地说");
+  if (utterance.otherControlText.trim()) parts.push(utterance.otherControlText.trim());
+  return parts.join("；");
 }
 
 function ProgressBar({ label, value }: { label: string; value: number }) {
@@ -781,11 +822,13 @@ function App() {
       updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "音频生成失败：角色不存在");
       return;
     }
+    const deferredControlInstruct = buildDeferredControlInstruct(utterance);
+    const deferredNote = deferredControlInstruct ? `；控制提示已暂存，暂不传入后端：${deferredControlInstruct}` : "";
     updateUtterance(
       utterance.paragraphId,
       utterance.utteranceId,
       "audioStatus",
-      "正在根据角色参考音频和其他控制文本生成音频",
+      `正在根据角色参考音频和语音具体内容生成音频${deferredNote}`,
     );
     setVoiceGenerationProgress(25);
     try {
@@ -797,19 +840,15 @@ function App() {
             role_id: role.roleId,
             text: utterance.text,
             voice_mode: role.voiceMode,
-            other_control_text: utterance.otherControlText,
-            emotion: utterance.emotion,
             language: utterance.language,
             x_vector_only: utterance.xVectorOnly,
-            speed: utterance.speed,
-            volume: utterance.volume,
           }),
         },
       );
       const audioStatus =
         result.voice_job.status === "substitute"
-          ? "本地 TTS 未启动，已生成可播放占位音频"
-          : "音频生成完成";
+          ? `本地 TTS 未启动，已生成可播放占位音频${deferredNote}`
+          : `音频生成完成${deferredNote}`;
       setUtterancesByParagraph((current) => ({
         ...current,
         [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map((item) =>
@@ -993,7 +1032,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.141 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.12 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1502,11 +1541,23 @@ function App() {
             />
           </label>
           <label>
-            模型权重路径
+            Base 模型权重路径
             <input
               value={modelConfig.tts.model_path}
               onChange={(event) =>
                 setModelConfig((current) => ({ ...current, tts: { ...current.tts, model_path: event.target.value } }))
+              }
+            />
+          </label>
+          <label>
+            VoiceDesign 模型权重路径
+            <input
+              value={modelConfig.tts.voice_design_model_path}
+              onChange={(event) =>
+                setModelConfig((current) => ({
+                  ...current,
+                  tts: { ...current.tts, voice_design_model_path: event.target.value },
+                }))
               }
             />
           </label>
@@ -1526,7 +1577,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.141</h1>
+        <h1>NovelVoice-Agent v0.12</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

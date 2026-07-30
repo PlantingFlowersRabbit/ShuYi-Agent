@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 import wave
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from backend.app.domain.audio import (
     VoiceJob,
     build_tts_request,
     model_control_note,
+    synthesize_local_qwen3,
     synthesize_voice_design_qwen3,
     validate_wav_duration,
 )
@@ -428,7 +431,7 @@ def test_tts_request_validation_and_voice_job_traceability():
         "voice_mode": "voice_cloning",
         "emotion": "紧张",
         "other_control_text": "压低声音，像在躲避追兵。",
-        "language": "Chinese",
+        "language": "Auto",
         "x_vector_only": True,
         "speed": 1.2,
         "volume": 0.8,
@@ -439,7 +442,8 @@ def test_tts_request_validation_and_voice_job_traceability():
     assert request["audio_sample_path"].endswith(".wav")
     assert request["ref_text"]
     assert request["response_format"] == "wav"
-    assert request["language"] == "Chinese"
+    assert request["language"] == "Auto"
+    assert request["reusable_prompt"] == request["ref_text"]
     assert request["x_vector_only"] is True
     assert request["emotion"] == "紧张"
     assert request["other_control_text"] == "压低声音，像在躲避追兵。"
@@ -492,6 +496,68 @@ def test_tts_request_validation_and_voice_job_traceability():
     assert trace["reference_audio_path"].endswith(".wav")
     assert trace["reference_text"]
     assert trace["output_path"].endswith(".wav")
+
+
+def test_v0_12_voice_clone_request_keeps_controls_out_of_qwen_payload(tmp_path):
+    """Covers v0.12 Base model voice clone request shape and deferred controls."""
+    reference_audio = tmp_path / "reference.wav"
+    service_audio = tmp_path / "service.wav"
+    write_valid_wav(reference_audio)
+    write_valid_wav(service_audio)
+
+    role = RoleCollection(default_role_cards()).get("narrator").with_updates(
+        reference_audio_path=str(reference_audio),
+        reference_text="这是一段短参考音频。",
+    )
+    request = build_tts_request(
+        {
+            "utterance_id": "p-0001-u-001",
+            "text": "目标生成台词",
+            "voice_mode": "voice_cloning",
+            "emotion": "开心",
+            "other_control_text": "带一点笑意",
+            "speed": 0.5,
+            "volume": 1.5,
+        },
+        role,
+    )
+
+    assert request["language"] == "Auto"
+    assert request["audio_sample_path"] == str(reference_audio)
+    assert request["reusable_prompt"] == "这是一段短参考音频。"
+    assert request["control_instruct"] == "开心地说；较慢地说；大声地说；带一点笑意"
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return service_audio.read_bytes()
+
+    def fake_urlopen(http_request, timeout=120):
+        captured["payload"] = json.loads(http_request.data.decode("utf-8"))
+        return FakeResponse()
+
+    with patch("backend.app.domain.audio.urllib.request.urlopen", fake_urlopen):
+        duration = synthesize_local_qwen3(
+            request,
+            output_path=tmp_path / "out.wav",
+            service_base_url="http://127.0.0.1:7811",
+        )
+
+    assert duration == 0.75
+    assert captured["payload"]["input"] == "目标生成台词"
+    assert captured["payload"]["ref_text"] == "这是一段短参考音频。"
+    assert captured["payload"]["language"] == "Auto"
+    assert "emotion_control_text" not in captured["payload"]
+    assert "control_instruct" not in captured["payload"]
+    assert "speed" not in captured["payload"]
+    assert "volume" not in captured["payload"]
 
 
 def test_fastapi_app_exposes_v0_11_resource_boundaries():
@@ -627,6 +693,7 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
         assert "VoiceDesign" in data["generation_note"]
         assert calls[0]["request"]["input"] == "这是一段用于试听新音色的语音。"
         assert calls[0]["request"]["instruct"] == "沉稳、叙事、颗粒感轻"
+        assert calls[0]["request"]["language"] == "Auto"
         assert before_count == after_generate_count
 
         saved = client.post(
@@ -704,7 +771,7 @@ def test_voice_design_request_uses_qwen_endpoint_when_available(tmp_path):
             {
                 "input": "这是一段用于试听新音色的语音。",
                 "instruct": "沉稳、叙事、颗粒感轻",
-                "language": "Chinese",
+                "language": "Auto",
                 "response_format": "wav",
             },
             output_path=output,
@@ -715,6 +782,7 @@ def test_voice_design_request_uses_qwen_endpoint_when_available(tmp_path):
     assert captured["url"] == "http://127.0.0.1:7811/v1/audio/voice-design"
     assert captured["payload"]["input"] == "这是一段用于试听新音色的语音。"
     assert captured["payload"]["instruct"] == "沉稳、叙事、颗粒感轻"
+    assert captured["payload"]["language"] == "Auto"
 
 
 def test_fastapi_v0_14_reference_audio_upload_saves_local_file(tmp_path):
@@ -759,7 +827,8 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
     assert config["llm"]["model"] == "Qwen/Qwen3-8B"
     assert config["llm"]["api_key"] == ""
     assert config["tts"]["base_url"] == "http://127.0.0.1:7811"
-    assert config["tts"]["model_path"] == ""
+    assert config["tts"]["model_path"] == app_module.DEFAULT_BASE_MODEL_PATH
+    assert config["tts"]["voice_design_model_path"] == app_module.DEFAULT_VOICE_DESIGN_MODEL_PATH
 
     remote_save = client.patch(
         "/api/model-config",
@@ -783,12 +852,14 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
             "tts": {
                 "base_url": "http://127.0.0.1:7811",
                 "model_path": "/models/qwen3-tts",
+                "voice_design_model_path": "/models/qwen3-tts-voice-design",
             },
         },
     )
     assert local_save.status_code == 200
     updated = local_save.json()["config"]
     assert updated["tts"]["model_path"] == "/models/qwen3-tts"
+    assert updated["tts"]["voice_design_model_path"] == "/models/qwen3-tts-voice-design"
 
     class FakeResponse:
         def __enter__(self):
@@ -820,6 +891,11 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
     assert start.json()["ok"] is True
     assert "启动" in start.json()["message"]
     assert calls
+    command = calls[0][0]
+    assert "--model-path" in command
+    assert "--voice-design-model-path" in command
+    assert "/models/qwen3-tts" in command
+    assert "/models/qwen3-tts-voice-design" in command
 
 
 def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
@@ -1021,6 +1097,65 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
     assert data["audio_url"] == "/outputs/audio/vj-0001.wav"
     assert data["duration_seconds"] == 0.75
     assert calls[0]["request"]["input"] == "待合成文本"
+
+
+def test_qwen3_tts_server_reuses_voice_clone_prompt_for_same_reference(tmp_path, monkeypatch):
+    """Covers v0.12 reusable prompt behavior in the local Base model service."""
+    monkeypatch.setitem(sys.modules, "python_multipart", types.SimpleNamespace(__version__="0.0.20"))
+
+    from backend.tts import qwen3_tts_server as server
+
+    reference = tmp_path / "reference.wav"
+    write_valid_wav(reference)
+    audio_bytes = reference.read_bytes()
+
+    class FakeCloneModel:
+        def __init__(self):
+            self.prompt_calls = 0
+            self.generate_calls = []
+
+        def create_voice_clone_prompt(self, *, ref_audio, ref_text, x_vector_only=False):
+            self.prompt_calls += 1
+            assert Path(ref_audio).exists()
+            assert ref_text == "这是一段短参考音频。"
+            assert x_vector_only is False
+            return {"cached": self.prompt_calls}
+
+        def generate_voice_clone(self, **kwargs):
+            self.generate_calls.append(kwargs)
+            return ["wav"], 24000
+
+    model = FakeCloneModel()
+    server.voice_clone_prompt_cache.clear()
+
+    first = server.generate_voice_clone_with_reusable_prompt(
+        model,
+        text="第一句目标台词",
+        language="Auto",
+        reference_path=str(reference),
+        reference_audio=audio_bytes,
+        reusable_prompt="这是一段短参考音频。",
+        x_vector_only=False,
+    )
+    second = server.generate_voice_clone_with_reusable_prompt(
+        model,
+        text="第二句目标台词",
+        language="Auto",
+        reference_path=str(reference),
+        reference_audio=audio_bytes,
+        reusable_prompt="这是一段短参考音频。",
+        x_vector_only=False,
+    )
+
+    assert first == (["wav"], 24000)
+    assert second == (["wav"], 24000)
+    assert model.prompt_calls == 1
+    assert len(model.generate_calls) == 2
+    for call in model.generate_calls:
+        assert call["language"] == "Auto"
+        assert call["voice_clone_prompt"] == {"cached": 1}
+        assert "ref_audio" not in call
+        assert "ref_text" not in call
 
 
 def test_fastapi_tts_endpoint_returns_substitute_audio_when_local_service_is_down(tmp_path):

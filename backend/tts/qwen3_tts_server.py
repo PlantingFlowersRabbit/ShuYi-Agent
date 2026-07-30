@@ -2,22 +2,40 @@
 import argparse
 import asyncio
 import base64
+import hashlib
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
-import soundfile as sf
-import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
-from qwen_tts import Qwen3TTSModel
+
+try:
+    import soundfile as sf
+except ImportError:  # pragma: no cover - runtime dependency for the local TTS service.
+    sf = None
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - runtime dependency for the local TTS service.
+    torch = None
+
+try:
+    from qwen_tts import Qwen3TTSModel
+except ImportError:  # pragma: no cover - runtime dependency for the local TTS service.
+    Qwen3TTSModel = None
 
 app = FastAPI(title="NovelVoice Qwen3-TTS Server")
-model = None
+voice_clone_model = None
+voice_design_model = None
+voice_clone_prompt_cache: dict[str, Any] = {}
 
 
 def load_model(model_path: str):
+    if torch is None or Qwen3TTSModel is None:
+        raise RuntimeError("qwen_tts and torch are required to start the local Qwen3-TTS service")
     device_map = os.environ.get("QWEN3_TTS_DEVICE", "cpu").strip().lower() or "cpu"
     if device_map not in {"cpu", "mps"}:
         device_map = "cpu"
@@ -35,16 +53,85 @@ def load_model(model_path: str):
     )
 
 
+def _voice_clone_prompt_cache_key(reference_audio: bytes, reusable_prompt: str, x_vector_only: bool) -> str:
+    digest = hashlib.sha256()
+    digest.update(reference_audio)
+    digest.update(b"\0")
+    digest.update(reusable_prompt.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(b"1" if x_vector_only else b"0")
+    return digest.hexdigest()
+
+
+def get_or_create_voice_clone_prompt(
+    model,
+    *,
+    reference_path: str,
+    reference_audio: bytes,
+    reusable_prompt: str,
+    x_vector_only: bool,
+):
+    if not hasattr(model, "create_voice_clone_prompt"):
+        return None
+    cache_key = _voice_clone_prompt_cache_key(reference_audio, reusable_prompt, x_vector_only)
+    if cache_key not in voice_clone_prompt_cache:
+        voice_clone_prompt_cache[cache_key] = model.create_voice_clone_prompt(
+            ref_audio=reference_path,
+            ref_text=reusable_prompt,
+            x_vector_only=x_vector_only,
+        )
+    return voice_clone_prompt_cache[cache_key]
+
+
+def generate_voice_clone_with_reusable_prompt(
+    model,
+    *,
+    text: str,
+    language: str,
+    reference_path: str,
+    reference_audio: bytes,
+    reusable_prompt: str,
+    x_vector_only: bool,
+):
+    voice_clone_prompt = get_or_create_voice_clone_prompt(
+        model,
+        reference_path=reference_path,
+        reference_audio=reference_audio,
+        reusable_prompt=reusable_prompt,
+        x_vector_only=x_vector_only,
+    )
+    kwargs: dict[str, Any] = {"text": text, "language": language}
+    if voice_clone_prompt is None:
+        kwargs.update(
+            ref_audio=reference_path,
+            ref_text=reusable_prompt,
+            x_vector_only_mode=x_vector_only,
+        )
+    else:
+        kwargs["voice_clone_prompt"] = voice_clone_prompt
+    return model.generate_voice_clone(**kwargs)
+
+
 @app.on_event("startup")
 async def startup():
-    global model
+    global voice_clone_model, voice_design_model
     model_path = os.environ["QWEN3_TTS_MODEL_PATH"]
-    model = await asyncio.to_thread(load_model, model_path)
+    voice_clone_model = await asyncio.to_thread(load_model, model_path)
+
+    design_model_path = os.environ.get("QWEN3_TTS_VOICE_DESIGN_MODEL_PATH", "").strip()
+    if design_model_path and design_model_path != model_path:
+        voice_design_model = await asyncio.to_thread(load_model, design_model_path)
+    else:
+        voice_design_model = voice_clone_model
 
 
 @app.get("/health")
 async def health():
-    return {"ok": model is not None}
+    return {
+        "ok": voice_clone_model is not None,
+        "voice_clone": voice_clone_model is not None,
+        "voice_design": voice_design_model is not None,
+    }
 
 
 @app.post("/v1/audio/speech/upload")
@@ -52,23 +139,26 @@ async def speech_upload(
     input: str = Form(...),
     voice_file: UploadFile = File(...),  # noqa: B008
     ref_text: str = Form(""),
-    language: str = Form("Chinese"),
+    language: str = Form("Auto"),
     response_format: str = Form("wav"),
     x_vector_only: bool = Form(False),
 ):
     suffix = Path(voice_file.filename or "reference.wav").suffix or ".wav"
+    reference_audio = await voice_file.read()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as reference:
-        reference.write(await voice_file.read())
+        reference.write(reference_audio)
         reference_path = reference.name
 
     try:
         wavs, sr = await asyncio.to_thread(
-            model.generate_voice_clone,
+            generate_voice_clone_with_reusable_prompt,
+            voice_clone_model,
             text=input,
             language=language,
-            ref_audio=reference_path,
-            ref_text=ref_text,
-            x_vector_only_mode=x_vector_only,
+            reference_path=reference_path,
+            reference_audio=reference_audio,
+            reusable_prompt=ref_text,
+            x_vector_only=x_vector_only,
         )
         return encode_audio_response(wavs[0], sr, response_format)
     except Exception as exc:
@@ -84,25 +174,28 @@ async def speech_upload(
 async def speech_json(payload: dict):
     text = payload.get("input", "")
     ref_text = payload.get("ref_text") or payload.get("audio_sample_text") or ""
-    language = payload.get("language", "Chinese")
+    language = payload.get("language", "Auto")
     response_format = payload.get("response_format", "wav")
     x_vector_only = bool(payload.get("x_vector_only", False))
     audio_sample = payload.get("audio_sample") or payload.get("voice_file")
     if not text or not audio_sample:
         raise HTTPException(status_code=400, detail="input and audio_sample are required")
 
+    reference_audio = base64.b64decode(audio_sample)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as reference:
-        reference.write(base64.b64decode(audio_sample))
+        reference.write(reference_audio)
         reference_path = reference.name
 
     try:
         wavs, sr = await asyncio.to_thread(
-            model.generate_voice_clone,
+            generate_voice_clone_with_reusable_prompt,
+            voice_clone_model,
             text=text,
             language=language,
-            ref_audio=reference_path,
-            ref_text=ref_text,
-            x_vector_only_mode=x_vector_only,
+            reference_path=reference_path,
+            reference_audio=reference_audio,
+            reusable_prompt=ref_text,
+            x_vector_only=x_vector_only,
         )
         return encode_audio_response(wavs[0], sr, response_format)
     except Exception as exc:
@@ -118,14 +211,14 @@ async def speech_json(payload: dict):
 async def voice_design_json(payload: dict):
     text = payload.get("input", "")
     instruct = payload.get("instruct") or payload.get("design_prompt") or ""
-    language = payload.get("language", "Chinese")
+    language = payload.get("language", "Auto")
     response_format = payload.get("response_format", "wav")
     if not text or not instruct:
         raise HTTPException(status_code=400, detail="input and instruct are required")
 
     try:
         wavs, sr = await asyncio.to_thread(
-            model.generate_voice_design,
+            voice_design_model.generate_voice_design,
             text=text,
             language=language,
             instruct=instruct,
@@ -141,6 +234,8 @@ async def voice_design_json(payload: dict):
 
 
 def encode_audio_response(wav, sr, response_format: str) -> Response:
+    if sf is None:
+        raise HTTPException(status_code=500, detail="soundfile is required to encode Qwen3-TTS audio")
     fmt = response_format.lower()
     if fmt not in {"wav", "flac", "ogg"}:
         fmt = "wav"
@@ -168,6 +263,7 @@ def encode_audio_response(wav, sr, response_format: str) -> Response:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True)
+    parser.add_argument("--voice-design-model-path", default=os.environ.get("QWEN3_TTS_VOICE_DESIGN_MODEL_PATH", ""))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7811)
     parser.add_argument(
@@ -178,6 +274,8 @@ def main():
     args = parser.parse_args()
 
     os.environ["QWEN3_TTS_MODEL_PATH"] = args.model_path
+    if args.voice_design_model_path:
+        os.environ["QWEN3_TTS_VOICE_DESIGN_MODEL_PATH"] = args.voice_design_model_path
     os.environ["QWEN3_TTS_DEVICE"] = args.device
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

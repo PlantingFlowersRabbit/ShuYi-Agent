@@ -41,6 +41,8 @@ OUTPUT_AUDIO_DIR = ROOT / "outputs/audio"
 OUTPUT_VOICE_RESOURCE_DIR = ROOT / "outputs/voice-resources"
 REAL_VOICE_ROOT = Path(os.environ.get("NOVELVOICE_REAL_VOICE_ROOT", "/Users/gaojing/Downloads/真实测试样本/音频"))
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
+DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base"
+DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 
 
 def _chapter_to_dict(chapter: Chapter) -> dict[str, Any]:
@@ -70,7 +72,11 @@ def _default_model_config() -> dict[str, Any]:
         },
         "tts": {
             "base_url": os.environ.get("QWEN3_TTS_BASE_URL", "http://127.0.0.1:7811"),
-            "model_path": os.environ.get("QWEN3_TTS_MODEL_PATH", ""),
+            "model_path": os.environ.get("QWEN3_TTS_MODEL_PATH", DEFAULT_BASE_MODEL_PATH),
+            "voice_design_model_path": os.environ.get(
+                "QWEN3_TTS_VOICE_DESIGN_MODEL_PATH",
+                DEFAULT_VOICE_DESIGN_MODEL_PATH,
+            ),
         },
     }
 
@@ -99,7 +105,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.14 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.12 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
@@ -299,7 +305,7 @@ def create_app() -> FastAPI:
         design_request = {
             "input": reference_text,
             "instruct": description,
-            "language": str(payload.get("language") or "Chinese"),
+            "language": str(payload.get("language") or "Auto"),
             "response_format": "wav",
         }
         try:
@@ -382,7 +388,9 @@ def create_app() -> FastAPI:
             config["llm"] = {**config["llm"], **llm_updates}
         if isinstance(payload.get("tts"), dict):
             tts_updates = {
-                key: value for key, value in payload["tts"].items() if key in {"base_url", "model_path"}
+                key: value
+                for key, value in payload["tts"].items()
+                if key in {"base_url", "model_path", "voice_design_model_path"}
             }
             config["tts"] = {**config["tts"], **tts_updates}
         return {"config": config}
@@ -410,6 +418,7 @@ def create_app() -> FastAPI:
         model_path = str(config.get("model_path") or "").strip()
         if not model_path:
             raise HTTPException(status_code=400, detail="model_path is required")
+        voice_design_model_path = str(config.get("voice_design_model_path") or "").strip()
         current = _state(app).get("tts_process")
         if current is not None and current.poll() is None:
             return {"ok": True, "message": "本地 TTS 服务已在运行", "pid": current.pid}
@@ -429,6 +438,8 @@ def create_app() -> FastAPI:
             "--device",
             os.environ.get("QWEN3_TTS_DEVICE", "cpu"),
         ]
+        if voice_design_model_path:
+            command.extend(["--voice-design-model-path", voice_design_model_path])
         try:
             process = await asyncio.to_thread(_start_tts_process, command)
         except Exception as exc:
@@ -482,7 +493,7 @@ def create_app() -> FastAPI:
             emotion=str(request.get("emotion") or ""),
             speed=float(request.get("speed", 1.0)),
             volume=float(request.get("volume", 1.0)),
-            language=str(request.get("language", "Chinese")),
+            language=str(request.get("language", "Auto")),
             other_control_text=request.get("other_control_text"),
             x_vector_only=bool(request.get("x_vector_only", False)),
         )

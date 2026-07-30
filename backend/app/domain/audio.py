@@ -17,7 +17,19 @@ class TTSServiceError(RuntimeError):
 
 
 DEFAULT_EMOTION_OPTIONS = ["", "中性", "开心", "悲伤", "愤怒", "害怕", "惊讶", "温柔", "紧张", "严肃"]
-DEFAULT_LANGUAGE_OPTIONS = ["Chinese", "English"]
+DEFAULT_LANGUAGE_OPTIONS = [
+    "Auto",
+    "Chinese",
+    "English",
+    "German",
+    "Italian",
+    "Portuguese",
+    "Spanish",
+    "Japanese",
+    "Korean",
+    "French",
+    "Russian",
+]
 DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。"
 
 
@@ -38,7 +50,7 @@ class VoiceJob:
     emotion: str = ""
     speed: float = 1.0
     volume: float = 1.0
-    language: str = "Chinese"
+    language: str = "Auto"
     other_control_text: str | None = None
     x_vector_only: bool = False
 
@@ -59,23 +71,63 @@ def _normalized_language(value: Any, default: str) -> str:
     return language if language in DEFAULT_LANGUAGE_OPTIONS else default
 
 
-def _control_instruct(*, emotion: str, other_control_text: str, speed: float, volume: float) -> str:
+def _speed_instruction(speed: float) -> str:
+    if speed <= 0.5:
+        return "较慢地说"
+    if speed < 1.0:
+        return "稍慢地说"
+    if speed >= 2.0:
+        return "很快地说"
+    if speed >= 1.5:
+        return "较快地说"
+    if speed > 1.0:
+        return "稍快地说"
+    return ""
+
+
+def _volume_instruction(volume: float) -> str:
+    if volume <= 0.5:
+        return "小声地说"
+    if volume < 1.0:
+        return "稍微小声地说"
+    if volume >= 1.5:
+        return "大声地说"
+    if volume > 1.0:
+        return "稍微大声地说"
+    return ""
+
+
+def build_control_instruct(*, emotion: str, other_control_text: str, speed: float, volume: float) -> str:
+    emotion_map = {
+        "中性": "自然地说",
+        "开心": "开心地说",
+        "悲伤": "悲伤地说",
+        "愤怒": "愤怒地说",
+        "害怕": "害怕地说",
+        "惊讶": "惊讶地说",
+        "温柔": "温柔地说",
+        "紧张": "紧张地说",
+        "严肃": "严肃地说",
+    }
     parts: list[str] = []
-    if emotion:
-        parts.append(f"情绪：{emotion}")
+    emotion_instruction = emotion_map.get(emotion, "")
+    if emotion_instruction:
+        parts.append(emotion_instruction)
+    speed_instruction = _speed_instruction(speed)
+    if speed_instruction:
+        parts.append(speed_instruction)
+    volume_instruction = _volume_instruction(volume)
+    if volume_instruction:
+        parts.append(volume_instruction)
     if other_control_text:
         parts.append(other_control_text)
-    if speed != 1.0:
-        parts.append(f"语速倍率：{speed:.1f}")
-    if volume != 1.0:
-        parts.append(f"音量倍率：{volume:.1f}")
     return "；".join(parts)
 
 
 def model_control_note(voice_mode: str) -> str:
     if voice_mode == "voice_design":
         return "Qwen3-TTS VoiceDesign / Instruct 路径支持中文自然语言控制文本。"
-    return "本地 Qwen3-TTS-12Hz-1.7B-Base voice cloning 路径使用参考音频、参考文本、language 和 x_vector_only；中文情绪与其他控制文本会保留在请求追踪中。"
+    return "本地 Qwen3-TTS-12Hz-1.7B-Base voice cloning 路径只向模型发送参考音频、reusable prompt、language 和 x_vector_only；情绪、语速、音量控制提示暂不发送给 Base 模型。"
 
 
 def build_tts_request(
@@ -83,7 +135,7 @@ def build_tts_request(
     role: RoleCard,
     *,
     response_format: str = "wav",
-    language: str = "Chinese",
+    language: str = "Auto",
 ) -> dict[str, Any]:
     text = (utterance.get("text") or "").strip()
     if not text:
@@ -102,7 +154,7 @@ def build_tts_request(
     x_vector_only = bool(utterance.get("x_vector_only", False))
     speed = _bounded_float(utterance.get("speed"), default=1.0, minimum=0.5, maximum=2.0)
     volume = _bounded_float(utterance.get("volume"), default=1.0, minimum=0.0, maximum=2.0)
-    control_instruct = _control_instruct(
+    control_instruct = build_control_instruct(
         emotion=emotion,
         other_control_text=other_control_text,
         speed=speed,
@@ -118,6 +170,7 @@ def build_tts_request(
             "input": text,
             "audio_sample_path": role.reference_audio_path,
             "ref_text": role.reference_text,
+            "reusable_prompt": role.reference_text,
             "language": language_value,
             "response_format": response_format,
             "x_vector_only": x_vector_only,
@@ -127,8 +180,6 @@ def build_tts_request(
             "speed": speed,
             "volume": volume,
         }
-        if control_instruct:
-            payload["emotion_control_text"] = control_instruct
         return payload
 
     if voice_mode == "voice_design":
@@ -167,12 +218,10 @@ def synthesize_local_qwen3(
         "input": request_payload["input"],
         "audio_sample": base64.b64encode(reference_audio.read_bytes()).decode("ascii"),
         "ref_text": request_payload["ref_text"],
-        "language": request_payload.get("language", "Chinese"),
+        "language": request_payload.get("language", "Auto"),
         "response_format": request_payload.get("response_format", "wav"),
         "x_vector_only": bool(request_payload.get("x_vector_only", False)),
     }
-    if request_payload.get("emotion_control_text"):
-        payload["emotion_control_text"] = request_payload["emotion_control_text"]
     base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
         "/"
     )
@@ -211,7 +260,7 @@ def synthesize_voice_design_qwen3(
     payload = {
         "input": text,
         "instruct": instruct,
-        "language": request_payload.get("language", "Chinese"),
+        "language": request_payload.get("language", "Auto"),
         "response_format": request_payload.get("response_format", "wav"),
     }
     base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(

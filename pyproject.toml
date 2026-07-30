@@ -1,7 +1,7 @@
 [project]
 name = "novelvoice-agent"
-version = "0.141.0"
-description = "Harness-first novel dubbing assistant with v0.141 feedback and VoiceDesign fallback clarity."
+version = "0.12.0"
+description = "Harness-first novel dubbing assistant with v0.12 Qwen3-TTS voice clone and VoiceDesign routing."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
@@ -17,6 +17,7 @@ backend = [
   "uvicorn[standard]>=0.30",
 ]
 tts = [
+  "python-multipart>=0.0.20",
   "soundfile>=0.12",
   "torch>=2.0",
 ]
