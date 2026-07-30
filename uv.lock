@@ -814,7 +814,7 @@ wheels = [
 
 [[package]]
 name = "novelvoice-agent"
-version = "0.21.0"
+version = "0.242.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

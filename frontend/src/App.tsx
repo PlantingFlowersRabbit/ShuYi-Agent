@@ -105,7 +105,6 @@ type UtteranceDraft = {
   text: string;
   roleId: string;
   speakerName: string;
-  language: string;
   audioStatus: string;
   audioUrl?: string;
 };
@@ -157,20 +156,6 @@ const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
 const DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base";
 const DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
-
-const LANGUAGE_OPTIONS = [
-  { value: "Auto", label: "Auto" },
-  { value: "Chinese", label: "中文" },
-  { value: "English", label: "英文" },
-  { value: "German", label: "德语" },
-  { value: "Italian", label: "意大利语" },
-  { value: "Portuguese", label: "葡萄牙语" },
-  { value: "Spanish", label: "西班牙语" },
-  { value: "Japanese", label: "日语" },
-  { value: "Korean", label: "韩语" },
-  { value: "French", label: "法语" },
-  { value: "Russian", label: "俄语" },
-];
 
 const defaultVoices: VoiceResource[] = [
   {
@@ -483,38 +468,31 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
-function makeUtteranceDraft(paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
-  const role = roles[0];
+function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
   return {
     utteranceId: `${paragraph.paragraphId}-u-001`,
     paragraphId: paragraph.paragraphId,
     text: paragraph.text,
-    roleId: role.roleId,
-    speakerName: role.name,
-    language: "Auto",
+    roleId: "",
+    speakerName: "",
     audioStatus: "尚未生成",
   };
 }
 
-function makeWholeParagraphUtteranceGroups(
-  paragraphs: ParagraphModule[],
-  roles: RoleCard[],
-): Record<string, UtteranceDraft[]> {
+function makeWholeParagraphUtteranceGroups(paragraphs: ParagraphModule[]): Record<string, UtteranceDraft[]> {
   return Object.fromEntries(
-    paragraphs.map((paragraph) => [paragraph.paragraphId, [makeUtteranceDraft(paragraph, roles)]]),
+    paragraphs.map((paragraph) => [paragraph.paragraphId, [makeUtteranceDraft(paragraph)]]),
   );
 }
 
 function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
-  const fallbackRole = roles[0];
-  const role = roles.find((item) => item.roleId === utterance.speaker_role_id) ?? fallbackRole;
+  const role = roles.find((item) => item.roleId === utterance.speaker_role_id);
   return {
     utteranceId: utterance.utterance_id,
     paragraphId: utterance.paragraph_id ?? paragraph.paragraphId,
     text: utterance.text,
-    roleId: role.roleId,
-    speakerName: utterance.speaker_name || role.name,
-    language: "Auto",
+    roleId: role?.roleId ?? "",
+    speakerName: utterance.speaker_name || role?.name || "",
     audioStatus: "尚未生成",
   };
 }
@@ -762,7 +740,7 @@ function App() {
     setApiStatus("正在同步当前章节段落并确认");
     try {
       const synced = await syncCurrentChapterParagraphs(true);
-      setUtterancesByParagraph(makeWholeParagraphUtteranceGroups(synced.paragraphs, roles));
+      setUtterancesByParagraph(makeWholeParagraphUtteranceGroups(synced.paragraphs));
       setApiStatus("段落已确认，已默认按整段落生成语句文本；每段可单独使用 AI语句划分");
     } catch (error) {
       setConfirmed(false);
@@ -879,7 +857,7 @@ function App() {
         ? data.utterances.map((utterance) => fromApiUtterance(utterance, paragraph, roles))
         : [
             {
-              ...makeUtteranceDraft(paragraph, roles),
+              ...makeUtteranceDraft(paragraph),
               audioStatus: `AI语句划分失败，请手动编辑：${data.error ?? "模型输出未通过校验"}`,
             },
           ];
@@ -908,9 +886,7 @@ function App() {
         const updated = { ...utterance, [field]: value };
         if (field === "roleId") {
           const role = roles.find((item) => item.roleId === value);
-          if (role) {
-            updated.speakerName = role.name;
-          }
+          updated.speakerName = role?.name ?? "";
         }
         return updated;
       }),
@@ -927,7 +903,7 @@ function App() {
         return Math.max(max, match ? Number(match[1]) : 0);
       }, 0) + 1;
       const draft = {
-        ...makeUtteranceDraft({ ...paragraph, text: "" }, roles),
+        ...makeUtteranceDraft({ ...paragraph, text: "" }),
         utteranceId: `${paragraphId}-u-${String(nextNumber).padStart(3, "0")}`,
       };
       const insertIndex = afterUtteranceId ? list.findIndex((item) => item.utteranceId === afterUtteranceId) + 1 : list.length;
@@ -970,7 +946,7 @@ function App() {
             voice_resource_id: role.voiceResourceId,
             text: utterance.text,
             voice_mode: role.voiceMode,
-            language: utterance.language,
+            language: "Auto",
           }),
         },
       );
@@ -1201,7 +1177,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.21 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.242 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1381,22 +1357,8 @@ function App() {
                                     updateUtterance(paragraph.paragraphId, utterance.utteranceId, "roleId", event.target.value)
                                   }
                                 >
+                                  <option value="">请选择角色</option>
                                   {roleOptions.map((option) => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                              <label>
-                                语言
-                                <select
-                                  value={utterance.language}
-                                  onChange={(event) =>
-                                    updateUtterance(paragraph.paragraphId, utterance.utteranceId, "language", event.target.value)
-                                  }
-                                >
-                                  {LANGUAGE_OPTIONS.map((option) => (
                                     <option key={option.value} value={option.value}>
                                       {option.label}
                                     </option>
@@ -1739,7 +1701,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.21</h1>
+        <h1>NovelVoice-Agent v0.242</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],
