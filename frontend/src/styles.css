@@ -104,6 +104,46 @@ small {
   letter-spacing: 0;
 }
 
+.topbar h1 span {
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 20px;
+}
+
+.mode-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(76px, 1fr));
+  width: 176px;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 2px;
+}
+
+.mode-selector button {
+  min-height: 30px;
+  border-radius: 6px;
+  background: transparent;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.mode-selector button.active {
+  background: #ffffff;
+  color: #0f766e;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.14);
+}
+
 .tabbar {
   display: flex;
   overflow-x: auto;

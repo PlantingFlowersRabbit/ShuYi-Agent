@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 describe("v0.4 agent workflow modes", () => {
+  it("changes the mode through workflow state", async () => {
+    const { createWorkflowState, transitionWorkflow } = await import("./workflowMachine");
+    const automatic = createWorkflowState("automatic");
+    const step = transitionWorkflow(automatic, { type: "SET_MODE", mode: "step" });
+
+    expect(step).toEqual({ ...automatic, mode: "step" });
+  });
+
   it("automatic mode advances directly to the next agent", async () => {
     const { createWorkflowState, transitionWorkflow } = await import("./workflowMachine");
     const idle = createWorkflowState("automatic");

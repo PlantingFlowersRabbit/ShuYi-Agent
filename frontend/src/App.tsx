@@ -1,4 +1,10 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createWorkflowState,
+  transitionWorkflow,
+  type WorkflowMode,
+} from "./features/agent-workflow/workflowMachine";
+import { APP_BRAND, APP_VERSION, runtimeConfig } from "./shared/config/runtimeConfig";
 
 type Page = "main" | "voices" | "models";
 type VoiceMode = "voice_cloning" | "voice_design";
@@ -567,7 +573,7 @@ function utteranceGroupsToApi(groups: Record<string, UtteranceDraft[]>): Record<
 }
 
 function voiceAudioSrc(voice: VoiceResource): string {
-  return `/api/voice-resources/${voice.voiceId}/audio`;
+  return runtimeConfig.apiUrl(`/voice-resources/${voice.voiceId}/audio`);
 }
 
 function roleFromVoice(roleId: string, name: string, voice: VoiceResource): RoleCard {
@@ -603,7 +609,7 @@ function createDefaultRoles(voices: VoiceResource[]): RoleCard[] {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(runtimeConfig.apiUrl(path), {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -766,6 +772,7 @@ function App() {
   const [aiOneClickThreadId, setAiOneClickThreadId] = useState("");
   const [aiOneClickWaitingForRoles, setAiOneClickWaitingForRoles] = useState(false);
   const [aiOneClickRunning, setAiOneClickRunning] = useState(false);
+  const [workflowState, setWorkflowState] = useState(() => createWorkflowState("automatic"));
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
@@ -791,7 +798,7 @@ function App() {
   }
 
   useEffect(() => {
-    requestJson<{ voices: ApiVoiceResource[] }>("/api/voice-resources")
+    requestJson<{ voices: ApiVoiceResource[] }>("/voice-resources")
       .then((data) => {
         const loaded = data.voices.map(fromApiVoice);
         if (loaded.length > 0) {
@@ -801,7 +808,7 @@ function App() {
       })
       .catch((error) => setApiStatus(`音色资源库载入失败，已使用本地预览：${String(error)}`));
 
-    requestJson<{ config: ModelConfig }>("/api/model-config")
+    requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
       .catch(() => undefined);
   }, []);
@@ -810,7 +817,7 @@ function App() {
     fullNovelTextRef.current = text;
     setNovelPreview(makeNovelPreview(text));
     try {
-      const data = await requestJson<{ chapters: ApiChapter[] }>("/api/novels/parse", {
+      const data = await requestJson<{ chapters: ApiChapter[] }>("/novels/parse", {
         method: "POST",
         body: JSON.stringify({ text }),
       });
@@ -864,14 +871,14 @@ function App() {
     try {
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
-        ? await requestJson<ApiChapterSplitResponse>("/api/novels/ai-chapter-split-file", {
+        ? await requestJson<ApiChapterSplitResponse>("/novels/ai-chapter-split-file", {
             method: "POST",
             body: JSON.stringify({
               filename: uploadedFile.filename,
               content_base64: uploadedFile.contentBase64,
             }),
           })
-        : await requestJson<ApiChapterSplitResponse>("/api/novels/ai-chapter-split", {
+        : await requestJson<ApiChapterSplitResponse>("/novels/ai-chapter-split", {
             method: "POST",
             body: JSON.stringify({ text: fullNovelTextRef.current }),
           });
@@ -913,7 +920,7 @@ function App() {
   ): Promise<{ paragraphs: ParagraphModule[]; canSegment: boolean; utteranceDrafts: ApiUtterance[] }> {
     if (!activeChapter) throw new Error("请选择章节");
     const data = await requestJson<ApiChapterParagraphsResponse>(
-      `/api/chapters/${activeChapter.chapterId}/paragraphs`,
+      `/chapters/${activeChapter.chapterId}/paragraphs`,
       {
         method: "PUT",
         body: JSON.stringify({
@@ -1042,7 +1049,7 @@ function App() {
     const updatedRole =
       updates.voiceResourceId !== undefined ? applyVoiceToRole(merged, updates.voiceResourceId) : merged;
     setRoles((current) => current.map((role) => (role.roleId === roleId ? updatedRole : role)));
-    requestJson(`/api/roles/${roleId}`, {
+    requestJson(`/roles/${roleId}`, {
       method: "PATCH",
       body: JSON.stringify(toApiRole(updatedRole)),
     }).catch((error) => setApiStatus(`角色同步失败：${String(error)}`));
@@ -1059,7 +1066,7 @@ function App() {
     };
     setRoles((current) => [...current, role]);
     try {
-      const data = await requestJson<{ roles: ApiRoleCard[] }>("/api/roles", {
+      const data = await requestJson<{ roles: ApiRoleCard[] }>("/roles", {
         method: "POST",
         body: JSON.stringify(toApiRole(role)),
       });
@@ -1074,7 +1081,7 @@ function App() {
     const payload = { roles: roles.map(toApiRole), utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph) };
     try {
       const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
-        `/api/roles/${roleId}`,
+        `/roles/${roleId}`,
         { method: "DELETE", body: JSON.stringify(payload) },
       );
       setRoles(data.roles.map(fromApiRole));
@@ -1088,7 +1095,7 @@ function App() {
       }
       try {
         const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
-          `/api/roles/${roleId}`,
+          `/roles/${roleId}`,
           { method: "DELETE", body: JSON.stringify({ ...payload, action: "unbind" }) },
         );
         const nextRoles = data.roles.map(fromApiRole);
@@ -1121,7 +1128,7 @@ function App() {
     try {
       await syncCurrentChapterParagraphs(false);
       const data = await requestJson<AiOneClickStartResponse>(
-        `/api/chapters/${activeChapter.chapterId}/ai-one-click-analysis/start`,
+        `/chapters/${activeChapter.chapterId}/ai-one-click-analysis/start`,
         { method: "POST", body: JSON.stringify({}) },
       );
       if (data.voices?.length) setVoices(data.voices.map(fromApiVoice));
@@ -1151,14 +1158,17 @@ function App() {
     setApiStatus("AI角色匹配正在划分语句并为未绑定语句选择角色");
     try {
       const readyUtterances = await ensureChapterStatementsReady();
-      const response = await fetch(`/api/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          roles: roles.map(toApiRole),
-          utterances_by_paragraph: utteranceGroupsToApi(readyUtterances),
-        }),
-      });
+      const response = await fetch(
+        runtimeConfig.apiUrl(`/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            roles: roles.map(toApiRole),
+            utterances_by_paragraph: utteranceGroupsToApi(readyUtterances),
+          }),
+        },
+      );
       if (!response.ok) throw new Error(await response.text());
       if (!response.body) throw new Error("AI角色匹配没有返回流式响应");
       const reader = response.body.getReader();
@@ -1301,7 +1311,7 @@ function App() {
         voice_job: { status: string; output_path?: string; provider?: string; response_format?: string };
         warning?: string;
       }>(
-        `/api/utterances/${utterance.utteranceId}/speech`,
+        `/utterances/${utterance.utteranceId}/speech`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -1357,7 +1367,7 @@ function App() {
         groups: { voice_resource_id: string; count: number }[];
         errors: { statement_id: string; message: string }[];
         utterances_by_paragraph: Record<string, ApiUtterance[]>;
-      }>(`/api/chapters/${activeChapter.chapterId}/speech/batch`, {
+      }>(`/chapters/${activeChapter.chapterId}/speech/batch`, {
         method: "POST",
         body: JSON.stringify({
           roles: roles.map(toApiRole),
@@ -1389,7 +1399,7 @@ function App() {
         missing_count: number;
         full_audio_path: string | null;
         message: string;
-      }>(`/api/chapters/${activeChapter.chapterId}/audio/export`, {
+      }>(`/chapters/${activeChapter.chapterId}/audio/export`, {
         method: "POST",
         body: JSON.stringify({
           chapter_title: activeChapter.title,
@@ -1408,7 +1418,7 @@ function App() {
 
   async function saveVoiceResource(payload: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & { suitableRoleTypes?: string[] | string }): Promise<boolean> {
     try {
-      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/api/voice-resources", {
+      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/voice-resources", {
         method: "POST",
         body: JSON.stringify(toApiVoice(payload)),
       });
@@ -1423,7 +1433,7 @@ function App() {
 
   async function updateVoiceResource(voice: VoiceResource) {
     try {
-      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>(`/api/voice-resources/${voice.voiceId}`, {
+      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>(`/voice-resources/${voice.voiceId}`, {
         method: "PATCH",
         body: JSON.stringify(toApiVoice(voice)),
       });
@@ -1445,7 +1455,7 @@ function App() {
       reader.readAsDataURL(file);
     });
     const dataBase64 = dataUrl.split(",")[1] ?? "";
-    const data = await requestJson<{ reference_audio_path: string }>("/api/voice-resources/reference-audio", {
+    const data = await requestJson<{ reference_audio_path: string }>("/voice-resources/reference-audio", {
       method: "POST",
       body: JSON.stringify({ filename: file.name, data_base64: dataBase64 }),
     });
@@ -1470,7 +1480,7 @@ function App() {
         generation_note: string;
         model_requirement?: string | null;
       }>(
-        "/api/voice-resources/generate",
+        "/voice-resources/generate",
         {
           method: "POST",
           body: JSON.stringify({
@@ -1518,7 +1528,7 @@ function App() {
     try {
       let remaining = voices;
       for (const voice of selected) {
-        const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/api/voice-resources/${voice.voiceId}`, {
+        const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/voice-resources/${voice.voiceId}`, {
           method: "DELETE",
         });
         remaining = data.voices.map(fromApiVoice);
@@ -1533,7 +1543,7 @@ function App() {
 
   async function saveRemoteModelConfig() {
     try {
-      const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
+      const data = await requestJson<{ config: ModelConfig }>("/model-config", {
         method: "PATCH",
         body: JSON.stringify({ llm: modelConfig.llm }),
       });
@@ -1546,7 +1556,7 @@ function App() {
 
   async function saveLocalModelConfig() {
     try {
-      const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
+      const data = await requestJson<{ config: ModelConfig }>("/model-config", {
         method: "PATCH",
         body: JSON.stringify({ tts: modelConfig.tts }),
       });
@@ -1559,7 +1569,7 @@ function App() {
 
   async function saveChapterAgentModelConfig() {
     try {
-      const data = await requestJson<{ config: ModelConfig }>("/api/model-config", {
+      const data = await requestJson<{ config: ModelConfig }>("/model-config", {
         method: "PATCH",
         body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
       });
@@ -1572,7 +1582,7 @@ function App() {
 
   async function testRemoteModelLink() {
     try {
-      const data = await requestJson<{ message: string }>("/api/model-config/llm/test", {
+      const data = await requestJson<{ message: string }>("/model-config/llm/test", {
         method: "POST",
         body: JSON.stringify({ llm: modelConfig.llm }),
       });
@@ -1584,7 +1594,7 @@ function App() {
 
   async function testChapterAgentModelLink() {
     try {
-      const data = await requestJson<{ message: string }>("/api/model-config/chapter-agent/test", {
+      const data = await requestJson<{ message: string }>("/model-config/chapter-agent/test", {
         method: "POST",
         body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
       });
@@ -1605,7 +1615,7 @@ function App() {
       setLocalTtsStartProgress(currentProgress);
     }, 1000);
     try {
-      const data = await requestJson<LocalTtsStartResponse>("/api/model-config/tts/start", {
+      const data = await requestJson<LocalTtsStartResponse>("/model-config/tts/start", {
         method: "POST",
         body: JSON.stringify({ tts: modelConfig.tts }),
       });
@@ -1624,7 +1634,7 @@ function App() {
     return (
       <main
         className={chapterSidebarCollapsed ? "workbench chapters-collapsed" : "workbench"}
-        aria-label="NovelVoice-Agent v0.3.4 主页面"
+        aria-label={`${APP_BRAND} v${APP_VERSION} 主页面`}
       >
         <aside className={chapterSidebarCollapsed ? "chapter-sidebar collapsed" : "chapter-sidebar"}>
           <button
@@ -2283,23 +2293,47 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.3.4</h1>
-        <nav className="tabbar" aria-label="页面切换">
-          {[
-            ["main", "主页面"],
-            ["voices", "音色资源库"],
-            ["models", "模型配置"],
-          ].map(([value, label]) => (
-            <button
-              className={page === value ? "active" : ""}
-              key={value}
-              type="button"
-              onClick={() => setPage(value as Page)}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+        <h1>
+          {APP_BRAND} <span>v{APP_VERSION}</span>
+        </h1>
+        <div className="topbar-actions">
+          <div className="mode-selector" role="group" aria-label="配音模式">
+            {[
+              ["automatic", "自动配音"],
+              ["step", "分步配音"],
+            ].map(([mode, label]) => (
+              <button
+                aria-pressed={workflowState.mode === mode}
+                className={workflowState.mode === mode ? "active" : ""}
+                key={mode}
+                type="button"
+                onClick={() =>
+                  setWorkflowState((current) =>
+                    transitionWorkflow(current, { type: "SET_MODE", mode: mode as WorkflowMode }),
+                  )
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <nav className="tabbar" aria-label="页面切换">
+            {[
+              ["main", "主页面"],
+              ["voices", "音色资源库"],
+              ["models", "模型配置"],
+            ].map(([value, label]) => (
+              <button
+                className={page === value ? "active" : ""}
+                key={value}
+                type="button"
+                onClick={() => setPage(value as Page)}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+        </div>
       </header>
       {page === "main" && renderMainPage()}
       {page === "voices" && renderVoiceLibraryPage()}
