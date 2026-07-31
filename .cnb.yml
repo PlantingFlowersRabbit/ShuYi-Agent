@@ -1,0 +1,24 @@
+# CNB pipeline template. Configure the registry variables in the repository secrets before use.
+pipeline:
+  cpu-test:
+    image: python:3.11-slim
+    commands:
+      - python -m pip install uv
+      - uv run pytest -q tests/test_v0_4_deployment_contract.py tests/test_model_downloader.py
+  image-publish:
+    image: docker:27-cli
+    services:
+      - docker:27-dind
+    environment:
+      DOCKER_HOST: tcp://docker:2375
+      DOCKER_TLS_CERTDIR: ""
+    commands:
+      - test -n "$CNB_DOCKER_REGISTRY"
+      - test -n "$CNB_DOCKER_REPOSITORY"
+      - test -n "$CNB_DOCKER_USERNAME"
+      - test -n "$CNB_DOCKER_PASSWORD"
+      - echo "$CNB_DOCKER_PASSWORD" | docker login "$CNB_DOCKER_REGISTRY" --username "$CNB_DOCKER_USERNAME" --password-stdin
+      - docker build --target cpu-runtime --tag "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cpu" .
+      - docker build --target cuda-runtime --tag "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cuda" .
+      - docker push "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cpu"
+      - docker push "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cuda"

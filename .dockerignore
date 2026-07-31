@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.env.*
+.venv
+.uv-cache
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/dist
+coverage
+harness_prompt
+models
+outputs
+data
+tests

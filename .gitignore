@@ -20,6 +20,7 @@ coverage/
 # Local models and large generated outputs
 models/**/*
 !models/README.md
+data/
 scripts/chapter_parsers/agent_generated_*.py
 scripts/chapter_parsers/agent_generated_*.json
 harness_prompt/

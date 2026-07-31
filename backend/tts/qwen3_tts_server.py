@@ -90,12 +90,14 @@ def load_model(model_path: str):
     if torch is None or Qwen3TTSModel is None:
         raise RuntimeError("qwen_tts and torch are required to start the local Qwen3-TTS service")
     device_map = os.environ.get("QWEN3_TTS_DEVICE", "cpu").strip().lower() or "cpu"
-    if device_map not in {"cpu", "mps"}:
+    if device_map not in {"cpu", "mps", "cuda"}:
         device_map = "cpu"
 
     dtype = torch.float32
     if device_map == "mps":
         dtype = torch.float16
+    elif device_map == "cuda":
+        dtype = torch.bfloat16
 
     print(f"Loading Qwen3-TTS from {model_path}", flush=True)
     print(f"Using device={device_map}, dtype={dtype}", flush=True)
@@ -427,7 +429,7 @@ def main():
     parser.add_argument(
         "--device",
         default=os.environ.get("QWEN3_TTS_DEVICE", "cpu"),
-        choices=["cpu", "mps"],
+        choices=["cpu", "mps", "cuda"],
     )
     args = parser.parse_args()
 

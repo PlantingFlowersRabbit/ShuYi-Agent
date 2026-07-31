@@ -1,35 +1,15 @@
 # Qwen3-TTS 本地服务
 
-本目录放置 v0.12 默认本地 TTS 服务脚本。
+`qwen3_tts_server.py` 提供书翼 Agent 使用的本地语音合成 HTTP 服务，支持声纹复刻与 VoiceDesign。
 
-## 来源
-
-脚本从本机现有项目复制并改名：
-
-- 原路径：`/Users/gaojing/Documents/002-研究生/993-其他/微信小程序/app_mac/script/qwen3_tts_server.py`
-- 当前路径：`backend/tts/qwen3_tts_server.py`
-
-## 默认模型和环境
-
-- Base 模型路径：`/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base`
-- VoiceDesign 模型路径：`/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`
-- Python 环境：`/Users/gaojing/Documents/002-研究生/993-其他/微信小程序/app_mac/.venv-qwen3-tts`
-- 默认端口：`7811`
-
-## 启动示例
+## 启动
 
 ```bash
-/Users/gaojing/Documents/002-研究生/993-其他/微信小程序/app_mac/.venv-qwen3-tts/bin/python \
-  backend/tts/qwen3_tts_server.py \
-  --model-path /Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base \
-  --voice-design-model-path /Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
+uv sync --group backend --group tts
+uv run python backend/tts/qwen3_tts_server.py \
+  --model-path ./models/Qwen3-TTS-12Hz-1.7B-Base \
+  --voice-design-model-path ./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
   --device cpu
 ```
 
-## 验证
-
-```bash
-curl http://127.0.0.1:7811/health
-```
-
-语音合成请求格式见 `spec/audio-synthesis-contract.md`。
+默认端口为 `7811`，使用 `curl http://127.0.0.1:7811/health` 检查模型是否加载完成。模型权重不得提交到 Git；容器下载与缓存规则见仓库根目录 `README.md`。
