@@ -813,8 +813,8 @@ wheels = [
 ]
 
 [[package]]
-name = "novelvoice-agent"
-version = "0.3.4"
+name = "shuyi-agent"
+version = "0.4.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

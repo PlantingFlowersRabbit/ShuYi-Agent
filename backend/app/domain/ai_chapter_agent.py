@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -120,6 +121,83 @@ def _strip_json_fence(content: str) -> str:
     return fenced.group(1).strip() if fenced else cleaned
 
 
+def _parser_spec_from_model_output(content: str) -> tuple[dict[str, str] | None, str | None]:
+    cleaned = _strip_python_fence(content)
+    try:
+        payload = json.loads(_strip_json_fence(cleaned))
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict) and isinstance(payload.get("heading_pattern"), str):
+        description = str(payload.get("description") or "划分自动识别的章节标题格式")
+        spec = {"heading_pattern": payload["heading_pattern"], "description": description}
+        return _validate_parser_spec(spec)
+
+    # v0.3 skills returned Python. Parse its syntax only to migrate the heading regex into data.
+    try:
+        tree = ast.parse(cleaned)
+    except SyntaxError as exc:
+        return None, f"model output is not a parser specification: {exc}"
+
+    patterns: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        function = node.func
+        if not (
+            isinstance(function, ast.Attribute)
+            and isinstance(function.value, ast.Name)
+            and function.value.id == "re"
+            and function.attr == "finditer"
+        ):
+            continue
+        pattern = node.args[0]
+        if isinstance(pattern, ast.Constant) and isinstance(pattern.value, str):
+            patterns.append(pattern.value)
+
+    if len(patterns) != 1:
+        return None, "model output must contain exactly one literal heading pattern"
+    description_match = re.search(r"^\s*#\s*(.*划分.*)$", cleaned, re.MULTILINE)
+    description = (
+        description_match.group(1).strip()
+        if description_match
+        else "AI生成规则：划分自动识别的章节标题格式"
+    )
+    return _validate_parser_spec(
+        {"heading_pattern": patterns[0], "description": description}
+    )
+
+
+def _validate_parser_spec(spec: dict[str, str]) -> tuple[dict[str, str] | None, str | None]:
+    pattern = spec["heading_pattern"]
+    if not pattern or len(pattern) > 500:
+        return None, "heading pattern must contain between 1 and 500 characters"
+    if not pattern.startswith("^"):
+        return None, "heading pattern must be anchored to the start of a line"
+    try:
+        compiled = re.compile(pattern, re.MULTILINE)
+    except re.error as exc:
+        return None, f"invalid heading pattern: {exc}"
+    if compiled.groups < 1:
+        return None, "heading pattern must capture the complete title"
+    return spec, None
+
+
+def _chapters_from_parser_spec(spec: dict[str, str], text: str) -> list[Chapter]:
+    matches = list(re.finditer(spec["heading_pattern"], text, re.MULTILINE))
+    chapters: list[Chapter] = []
+    for index, match in enumerate(matches, start=1):
+        next_start = matches[index].start() if index < len(matches) else len(text)
+        chapters.append(
+            Chapter(
+                chapter_id=f"chapter-{index:04d}",
+                title=match.group(1).strip(),
+                body=text[match.end() : next_start].strip(),
+            )
+        )
+    return chapters
+
+
 class ChapterSplitSkill:
     def __init__(
         self,
@@ -166,8 +244,8 @@ class ChapterSplitSkill:
         messages = [
             SystemMessage(
                 content=(
-                    "你是 NovelVoice-Agent 的章节划分脚本生成 skill。"
-                    "你只返回可直接运行的 Python 脚本，不返回 Markdown 解释。"
+                    "你是书亦 Agent 的章节划分规则生成 skill。"
+                    "你只返回描述标题正则的 JSON，不返回 Python 或 Markdown 解释。"
                 )
             ),
             HumanMessage(content=self._build_prompt(novel_text, failed_attempts, existing_script_names)),
@@ -216,16 +294,12 @@ class ChapterSplitSkill:
         failed = "\n".join(f"- {item}" for item in failed_attempts[-6:]) or "- 无"
         scripts = ", ".join(existing_script_names) or "无"
         return f"""
-请观察上传 txt 小说开头若干章格式，创建一个章节划分 Python 脚本。
+请观察上传 txt 小说开头若干章格式，创建一个章节划分规则。
 
-脚本要求：
-- 从 stdin 读取完整小说文本。
-- 输出严格 JSON：{{"chapters":[{{"chapter_id":"chapter-0001","title":"标题","body":"正文"}}]}}。
-- chapter_id 必须从 chapter-0001 递增。
-- title 是章节标题行，body 是该章节标题之后到下一章标题之前的正文。
-- 必须包含中文注释，说明“这是划分什么格式的”。
-- 不要调用网络、不要读写文件、不要依赖第三方包。
-- 返回纯 Python 代码，不要 Markdown 代码围栏。
+规则要求：
+- 只返回严格 JSON：{{"heading_pattern":"^(捕获完整标题的正则)$","description":"划分什么格式"}}。
+- heading_pattern 必须以 ^ 开头，并用第一个捕获组捕获完整标题行。
+- 规则按 MULTILINE 模式匹配；不要返回 Python、Markdown 或任何可执行内容。
 
 已有脚本：{scripts}
 失败结果（reflection 输入，避免重复错误）：
@@ -292,8 +366,12 @@ class AiChapterSplitAgent:
         failed_attempts: list[str] = []
 
         scripts = sorted(
-            (path for path in self.scripts_dir.glob("*.py") if path.is_file()),
-            key=lambda path: (path.name.startswith("agent_generated_"), path.name),
+            (
+                path
+                for path in self.scripts_dir.glob("*.py")
+                if path.is_file() and not path.name.startswith("agent_generated_")
+            ),
+            key=lambda path: path.name,
         )
         for script_path in scripts:
             chapters, error = self._run_script(script_path, text)
@@ -309,19 +387,35 @@ class AiChapterSplitAgent:
             failed_attempts.append(message)
             trace.append(f"{script_path.name} rejected: {'; '.join(validation.errors)}")
 
-        existing_names = [script.name for script in scripts]
+        specs = sorted(self.scripts_dir.glob("agent_generated_*.json"))
+        for spec_path in specs:
+            chapters, error = self._run_parser_spec_file(spec_path, text)
+            if error:
+                failed_attempts.append(f"{spec_path.name}: {error}")
+                trace.append(f"{spec_path.name} failed: {error}")
+                continue
+            validation = validate_chapter_split(text, chapters)
+            if validation.ok:
+                trace.append(f"{spec_path.name} reused")
+                return ChapterSplitAgentResult(chapters, "script_reused", spec_path, validation, trace)
+            message = f"{spec_path.name}: {'; '.join(validation.errors)}"
+            failed_attempts.append(message)
+            trace.append(f"{spec_path.name} rejected: {'; '.join(validation.errors)}")
+
+        existing_names = [path.name for path in [*scripts, *specs]]
         for reflection_index in range(1, self.max_reflections + 1):
             script_content = self.skill.create_parser_script(
                 novel_text=text,
                 failed_attempts=failed_attempts,
                 existing_script_names=existing_names,
             )
-            script_path = self._save_generated_script(script_content)
-            chapters, error = self._run_script(script_path, text)
+            spec, error = _parser_spec_from_model_output(script_content)
             if error:
-                failed_attempts.append(f"{script_path.name}: {error}")
+                failed_attempts.append(f"reflection {reflection_index}: {error}")
                 trace.append(f"reflection {reflection_index} failed: {error}")
                 continue
+            assert spec is not None
+            chapters = _chapters_from_parser_spec(spec, text)
             validation = validate_chapter_split(text, chapters)
             if validation.ok:
                 try:
@@ -335,7 +429,7 @@ class AiChapterSplitAgent:
                     ai_validation = ChapterSplitValidation(True, [])
                 if not ai_validation.ok:
                     failed_attempts.append(
-                        f"{script_path.name}: AI validation rejected: "
+                        f"reflection {reflection_index}: AI validation rejected: "
                         f"{'; '.join(ai_validation.errors)}"
                     )
                     trace.append(
@@ -343,6 +437,7 @@ class AiChapterSplitAgent:
                         f"{'; '.join(ai_validation.errors)}"
                     )
                     continue
+                script_path = self._save_generated_spec(spec)
                 trace.append("AI validation accepted")
                 trace.append(f"reflection {reflection_index} created {script_path.name}")
                 return ChapterSplitAgentResult(
@@ -352,7 +447,9 @@ class AiChapterSplitAgent:
                     validation,
                     trace,
                 )
-            failed_attempts.append(f"{script_path.name}: {'; '.join(validation.errors)}")
+            failed_attempts.append(
+                f"reflection {reflection_index}: {'; '.join(validation.errors)}"
+            )
             trace.append(f"reflection {reflection_index} rejected: {'; '.join(validation.errors)}")
 
         final_validation = ChapterSplitValidation(False, failed_attempts or ["agent failed"])
@@ -377,11 +474,29 @@ class AiChapterSplitAgent:
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             return [], f"invalid JSON output: {exc}"
 
-    def _save_generated_script(self, script_content: str) -> Path:
-        cleaned = _strip_python_fence(script_content)
-        if "划分" not in cleaned[:300]:
-            cleaned = "# AI生成脚本：划分自动识别的章节标题格式\n" + cleaned
-        digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
-        script_path = self.scripts_dir / f"agent_generated_{digest}.py"
-        script_path.write_text(cleaned.rstrip() + "\n", encoding="utf-8")
-        return script_path
+    def _run_parser_spec_file(
+        self, spec_path: Path, text: str
+    ) -> tuple[list[Chapter], str | None]:
+        try:
+            payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return [], f"invalid parser specification: {exc}"
+        if not isinstance(payload, dict) or not isinstance(payload.get("heading_pattern"), str):
+            return [], "invalid parser specification"
+        spec, error = _validate_parser_spec(
+            {
+                "heading_pattern": payload["heading_pattern"],
+                "description": str(payload.get("description") or ""),
+            }
+        )
+        if error:
+            return [], error
+        assert spec is not None
+        return _chapters_from_parser_spec(spec, text), None
+
+    def _save_generated_spec(self, spec: dict[str, str]) -> Path:
+        serialized = json.dumps(spec, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+        spec_path = self.scripts_dir / f"agent_generated_{digest}.json"
+        spec_path.write_text(serialized, encoding="utf-8")
+        return spec_path

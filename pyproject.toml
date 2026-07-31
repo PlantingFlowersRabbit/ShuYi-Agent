@@ -1,7 +1,7 @@
 [project]
-name = "novelvoice-agent"
-version = "0.3.4"
-description = "Harness-first novel dubbing assistant with v0.3.4 collapsible chapter rail and statement workspace."
+name = "shuyi-agent"
+version = "0.4.0"
+description = "Shuyi Agent novel dubbing assistant."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

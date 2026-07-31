@@ -21,6 +21,8 @@ coverage/
 models/**/*
 !models/README.md
 scripts/chapter_parsers/agent_generated_*.py
+scripts/chapter_parsers/agent_generated_*.json
+harness_prompt/
 outputs/**/*
 !outputs/README.md
 *.safetensors

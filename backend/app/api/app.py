@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -67,6 +69,8 @@ DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base"
 DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
+SERVICE_NAME = "shuyi-agent"
+SERVICE_VERSION = "0.4.0"
 
 
 def _chapter_to_dict(chapter: Chapter) -> dict[str, Any]:
@@ -156,6 +160,28 @@ def _default_model_config() -> dict[str, Any]:
     }
 
 
+def _redacted_model_config(config: dict[str, Any]) -> dict[str, Any]:
+    secret_environments = {
+        "llm": "SILICONFLOW_API_KEY",
+        "chapter_agent": "DEEPSEEK_API_KEY",
+    }
+    redacted: dict[str, Any] = {}
+    for section_name, section in config.items():
+        if not isinstance(section, dict):
+            redacted[section_name] = section
+            continue
+        clean_section = {key: value for key, value in section.items() if key != "api_key"}
+        environment_name = secret_environments.get(section_name)
+        if environment_name:
+            configured = str(section.get("api_key") or "").strip()
+            environment_value = str(
+                os.environ.get(environment_name) or LOCAL_DOTENV.get(environment_name) or ""
+            ).strip()
+            clean_section["has_api_key"] = bool(configured or environment_value)
+        redacted[section_name] = clean_section
+    return redacted
+
+
 def _role_with_voice(role: RoleCard, voice: VoiceResource) -> RoleCard:
     return role.with_updates(
         voice_resource_id=voice.voice_id,
@@ -184,7 +210,36 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.3.4 Harness API")
+    app = FastAPI(title="Shuyi Agent v0.4.0 API", version=SERVICE_VERSION)
+    api_token = str(os.environ.get("NOVELVOICE_API_TOKEN") or "").strip()
+    allowed_origins = [
+        origin.strip()
+        for origin in os.environ.get("NOVELVOICE_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+    async def require_bearer(authorization: str | None = Header(default=None)) -> None:
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=401,
+                detail="Bearer authentication required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        provided_token = authorization.removeprefix("Bearer ").strip()
+        if not api_token or not secrets.compare_digest(provided_token, api_token):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid bearer token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -207,6 +262,31 @@ def create_app() -> FastAPI:
         "model_config": _default_model_config(),
         "ai_one_click_workflows": {},
     }
+
+    @app.get("/health/live")
+    @app.get("/health/startup")
+    @app.get("/health/ready")
+    async def health_probe() -> dict[str, str]:
+        return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
+
+    def role_payload() -> dict[str, Any]:
+        collection = _state(app)["roles"]
+        return {
+            "roles": [role.to_dict() for role in collection.list()],
+            "role_options": collection.utterance_role_options(),
+        }
+
+    @app.get("/api/v1/roles", dependencies=[Depends(require_bearer)])
+    async def list_v1_roles() -> dict[str, Any]:
+        return role_payload()
+
+    @app.get("/api/v1/characters", dependencies=[Depends(require_bearer)])
+    async def list_v1_characters() -> dict[str, Any]:
+        return {"characters": role_payload()["roles"]}
+
+    @app.get("/api/v1/model-config", dependencies=[Depends(require_bearer)])
+    async def get_v1_model_config() -> dict[str, Any]:
+        return {"config": _redacted_model_config(_state(app)["model_config"])}
 
     @app.post("/api/novels/parse")
     async def parse_novel(payload: dict[str, Any]) -> dict[str, Any]:
@@ -432,7 +512,6 @@ def create_app() -> FastAPI:
             },
         }
 
-    @app.api_route("/api/roles", methods=["GET", "POST"])
     async def roles(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         collection = _state(app)["roles"]
         if payload:
@@ -442,7 +521,6 @@ def create_app() -> FastAPI:
             "role_options": collection.utterance_role_options(),
         }
 
-    @app.patch("/api/roles/{role_id}")
     async def update_role(role_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         collection = _state(app)["roles"]
         current = collection.get(role_id)
@@ -454,7 +532,6 @@ def create_app() -> FastAPI:
             "role_options": collection.utterance_role_options(),
         }
 
-    @app.delete("/api/roles/{role_id}")
     async def delete_role(role_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         collection = _state(app)["roles"]
         utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
@@ -474,6 +551,11 @@ def create_app() -> FastAPI:
         if status_code != 200:
             raise HTTPException(status_code=status_code, detail=response)
         return response
+
+    if not api_token:
+        app.add_api_route("/api/roles", roles, methods=["GET", "POST"])
+        app.add_api_route("/api/roles/{role_id}", update_role, methods=["PATCH"])
+        app.add_api_route("/api/roles/{role_id}", delete_role, methods=["DELETE"])
 
     @app.get("/api/voice-resources")
     async def list_voice_resources() -> dict[str, Any]:
