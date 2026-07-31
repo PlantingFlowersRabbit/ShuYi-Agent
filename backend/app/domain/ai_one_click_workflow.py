@@ -429,6 +429,23 @@ class BatchRoleSelectionService:
                     continue
                 action = str(decision.get("action") or "uncertain")
                 role_id = str(decision.get("role_id") or "") if decision.get("role_id") else None
+                paragraph_id = str(statement["paragraph_id"])
+                if (
+                    action == "select_role"
+                    and paragraph_id not in split_paragraphs
+                    and _needs_dialogue_narration_split(statement)
+                ):
+                    action = "needs_split"
+                    role_id = None
+                forced_narrator_role_id = _forced_narrator_role_id(statement=statement, roles=roles)
+                if action == "select_role" and forced_narrator_role_id:
+                    action = "select_role"
+                    role_id = forced_narrator_role_id
+                    decision = {
+                        **decision,
+                        "confidence": max(_safe_float(decision.get("confidence"), default=0.0), 0.95),
+                        "reason": "分句后该片段是引号外说话动作/旁白，强制按旁白处理。",
+                    }
                 if action == "select_role" and role_id in role_by_id and not _has_role(utterance):
                     role = role_by_id[role_id]
                     selection = RoleSelectionResult(
@@ -456,7 +473,6 @@ class BatchRoleSelectionService:
                     progressed = True
                     continue
                 if action == "needs_split":
-                    paragraph_id = str(statement["paragraph_id"])
                     if paragraph_id not in split_paragraphs:
                         split_paragraphs.add(paragraph_id)
                         split_count += 1
@@ -1331,6 +1347,75 @@ def _pending_role_statements(
 
 def _batch_decisions_by_statement_id(parsed: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(item["statement_id"]): item for item in parsed.get("items", [])}
+
+
+def _needs_dialogue_narration_split(statement: dict[str, Any]) -> bool:
+    text = str(statement.get("text") or "").strip()
+    if not text:
+        return False
+    if not re.search(r"[”\"』」][^“”\"『』「」]+[。！？!?]?$", text):
+        return False
+    return bool(re.search(r"[”\"』」]\s*[\u4e00-\u9fff]{1,20}(?:道|说|问|喊|叫|答)[。！？!?]?$", text))
+
+
+def _forced_narrator_role_id(*, statement: dict[str, Any], roles: list[dict[str, Any]]) -> str | None:
+    text = str(statement.get("text") or "").strip()
+    paragraph_text = str(statement.get("context") or "")
+    if not _is_speech_tag_narration(text=text, paragraph_text=paragraph_text):
+        return None
+    return _narrator_role_id(roles)
+
+
+def _is_speech_tag_narration(*, text: str, paragraph_text: str) -> bool:
+    if not text or any(mark in text for mark in "“”\"『』「」"):
+        return False
+    if not any(mark in paragraph_text for mark in "”\"』」"):
+        return False
+    if text in paragraph_text:
+        prefix = paragraph_text.split(text, maxsplit=1)[0]
+        if not any(mark in prefix for mark in "”\"』」"):
+            return False
+    speech_verbs = (
+        "说道",
+        "说",
+        "问道",
+        "问",
+        "喊道",
+        "喊",
+        "叫道",
+        "叫",
+        "答道",
+        "答",
+        "怒道",
+        "笑道",
+        "恼火道",
+        "低声道",
+        "喃喃道",
+        "解释道",
+        "提醒道",
+        "补充道",
+        "嘀咕道",
+        "咕哝道",
+        "叹道",
+        "骂道",
+        "喝道",
+        "吼道",
+        "惊道",
+    )
+    return bool(re.search(rf"(?:{'|'.join(map(re.escape, speech_verbs))})[。！？!?…]*$", text))
+
+
+def _narrator_role_id(roles: list[dict[str, Any]]) -> str | None:
+    for role in roles:
+        role_id = str(role.get("role_id") or "")
+        names = [
+            str(role.get("name") or ""),
+            *[str(alias) for alias in role.get("aliases") or []],
+            role_id,
+        ]
+        if any(_normalize_name(name) in {"旁白", "narrator", "叙述者"} for name in names):
+            return role_id or None
+    return None
 
 
 def _stable_role_id(name: str, roles: RoleCollection) -> str:

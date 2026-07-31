@@ -172,6 +172,92 @@ def test_v0_30_batch_role_selection_splits_ambiguous_paragraph_and_retries_blank
     assert report.split_count == 1
 
 
+def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after_split():
+    """Covers v0.3.2: quoted speech belongs to speaker, trailing speech tag belongs to narrator."""
+    from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
+    from backend.app.domain.segmentation import SegmentationValidationResult
+
+    class OvereagerPeruoBatchSkill:
+        def __init__(self):
+            self.calls = 0
+
+        def choose_roles_batch(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "items": [
+                        {
+                            "statement_id": "p-0003-u-001",
+                            "action": "needs_split",
+                            "role_id": None,
+                            "confidence": 0.32,
+                            "reason": "dialogue followed by speaker tag",
+                            "evidence": "佩罗恼火道",
+                        }
+                    ]
+                }
+            return {
+                "items": [
+                    {
+                        "statement_id": "p-0003-u-001",
+                        "action": "select_role",
+                        "role_id": "peruo",
+                        "confidence": 0.92,
+                        "reason": "quoted speech by Peruo",
+                        "evidence": "都怪你多嘴",
+                    },
+                    {
+                        "statement_id": "p-0003-u-002",
+                        "action": "select_role",
+                        "role_id": "peruo",
+                        "confidence": 0.88,
+                        "reason": "mentions Peruo",
+                        "evidence": "佩罗恼火道",
+                    },
+                ]
+            }
+
+    class SpeechTagSegmentationService:
+        def __init__(self):
+            self.calls = []
+
+        def segment_paragraph(self, *, paragraph_id, **kwargs):
+            self.calls.append(paragraph_id)
+            return SegmentationValidationResult(
+                ok=True,
+                paragraph_id=paragraph_id,
+                utterances=[
+                    _utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”"),
+                    _utterance("p-0003-u-002", "p-0003", "佩罗恼火道。"),
+                ],
+            )
+
+    utterances_by_paragraph = {
+        "p-0003": [_utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”佩罗恼火道。")]
+    }
+    service = BatchRoleSelectionService(
+        OvereagerPeruoBatchSkill(),
+        segmentation_service=SpeechTagSegmentationService(),
+    )
+
+    report = service.select_roles_for_statements_batch(
+        chapter_id="chapter-0001",
+        chapter_title="第一章",
+        paragraphs=[{"paragraph_id": "p-0003", "text": "“都怪你多嘴，她认出我们了。”佩罗恼火道。"}],
+        utterances_by_paragraph=utterances_by_paragraph,
+        roles=[_role("narrator", "旁白"), _role("peruo", "佩罗", "voice-peruo")],
+    )
+
+    assert report.status == "completed"
+    assert [item["text"] for item in utterances_by_paragraph["p-0003"]] == [
+        "“都怪你多嘴，她认出我们了。”",
+        "佩罗恼火道。",
+    ]
+    assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0003"]] == ["peruo", "narrator"]
+    assert report.success_count == 2
+    assert report.split_count == 1
+
+
 def test_v0_30_batch_role_selection_invalid_json_writes_nothing():
     """Covers v0.3.0 JSON failure safety for batch role selection."""
     from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService

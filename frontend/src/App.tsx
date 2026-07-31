@@ -935,13 +935,35 @@ function App() {
         paragraph.paragraphId === paragraphId ? { ...paragraph, ...updates } : paragraph,
       ),
     );
-    if ("text" in updates || updates.deleted) {
+    if ("text" in updates) {
       setConfirmed(false);
       setChapterBackendSynced(false);
       setUtterancesByParagraph({});
       setGeneratingUtteranceIds({});
       resetAiOneClickState();
     }
+  }
+
+  function deleteParagraph(paragraphId: string) {
+    setParagraphs((current) =>
+      current.map((paragraph) =>
+        paragraph.paragraphId === paragraphId ? { ...paragraph, deleted: true } : paragraph,
+      ),
+    );
+    setUtterancesByParagraph((current) => {
+      const remainingUtterances = { ...current };
+      delete remainingUtterances[paragraphId];
+      return remainingUtterances;
+    });
+    setGeneratingUtteranceIds((current) => {
+      const remainingGeneratingIds = { ...current };
+      for (const utterance of utterancesByParagraph[paragraphId] ?? []) {
+        delete remainingGeneratingIds[utterance.utteranceId];
+      }
+      return remainingGeneratingIds;
+    });
+    setChapterBackendSynced(false);
+    setApiStatus(`已删除段落 ${paragraphId}；其余 AI角色匹配结果已保留`);
   }
 
   async function confirmParagraphs() {
@@ -1609,7 +1631,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.3.1 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.3.2 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1833,7 +1855,7 @@ function App() {
                       <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { collapsed: !paragraph.collapsed })}>
                         {paragraph.collapsed ? "展开" : "折叠"}
                       </button>
-                      <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { deleted: true })}>
+                      <button type="button" onClick={() => deleteParagraph(paragraph.paragraphId)}>
                         删除
                       </button>
                     </div>
@@ -2268,7 +2290,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.3.1</h1>
+        <h1>NovelVoice-Agent v0.3.2</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

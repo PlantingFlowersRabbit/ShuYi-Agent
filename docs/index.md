@@ -8,7 +8,7 @@
 | [docs/harness-principles.md](./harness-principles.md) | NovelVoice-Agent 的 harness 原则、默认工作流和不要做的事。 |
 | [docs/subagent-guide.md](./subagent-guide.md) | 子 Agent 使用规则：什么时候开、怎么开、怎么验收。 |
 | [docs/builder-reviewer-separation.md](./builder-reviewer-separation.md) | 写代码的 AI 与挑毛病的 AI 分离规则。 |
-| [docs/development/acceptance-standard.md](./development/acceptance-standard.md) | v0.3.1 验收标准：判定是否做完的基准。 |
+| [docs/development/acceptance-standard.md](./development/acceptance-standard.md) | v0.3.2 验收标准：判定是否做完的基准。 |
 | [docs/development/test-strategy.md](./development/test-strategy.md) | v0.14 测试策略：把验收标准转成自动测试和人工证据。 |
 | [docs/development/real-environment-testing.md](./development/real-environment-testing.md) | 真实环境测试规则：模型、TTS、UI 和音频证据如何采集。 |
 | [docs/development/v0.1-verification.md](./development/v0.1-verification.md) | v0.1 实现后的验证命令、真实环境证据和未覆盖项记录。 |
@@ -38,6 +38,8 @@
 | [docs/development/v0.30-verification.md](./development/v0.30-verification.md) | v0.3.0 批量分析、配音、导出和删除角色验证要求。 |
 | [spec/v0.31-harness.md](../spec/v0.31-harness.md) | v0.3.1 AI角色分析 / AI角色匹配双按钮流程规格。 |
 | [docs/development/v0.31-verification.md](./development/v0.31-verification.md) | v0.3.1 双按钮流程、版本和无旧入口文案验证要求。 |
+| [spec/v0.32-harness.md](../spec/v0.32-harness.md) | v0.3.2 AI角色匹配说话动作旁白保护和删除段落缓存保留规格。 |
+| [docs/development/v0.32-verification.md](./development/v0.32-verification.md) | v0.3.2 角色匹配回归和删除段落保留验证要求。 |
 | [docs/experience-library/README.md](./experience-library/README.md) | 经验库入口，说明经验和规则怎么记录、怎么复用。 |
 | [docs/experience-library/active-rules.md](./experience-library/active-rules.md) | 当前开发前必须主动遵守的规则。 |
 | [docs/experience-library/lessons.md](./experience-library/lessons.md) | 已发生问题和处理经验记录。 |
