@@ -179,23 +179,10 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
 
     class OvereagerPeruoBatchSkill:
         def __init__(self):
-            self.calls = 0
+            self.calls = []
 
         def choose_roles_batch(self, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return {
-                    "items": [
-                        {
-                            "statement_id": "p-0003-u-001",
-                            "action": "needs_split",
-                            "role_id": None,
-                            "confidence": 0.32,
-                            "reason": "dialogue followed by speaker tag",
-                            "evidence": "佩罗恼火道",
-                        }
-                    ]
-                }
+            self.calls.append(kwargs)
             return {
                 "items": [
                     {
@@ -235,8 +222,9 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
     utterances_by_paragraph = {
         "p-0003": [_utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”佩罗恼火道。")]
     }
+    role_skill = OvereagerPeruoBatchSkill()
     service = BatchRoleSelectionService(
-        OvereagerPeruoBatchSkill(),
+        role_skill,
         segmentation_service=SpeechTagSegmentationService(),
     )
 
@@ -252,6 +240,9 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
     assert [item["text"] for item in utterances_by_paragraph["p-0003"]] == [
         "“都怪你多嘴，她认出我们了。”",
         "佩罗恼火道。",
+    ]
+    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [
+        ["“都怪你多嘴，她认出我们了。”", "佩罗恼火道。"]
     ]
     assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0003"]] == ["peruo", "narrator"]
     assert report.success_count == 2

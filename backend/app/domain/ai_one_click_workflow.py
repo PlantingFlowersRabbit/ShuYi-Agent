@@ -383,6 +383,41 @@ class BatchRoleSelectionService:
             pending = _pending_role_statements(utterances_by_paragraph, paragraph_by_id)
             if not pending:
                 break
+            pre_split_statement = next(
+                (
+                    statement
+                    for statement in pending
+                    if str(statement["paragraph_id"]) not in split_paragraphs
+                    and _needs_dialogue_narration_split(statement)
+                ),
+                None,
+            )
+            if pre_split_statement is not None:
+                paragraph_id = str(pre_split_statement["paragraph_id"])
+                split_paragraphs.add(paragraph_id)
+                split_count += 1
+                failure = self._split_paragraph(
+                    chapter_title=chapter_title,
+                    paragraph_id=paragraph_id,
+                    paragraph_by_id=paragraph_by_id,
+                    utterances_by_paragraph=utterances_by_paragraph,
+                    roles=roles,
+                )
+                if failure:
+                    failed_count += 1
+                    errors.append(failure)
+                    return BatchRoleSelectionReport(
+                        "failed",
+                        skipped_count + success_count + failed_count + uncertain_count,
+                        skipped_count,
+                        success_count,
+                        split_count,
+                        uncertain_count,
+                        failed_count,
+                        errors,
+                        events,
+                    )
+                continue
             chunk = pending[: self.batch_size]
             try:
                 parsed = self._choose_batch(
