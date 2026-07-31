@@ -28,6 +28,7 @@ from backend.app.domain.ai_one_click_workflow import (
     AiOneClickWorkflow,
     AiSegmentationService,
     LangChainRoleAnalysisSkill,
+    RoleAnalysisCandidate,
     create_whole_paragraph_utterance_drafts,
 )
 from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangChainSegmentationSkill
@@ -37,7 +38,10 @@ from backend.app.domain.audio import (
     TTSTextLimitError,
     VoiceJob,
     build_tts_request,
+    export_chapter_audio,
+    generate_chapter_audio_batch,
     synthesize_local_qwen3,
+    synthesize_local_qwen3_batch,
     synthesize_voice_design_qwen3,
 )
 from backend.app.domain.llm import MissingProviderCredential
@@ -56,6 +60,7 @@ ROOT = Path(__file__).resolve().parents[3]
 LOCAL_DOTENV = dotenv_values(ROOT / ".env")
 OUTPUT_AUDIO_DIR = ROOT / "outputs/audio"
 OUTPUT_VOICE_RESOURCE_DIR = ROOT / "outputs/voice-resources"
+OUTPUT_EXPORT_DIR = ROOT / "outputs/exports"
 CHAPTER_PARSER_SCRIPT_DIR = ROOT / "scripts/chapter_parsers"
 REAL_VOICE_ROOT = Path(os.environ.get("NOVELVOICE_REAL_VOICE_ROOT", "/Users/gaojing/Downloads/真实测试样本/音频"))
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
@@ -116,7 +121,12 @@ def _materialize_voice_resources(resources: list[VoiceResource]) -> list[VoiceRe
             )
         except HTTPException:
             reference_audio_path = voice.reference_audio_path
-        materialized.append(voice.with_updates(reference_audio_path=reference_audio_path))
+        materialized.append(
+            voice.with_updates(
+                reference_audio_path=reference_audio_path,
+                playable_audio_path=voice.playable_audio_path or reference_audio_path,
+            )
+        )
     return materialized
 
 
@@ -153,6 +163,10 @@ def _role_with_voice(role: RoleCard, voice: VoiceResource) -> RoleCard:
         reference_text=voice.reference_text,
         design_prompt=None,
         voice_mode="voice_cloning",
+        voice_description=voice.description,
+        voice_sample_text=voice.reference_text,
+        playable_voice_path=voice.playable_audio_path or voice.reference_audio_path,
+        voice_generated_by_ai=voice.generated,
     )
 
 
@@ -170,10 +184,12 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.25 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.3.0 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
+    app.mount("/outputs/exports", StaticFiles(directory=OUTPUT_EXPORT_DIR), name="output_exports")
     app.mount(
         "/outputs/voice-resources",
         StaticFiles(directory=OUTPUT_VOICE_RESOURCE_DIR),
@@ -438,6 +454,27 @@ def create_app() -> FastAPI:
             "role_options": collection.utterance_role_options(),
         }
 
+    @app.delete("/api/roles/{role_id}")
+    async def delete_role(role_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        collection = _state(app)["roles"]
+        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+        result = collection.delete_with_policy(
+            role_id,
+            utterances_by_paragraph,
+            action=str((payload or {}).get("action") or "block"),
+            target_role_id=(payload or {}).get("target_role_id"),
+        )
+        status_code = 409 if not result.deleted and result.referenced_count else 200
+        response = {
+            "delete_result": result.to_dict(),
+            "roles": [role.to_dict() for role in collection.list()],
+            "role_options": collection.utterance_role_options(),
+            "utterances_by_paragraph": utterances_by_paragraph,
+        }
+        if status_code != 200:
+            raise HTTPException(status_code=status_code, detail=response)
+        return response
+
     @app.get("/api/voice-resources")
     async def list_voice_resources() -> dict[str, Any]:
         voices = _state(app)["voices"]
@@ -459,6 +496,9 @@ def create_app() -> FastAPI:
                 "reference_text": _required_text(payload, "reference_text"),
                 "reference_audio_path": reference_audio_path,
                 "generated": bool(payload.get("generated", False)),
+                "gender": payload.get("gender"),
+                "suitable_role_types": payload.get("suitable_role_types") or [],
+                "playable_audio_path": payload.get("playable_audio_path") or reference_audio_path,
             }
         )
         return {"voice": _voice_to_dict(resource), "voices": [_voice_to_dict(voice) for voice in voices.list()]}
@@ -517,6 +557,9 @@ def create_app() -> FastAPI:
             reference_text=reference_text,
             reference_audio_path=str(output_path),
             generated=True,
+            gender=payload.get("gender"),
+            suitable_role_types=[str(item) for item in payload.get("suitable_role_types") or []],
+            playable_audio_path=str(output_path),
         )
         _state(app)["voice_previews"][preview_id] = resource
         return {
@@ -535,7 +578,17 @@ def create_app() -> FastAPI:
         allowed = {
             key: value
             for key, value in payload.items()
-            if key in {"name", "description", "reference_text", "reference_audio_path", "generated"}
+            if key
+            in {
+                "name",
+                "description",
+                "reference_text",
+                "reference_audio_path",
+                "generated",
+                "gender",
+                "suitable_role_types",
+                "playable_audio_path",
+            }
         }
         if "reference_audio_path" in allowed:
             allowed["reference_audio_path"] = _store_voice_resource_audio(
@@ -779,6 +832,67 @@ def create_app() -> FastAPI:
             "duration_seconds": duration_seconds,
         }
 
+    @app.post("/api/chapters/{chapter_id}/speech/batch")
+    async def synthesize_chapter_speech_batch(chapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        roles = _roles_for_ai_one_click_payload(app, payload or {})
+        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+
+        def synthesize_group(request: dict[str, Any], *, output_dir: Path) -> list[dict[str, Any]]:
+            output_paths = [
+                output_dir / _safe_audio_filename(f"{statement_id}.wav")
+                for statement_id in request["statement_ids"]
+            ]
+            try:
+                return synthesize_local_qwen3_batch(
+                    request,
+                    output_paths=output_paths,
+                    service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
+                )
+            except TTSServiceError:
+                results: list[dict[str, Any]] = []
+                for statement_id, output_path in zip(request["statement_ids"], output_paths):
+                    duration = _write_substitute_wav(output_path)
+                    results.append(
+                        {
+                            "statement_id": statement_id,
+                            "audio_path": str(output_path),
+                            "audio_duration": duration,
+                            "provider": "local-qwen3-tts-substitute",
+                            "model": "deterministic-substitute",
+                        }
+                    )
+                return results
+
+        report = await asyncio.to_thread(
+            generate_chapter_audio_batch,
+            chapter_id=chapter_id,
+            utterances_by_paragraph=utterances_by_paragraph,
+            roles=roles,
+            output_dir=OUTPUT_AUDIO_DIR,
+            synthesize_batch=synthesize_group,
+        )
+        return report.to_dict()
+
+    @app.post("/api/chapters/{chapter_id}/audio/export")
+    async def export_chapter_audio_endpoint(chapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        roles = _roles_for_ai_one_click_payload(app, payload or {})
+        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+        chapter_title = str((payload or {}).get("chapter_title") or chapter_id)
+        pause_ms = int((payload or {}).get("pause_ms") or 300)
+        speed = float((payload or {}).get("speed") or 1.0)
+        export_dir = OUTPUT_EXPORT_DIR / f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
+        report = await asyncio.to_thread(
+            export_chapter_audio,
+            chapter_id=chapter_id,
+            chapter_title=chapter_title,
+            utterances_by_paragraph=utterances_by_paragraph,
+            roles=roles,
+            output_dir=export_dir,
+            pause_ms=pause_ms,
+            speed=speed,
+        )
+        return report.to_dict()
+
     return app
 
 
@@ -833,6 +947,43 @@ def _create_ai_one_click_workflow(app: FastAPI) -> AiOneClickWorkflow:
             provider=segmentation_provider,
             api_key_lookup=_api_key_lookup_from_config(app),
         ),
+        role_collection=_state(app)["roles"],
+        voice_collection=_state(app)["voices"],
+        voice_generator=lambda candidate: _generate_auto_voice_resource(app, candidate),
+    )
+
+
+def _generate_auto_voice_resource(app: FastAPI, candidate: RoleAnalysisCandidate) -> VoiceResource:
+    voices = _state(app)["voices"]
+    voice_id = f"voice-auto-{len(voices.list()) + 1:04d}"
+    name = f"{candidate.name or '角色'}专属音色"
+    description = candidate.voice_direction or candidate.profile or "AI自动生成音色"
+    reference_text = generated_voice_content(name, description)
+    output_path = OUTPUT_VOICE_RESOURCE_DIR / f"{voice_id}.wav"
+    design_request = {
+        "input": reference_text,
+        "instruct": description,
+        "language": "Auto",
+        "response_format": "wav",
+    }
+    try:
+        synthesize_voice_design_qwen3(
+            design_request,
+            output_path=output_path,
+            service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
+        )
+    except TTSServiceError:
+        _write_substitute_wav(output_path)
+    return VoiceResource(
+        voice_id=voice_id,
+        name=name,
+        gender=candidate.gender,
+        description=description,
+        suitable_role_types=[item for item in [candidate.gender, candidate.profile] if item],
+        reference_text=reference_text,
+        reference_audio_path=str(output_path),
+        playable_audio_path=str(output_path),
+        generated=True,
     )
 
 

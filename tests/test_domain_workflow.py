@@ -1624,9 +1624,25 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
             reason="叙述文本",
         )
 
+    def fake_choose_roles_batch(self, **kwargs):
+        assert len(kwargs["statements"]) == 1
+        return {
+            "items": [
+                {
+                    "statement_id": kwargs["statements"][0]["statement_id"],
+                    "action": "select_role",
+                    "role_id": "narrator",
+                    "confidence": 0.88,
+                    "reason": "叙述文本",
+                    "evidence": "旁白",
+                }
+            ]
+        }
+
     monkeypatch.setattr(LangChainRoleAnalysisSkill, "analyze_roles", fake_analyze_roles)
     monkeypatch.setattr(LangChainRoleAnalysisSkill, "needs_segmentation", fake_needs_segmentation)
     monkeypatch.setattr(LangChainRoleAnalysisSkill, "choose_role", fake_choose_role)
+    monkeypatch.setattr(LangChainRoleAnalysisSkill, "choose_roles_batch", fake_choose_roles_batch)
 
     client = TestClient(create_app())
     config_response = client.patch(
@@ -1663,7 +1679,7 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
     start_data = started.json()
     assert start_data["status"] == "waiting_for_roles"
     assert start_data["role_candidates"][0]["name"] == "旁白"
-    assert "添加到角色列表" in start_data["message"]
+    assert "自动添加/更新角色" in start_data["message"]
 
     streamed = client.post(
         f"/api/ai-one-click-analysis/{start_data['thread_id']}/roles-completed-stream",

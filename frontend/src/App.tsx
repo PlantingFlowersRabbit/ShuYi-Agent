@@ -62,41 +62,65 @@ type ApiParagraph = {
 type VoiceResource = {
   voiceId: string;
   name: string;
+  gender: string;
   description: string;
+  suitableRoleTypes: string[];
   referenceText: string;
   referenceAudioPath: string;
+  playableAudioPath: string;
   generated: boolean;
 };
 
 type ApiVoiceResource = {
   voice_id: string;
   name: string;
+  gender?: string | null;
   description: string;
+  suitable_role_types?: string[];
   reference_text: string;
   reference_audio_path: string;
+  playable_audio_path?: string | null;
   generated: boolean;
 };
 
 type RoleCard = {
   roleId: string;
   name: string;
+  aliases: string[];
+  gender: string;
+  profile: string;
   description: string;
   voiceMode: VoiceMode;
   voiceResourceId: string;
   referenceAudioPath: string;
   referenceText: string;
   designPrompt: string;
+  voiceDescription: string;
+  voiceSampleText: string;
+  playableVoicePath: string;
+  voiceMatchScore?: number | null;
+  voiceMatchReason?: string | null;
+  voiceGeneratedByAi: boolean;
 };
 
 type ApiRoleCard = {
   role_id: string;
   name: string;
+  aliases?: string[];
+  gender?: string | null;
+  profile?: string | null;
   description: string;
   voice_mode: VoiceMode;
   voice_resource_id: string | null;
   reference_audio_path: string | null;
   reference_text: string | null;
   design_prompt: string | null;
+  voice_description?: string | null;
+  voice_sample_text?: string | null;
+  playable_voice_path?: string | null;
+  voice_match_score?: number | null;
+  voice_match_reason?: string | null;
+  voice_generated_by_ai?: boolean;
 };
 
 type UtteranceDraft = {
@@ -107,6 +131,10 @@ type UtteranceDraft = {
   speakerName: string;
   audioStatus: string;
   audioUrl?: string;
+  audioPath?: string;
+  audioDuration?: number;
+  audioProvider?: string;
+  audioModel?: string;
 };
 
 type ApiUtterance = {
@@ -122,6 +150,11 @@ type ApiUtterance = {
   design_prompt: string | null;
   confidence?: number;
   needs_human_review?: boolean;
+  audio_status?: string;
+  audio_path?: string;
+  audio_duration?: number;
+  audio_provider?: string;
+  audio_model?: string;
 };
 
 type ApiChapterParagraphsResponse = {
@@ -146,6 +179,9 @@ type AiOneClickStartResponse = {
   thread_id: string;
   message: string;
   role_candidates: AiRoleCandidate[];
+  roles?: ApiRoleCard[];
+  voices?: ApiVoiceResource[];
+  auto_role_report?: { added_count: number; updated_count: number; generated_voice_count: number } | null;
 };
 
 type AiRoleSelectionEvent = {
@@ -207,25 +243,34 @@ const defaultVoices: VoiceResource[] = [
   {
     voiceId: "voice-male-narrator",
     name: "男声旁白",
+    gender: "男",
     description: "沉稳、叙事感强，适合旁白和长段说明。",
+    suitableRoleTypes: ["旁白", "叙述", "长段说明"],
     referenceText: "探索那些被遗忘的地下空间，比如废弃的地铁站、防空洞。",
     referenceAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/男声旁白/男声旁白.mp3",
+    playableAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/男声旁白/男声旁白.mp3",
     generated: false,
   },
   {
     voiceId: "voice-young-male",
     name: "年轻男",
+    gender: "男",
     description: "清亮自然，适合年轻男性角色对白。",
+    suitableRoleTypes: ["年轻男性", "对白"],
     referenceText: "光柱最终落在那株已经遍布猩红纹路的神木幼苗上。",
     referenceAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/年轻男/年轻男.mp3",
+    playableAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/年轻男/年轻男.mp3",
     generated: false,
   },
   {
     voiceId: "voice-yujie",
     name: "御姐音",
+    gender: "女",
     description: "成熟亲近，适合女性角色对白。",
+    suitableRoleTypes: ["女性角色", "成熟", "对白"],
     referenceText: "宝宝，今天你可得好好陪我逛逛。",
     referenceAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/御姐音/御姐音.mp3",
+    playableAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/御姐音/御姐音.mp3",
     generated: false,
   },
 ];
@@ -423,9 +468,12 @@ function fromApiVoice(voice: ApiVoiceResource): VoiceResource {
   return {
     voiceId: voice.voice_id,
     name: voice.name,
+    gender: voice.gender ?? "",
     description: voice.description,
+    suitableRoleTypes: voice.suitable_role_types ?? [],
     referenceText: voice.reference_text,
     referenceAudioPath: voice.reference_audio_path,
+    playableAudioPath: voice.playable_audio_path ?? voice.reference_audio_path,
     generated: voice.generated,
   };
 }
@@ -434,22 +482,39 @@ function fromApiRole(role: ApiRoleCard): RoleCard {
   return {
     roleId: role.role_id,
     name: role.name,
+    aliases: role.aliases ?? [],
+    gender: role.gender ?? "",
+    profile: role.profile ?? "",
     description: role.description,
     voiceMode: role.voice_mode,
     voiceResourceId: role.voice_resource_id ?? "",
     referenceAudioPath: role.reference_audio_path ?? "",
     referenceText: role.reference_text ?? "",
     designPrompt: role.design_prompt ?? "",
+    voiceDescription: role.voice_description ?? role.description,
+    voiceSampleText: role.voice_sample_text ?? role.reference_text ?? "",
+    playableVoicePath: role.playable_voice_path ?? role.reference_audio_path ?? "",
+    voiceMatchScore: role.voice_match_score,
+    voiceMatchReason: role.voice_match_reason,
+    voiceGeneratedByAi: Boolean(role.voice_generated_by_ai),
   };
 }
 
-function toApiVoice(voice: Partial<VoiceResource>): Record<string, unknown> {
+function toApiVoice(voice: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & { suitableRoleTypes?: string[] | string }): Record<string, unknown> {
   return {
     voice_id: voice.voiceId,
     name: voice.name,
+    gender: voice.gender,
     description: voice.description,
+    suitable_role_types: Array.isArray(voice.suitableRoleTypes)
+      ? voice.suitableRoleTypes
+      : String(voice.suitableRoleTypes ?? "")
+          .split(/[，,、]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
     reference_text: voice.referenceText,
     reference_audio_path: voice.referenceAudioPath,
+    playable_audio_path: voice.playableAudioPath,
     generated: voice.generated,
   };
 }
@@ -458,12 +523,21 @@ function toApiRole(role: RoleCard): Record<string, unknown> {
   return {
     role_id: role.roleId,
     name: role.name,
+    aliases: role.aliases,
+    gender: role.gender || null,
+    profile: role.profile || null,
     description: role.description,
     voice_mode: role.voiceMode,
     voice_resource_id: role.voiceResourceId,
     reference_audio_path: role.referenceAudioPath,
     reference_text: role.referenceText,
     design_prompt: role.designPrompt || null,
+    voice_description: role.voiceDescription,
+    voice_sample_text: role.voiceSampleText,
+    playable_voice_path: role.playableVoicePath,
+    voice_match_score: role.voiceMatchScore,
+    voice_match_reason: role.voiceMatchReason,
+    voice_generated_by_ai: role.voiceGeneratedByAi,
   };
 }
 
@@ -482,6 +556,11 @@ function utteranceGroupsToApi(groups: Record<string, UtteranceDraft[]>): Record<
         speed: 1.0,
         volume: 1.0,
         design_prompt: null,
+        audio_status: utterance.audioPath ? "success" : undefined,
+        audio_path: utterance.audioPath,
+        audio_duration: utterance.audioDuration,
+        audio_provider: utterance.audioProvider,
+        audio_model: utterance.audioModel,
       })),
     ]),
   );
@@ -491,43 +570,35 @@ function voiceAudioSrc(voice: VoiceResource): string {
   return `/api/voice-resources/${voice.voiceId}/audio`;
 }
 
+function roleFromVoice(roleId: string, name: string, voice: VoiceResource): RoleCard {
+  return {
+    roleId,
+    name,
+    aliases: [],
+    gender: voice.gender,
+    profile: voice.description,
+    description: voice.description,
+    voiceMode: "voice_cloning",
+    voiceResourceId: voice.voiceId,
+    referenceAudioPath: voice.referenceAudioPath,
+    referenceText: voice.referenceText,
+    designPrompt: "",
+    voiceDescription: voice.description,
+    voiceSampleText: voice.referenceText,
+    playableVoicePath: voice.playableAudioPath || voice.referenceAudioPath,
+    voiceMatchScore: null,
+    voiceMatchReason: "默认角色绑定音色",
+    voiceGeneratedByAi: voice.generated,
+  };
+}
+
 function createDefaultRoles(voices: VoiceResource[]): RoleCard[] {
   const fallback = voices[0] ?? defaultVoices[0];
   const pick = (voiceId: string) => voices.find((voice) => voice.voiceId === voiceId) ?? fallback;
-  const narrator = pick("voice-male-narrator");
-  const youngMale = pick("voice-young-male");
-  const yujie = pick("voice-yujie");
   return [
-    {
-      roleId: "narrator",
-      name: "旁白",
-      description: narrator.description,
-      voiceMode: "voice_cloning",
-      voiceResourceId: narrator.voiceId,
-      referenceAudioPath: narrator.referenceAudioPath,
-      referenceText: narrator.referenceText,
-      designPrompt: "",
-    },
-    {
-      roleId: "male_lead",
-      name: "年轻男",
-      description: youngMale.description,
-      voiceMode: "voice_cloning",
-      voiceResourceId: youngMale.voiceId,
-      referenceAudioPath: youngMale.referenceAudioPath,
-      referenceText: youngMale.referenceText,
-      designPrompt: "",
-    },
-    {
-      roleId: "female_lead",
-      name: "御姐音",
-      description: yujie.description,
-      voiceMode: "voice_cloning",
-      voiceResourceId: yujie.voiceId,
-      referenceAudioPath: yujie.referenceAudioPath,
-      referenceText: yujie.referenceText,
-      designPrompt: "",
-    },
+    roleFromVoice("narrator", "旁白", pick("voice-male-narrator")),
+    roleFromVoice("male_lead", "年轻男", pick("voice-young-male")),
+    roleFromVoice("female_lead", "御姐音", pick("voice-yujie")),
   ];
 }
 
@@ -582,15 +653,30 @@ function apiUtterancesToGroups(
   );
 }
 
+function audioPathToUrl(path?: string): string | undefined {
+  if (!path) return undefined;
+  if (path.startsWith("/outputs/")) return path;
+  if (path.startsWith("outputs/")) return `/${path}`;
+  const marker = "/outputs/";
+  const index = path.indexOf(marker);
+  return index >= 0 ? path.slice(index) : undefined;
+}
+
 function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
   const role = roles.find((item) => item.roleId === utterance.speaker_role_id);
+  const audioUrl = audioPathToUrl(utterance.audio_path);
   return {
     utteranceId: utterance.utterance_id,
     paragraphId: utterance.paragraph_id ?? paragraph.paragraphId,
     text: utterance.text,
-    roleId: role?.roleId ?? "",
+    roleId: role?.roleId ?? utterance.speaker_role_id ?? "",
     speakerName: utterance.speaker_name || role?.name || "",
-    audioStatus: "尚未生成",
+    audioStatus: utterance.audio_status === "success" ? "音频生成完成" : "尚未生成",
+    audioUrl,
+    audioPath: utterance.audio_path,
+    audioDuration: utterance.audio_duration,
+    audioProvider: utterance.audio_provider,
+    audioModel: utterance.audio_model,
   };
 }
 
@@ -648,13 +734,18 @@ function App() {
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Record<string, boolean>>({});
   const [newVoice, setNewVoice] = useState({
     name: "",
+    gender: "",
     description: "",
+    suitableRoleTypes: "",
     referenceText: "",
     referenceAudioPath: "",
+    playableAudioPath: "",
   });
   const [generatedVoice, setGeneratedVoice] = useState({
     name: "",
+    gender: "",
     description: "",
+    suitableRoleTypes: "",
     referenceText: DEFAULT_GENERATED_VOICE_TEXT,
   });
   const [newVoiceAudioPreviewUrl, setNewVoiceAudioPreviewUrl] = useState("");
@@ -884,6 +975,12 @@ function App() {
       description: voice.description,
       voiceMode: "voice_cloning",
       designPrompt: "",
+      voiceDescription: voice.description,
+      voiceSampleText: voice.referenceText,
+      playableVoicePath: voice.playableAudioPath || voice.referenceAudioPath,
+      voiceMatchScore: null,
+      voiceMatchReason: "用户手动选择音色",
+      voiceGeneratedByAi: voice.generated,
     };
   }
 
@@ -896,15 +993,7 @@ function App() {
     setRoles((current) => current.map((role) => (role.roleId === roleId ? updatedRole : role)));
     requestJson(`/api/roles/${roleId}`, {
       method: "PATCH",
-      body: JSON.stringify({
-        name: updatedRole.name,
-        description: updatedRole.description,
-        voice_mode: updatedRole.voiceMode,
-        voice_resource_id: updatedRole.voiceResourceId,
-        reference_audio_path: updatedRole.referenceAudioPath,
-        reference_text: updatedRole.referenceText,
-        design_prompt: updatedRole.designPrompt || null,
-      }),
+      body: JSON.stringify(toApiRole(updatedRole)),
     }).catch((error) => setApiStatus(`角色同步失败：${String(error)}`));
   }
 
@@ -915,34 +1004,49 @@ function App() {
       return;
     }
     const role: RoleCard = {
-      roleId: `custom_role_${Date.now()}`,
-      name: `新角色${roles.length + 1}`,
-      description: voice.description,
-      voiceMode: "voice_cloning",
-      voiceResourceId: voice.voiceId,
-      referenceAudioPath: voice.referenceAudioPath,
-      referenceText: voice.referenceText,
-      designPrompt: "",
+      ...roleFromVoice(`custom_role_${Date.now()}`, `新角色${roles.length + 1}`, voice),
     };
     setRoles((current) => [...current, role]);
     try {
       const data = await requestJson<{ roles: ApiRoleCard[] }>("/api/roles", {
         method: "POST",
-        body: JSON.stringify({
-          role_id: role.roleId,
-          name: role.name,
-          description: role.description,
-          voice_mode: role.voiceMode,
-          voice_resource_id: role.voiceResourceId,
-          reference_audio_path: role.referenceAudioPath,
-          reference_text: role.referenceText,
-          design_prompt: null,
-        }),
+        body: JSON.stringify(toApiRole(role)),
       });
       setRoles(data.roles.map(fromApiRole));
       setApiStatus(`已新增角色：${role.name}`);
     } catch (error) {
       setApiStatus(`新增角色同步失败，已保留本地角色：${String(error)}`);
+    }
+  }
+
+  async function deleteRole(roleId: string) {
+    const payload = { roles: roles.map(toApiRole), utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph) };
+    try {
+      const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
+        `/api/roles/${roleId}`,
+        { method: "DELETE", body: JSON.stringify(payload) },
+      );
+      setRoles(data.roles.map(fromApiRole));
+      setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, data.roles.map(fromApiRole)));
+      setApiStatus("角色删除成功");
+    } catch (error) {
+      const shouldUnbind = window.confirm(`角色正在被语句引用，是否解除这些语句的角色绑定并删除？\n${String(error)}`);
+      if (!shouldUnbind) {
+        setApiStatus(`角色删除已取消：${String(error)}`);
+        return;
+      }
+      try {
+        const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
+          `/api/roles/${roleId}`,
+          { method: "DELETE", body: JSON.stringify({ ...payload, action: "unbind" }) },
+        );
+        const nextRoles = data.roles.map(fromApiRole);
+        setRoles(nextRoles);
+        setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, nextRoles));
+        setApiStatus("已解除引用语句的角色绑定并删除角色");
+      } catch (secondError) {
+        setApiStatus(`角色删除失败：${String(secondError)}`);
+      }
     }
   }
 
@@ -969,11 +1073,16 @@ function App() {
         `/api/chapters/${activeChapter.chapterId}/ai-one-click-analysis/start`,
         { method: "POST", body: JSON.stringify({}) },
       );
+      if (data.voices?.length) setVoices(data.voices.map(fromApiVoice));
+      if (data.roles?.length) setRoles(data.roles.map(fromApiRole));
       setAiOneClickThreadId(data.thread_id);
       setAiRoleCandidates(data.role_candidates);
       setAiOneClickWaitingForRoles(true);
       setSegmentationProgress(35);
-      setApiStatus(`${data.message} 请在角色列表中新增角色或绑定已有角色后点击“角色列表添加完成”。`);
+      const autoSummary = data.auto_role_report
+        ? `自动新增 ${data.auto_role_report.added_count} 个角色，生成 ${data.auto_role_report.generated_voice_count} 个音色。`
+        : "";
+      setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“角色列表确认完成”。`);
     } catch (error) {
       resetAiOneClickState();
       setSegmentationProgress(100);
@@ -1173,7 +1282,12 @@ function App() {
     );
     setVoiceGenerationProgress(25);
     try {
-      const result = await requestJson<{ audio_url: string; voice_job: { status: string }; warning?: string }>(
+      const result = await requestJson<{
+        audio_url: string;
+        duration_seconds?: number;
+        voice_job: { status: string; output_path?: string; provider?: string; response_format?: string };
+        warning?: string;
+      }>(
         `/api/utterances/${utterance.utteranceId}/speech`,
         {
           method: "POST",
@@ -1192,7 +1306,15 @@ function App() {
         ...current,
         [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map((item) =>
           item.utteranceId === utterance.utteranceId
-            ? { ...item, audioStatus, audioUrl: result.audio_url }
+            ? {
+                ...item,
+                audioStatus,
+                audioUrl: result.audio_url,
+                audioPath: result.voice_job.output_path,
+                audioDuration: result.duration_seconds,
+                audioProvider: result.voice_job.provider,
+                audioModel: result.voice_job.response_format,
+              }
             : item,
         ),
       }));
@@ -1206,7 +1328,72 @@ function App() {
     }
   }
 
-  async function saveVoiceResource(payload: Partial<VoiceResource>): Promise<boolean> {
+  async function generateChapterDubbing() {
+    if (!activeChapter) {
+      setApiStatus("一键生成配音失败：请先选择章节");
+      return;
+    }
+    setVoiceGenerationProgress(10);
+    setApiStatus("正在按角色/音色分组批量生成当前章节配音");
+    try {
+      const data = await requestJson<{
+        status: string;
+        success_count: number;
+        skipped_count: number;
+        failed_count: number;
+        groups: { voice_resource_id: string; count: number }[];
+        errors: { statement_id: string; message: string }[];
+        utterances_by_paragraph: Record<string, ApiUtterance[]>;
+      }>(`/api/chapters/${activeChapter.chapterId}/speech/batch`, {
+        method: "POST",
+        body: JSON.stringify({
+          roles: roles.map(toApiRole),
+          utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+        }),
+      });
+      setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, roles));
+      setVoiceGenerationProgress(100);
+      const groupSummary = data.groups.map((group) => `${group.voice_resource_id}×${group.count}`).join("，");
+      const errorSummary = data.failed_count ? `；失败 ${data.failed_count} 条：${data.errors[0]?.message ?? "请检查详情"}` : "";
+      setApiStatus(`一键生成配音完成：成功 ${data.success_count} 条，跳过 ${data.skipped_count} 条；分组 ${groupSummary || "无待生成"}${errorSummary}`);
+    } catch (error) {
+      setVoiceGenerationProgress(100);
+      setApiStatus(`一键生成配音失败：${String(error)}`);
+    }
+  }
+
+  async function exportChapterAudio() {
+    if (!activeChapter) {
+      setApiStatus("一键导出失败：请先选择章节");
+      return;
+    }
+    setApiStatus("正在导出当前章节逐条音频和 manifest");
+    try {
+      const data = await requestJson<{
+        export_dir: string;
+        manifest_path: string;
+        item_count: number;
+        missing_count: number;
+        full_audio_path: string | null;
+        message: string;
+      }>(`/api/chapters/${activeChapter.chapterId}/audio/export`, {
+        method: "POST",
+        body: JSON.stringify({
+          chapter_title: activeChapter.title,
+          roles: roles.map(toApiRole),
+          utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+          pause_ms: 300,
+          speed: 1.0,
+        }),
+      });
+      const fullAudio = data.full_audio_path ? `；完整音频：${data.full_audio_path}` : "";
+      setApiStatus(`一键导出完成：${data.item_count} 条，manifest：${data.manifest_path}${fullAudio}；${data.message}`);
+    } catch (error) {
+      setApiStatus(`一键导出失败：${String(error)}`);
+    }
+  }
+
+  async function saveVoiceResource(payload: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & { suitableRoleTypes?: string[] | string }): Promise<boolean> {
     try {
       const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/api/voice-resources", {
         method: "POST",
@@ -1251,7 +1438,11 @@ function App() {
     });
     if (newVoiceAudioPreviewUrl) URL.revokeObjectURL(newVoiceAudioPreviewUrl);
     setNewVoiceAudioPreviewUrl(URL.createObjectURL(file));
-    setNewVoice((current) => ({ ...current, referenceAudioPath: data.reference_audio_path }));
+    setNewVoice((current) => ({
+      ...current,
+      referenceAudioPath: data.reference_audio_path,
+      playableAudioPath: data.reference_audio_path,
+    }));
     setApiStatus(`参考音频文件已选择：${file.name}`);
   }
 
@@ -1272,6 +1463,11 @@ function App() {
           body: JSON.stringify({
             name: generatedVoice.name,
             description: generatedVoice.description,
+            gender: generatedVoice.gender,
+            suitable_role_types: generatedVoice.suitableRoleTypes
+              .split(/[，,、]/)
+              .map((item) => item.trim())
+              .filter(Boolean),
             reference_text: generatedVoice.referenceText || DEFAULT_GENERATED_VOICE_TEXT,
           }),
         },
@@ -1413,7 +1609,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.251 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.3.0 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1472,6 +1668,31 @@ function App() {
                       value={role.name}
                       onChange={(event) => updateRole(role.roleId, { name: event.target.value })}
                     />
+                    <input
+                      aria-label={`${role.name} 别名`}
+                      placeholder="别名/称呼，用逗号分隔"
+                      value={role.aliases.join("，")}
+                      onChange={(event) =>
+                        updateRole(role.roleId, {
+                          aliases: event.target.value
+                            .split(/[，,、]/)
+                            .map((item) => item.trim())
+                            .filter(Boolean),
+                        })
+                      }
+                    />
+                    <input
+                      aria-label={`${role.name} 性别`}
+                      placeholder="性别"
+                      value={role.gender}
+                      onChange={(event) => updateRole(role.roleId, { gender: event.target.value })}
+                    />
+                    <textarea
+                      aria-label={`${role.name} 人设身份性格`}
+                      placeholder="人设/身份/性格"
+                      value={role.profile}
+                      onChange={(event) => updateRole(role.roleId, { profile: event.target.value })}
+                    />
                     <div className="inline-select">
                       <label>
                         音色选择
@@ -1496,13 +1717,20 @@ function App() {
                         ▶
                       </button>
                     </div>
+                    <button className="tool-button amber" type="button" onClick={() => void deleteRole(role.roleId)}>
+                      删除角色
+                    </button>
                     <p>
                       <strong>音色描述</strong>
-                      {voice?.description ?? role.description}
+                      {voice?.description ?? role.voiceDescription ?? role.description}
                     </p>
                     <p>
                       <strong>语音具体内容</strong>
-                      {voice?.referenceText ?? role.referenceText}
+                      {voice?.referenceText ?? role.voiceSampleText ?? role.referenceText}
+                    </p>
+                    <p>
+                      <strong>音色匹配</strong>
+                      {role.voiceMatchReason ?? "用户可手动调整"}
                     </p>
                     {voice && <audio controls src={voiceAudioSrc(voice)} />}
                   </article>
@@ -1531,7 +1759,7 @@ function App() {
                     disabled={aiOneClickRunning}
                     onClick={() => void completeAiRoleListAndResumeWorkflow()}
                   >
-                    角色列表添加完成
+                    角色列表确认完成
                   </button>
                 )}
               </div>
@@ -1568,10 +1796,26 @@ function App() {
                   >
                     AI一键分析
                   </button>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => void generateChapterDubbing()}
+                    disabled={!confirmed}
+                  >
+                    一键生成配音
+                  </button>
+                  <button
+                    className="tool-button amber"
+                    type="button"
+                    onClick={() => void exportChapterAudio()}
+                    disabled={!confirmed}
+                  >
+                    一键导出
+                  </button>
                   <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
                     确认无误
                   </button>
-                  <span>{confirmed ? "已确认，已生成整段落语句文本" : "确认前不能执行 AI语句划分"}</span>
+                  <span>{confirmed ? "已确认，可人工检查、批量配音或导出" : "确认前不能执行 AI语句划分"}</span>
                 </div>
               </header>
 
@@ -1704,6 +1948,19 @@ function App() {
                   />
                 </label>
                 <label>
+                  音色性别
+                  <input
+                    value={voice.gender}
+                    onChange={(event) =>
+                      setVoices((current) =>
+                        current.map((item) =>
+                          item.voiceId === voice.voiceId ? { ...item, gender: event.target.value } : item,
+                        ),
+                      )
+                    }
+                  />
+                </label>
+                <label>
                   音色描述
                   <textarea
                     value={voice.description}
@@ -1711,6 +1968,27 @@ function App() {
                       setVoices((current) =>
                         current.map((item) =>
                           item.voiceId === voice.voiceId ? { ...item, description: event.target.value } : item,
+                        ),
+                      )
+                    }
+                  />
+                </label>
+                <label>
+                  适合角色类型
+                  <input
+                    value={voice.suitableRoleTypes.join("，")}
+                    onChange={(event) =>
+                      setVoices((current) =>
+                        current.map((item) =>
+                          item.voiceId === voice.voiceId
+                            ? {
+                                ...item,
+                                suitableRoleTypes: event.target.value
+                                  .split(/[，,、]/)
+                                  .map((part) => part.trim())
+                                  .filter(Boolean),
+                              }
+                            : item,
                         ),
                       )
                     }
@@ -1762,10 +2040,20 @@ function App() {
               value={newVoice.name}
               onChange={(event) => setNewVoice((current) => ({ ...current, name: event.target.value }))}
             />
+            <input
+              placeholder="音色性别"
+              value={newVoice.gender}
+              onChange={(event) => setNewVoice((current) => ({ ...current, gender: event.target.value }))}
+            />
             <textarea
               placeholder="音色描述"
               value={newVoice.description}
               onChange={(event) => setNewVoice((current) => ({ ...current, description: event.target.value }))}
+            />
+            <input
+              placeholder="适合角色类型，用逗号分隔"
+              value={newVoice.suitableRoleTypes}
+              onChange={(event) => setNewVoice((current) => ({ ...current, suitableRoleTypes: event.target.value }))}
             />
             <textarea
               placeholder="语音具体内容"
@@ -1801,10 +2089,20 @@ function App() {
               value={generatedVoice.name}
               onChange={(event) => setGeneratedVoice((current) => ({ ...current, name: event.target.value }))}
             />
+            <input
+              placeholder="音色性别"
+              value={generatedVoice.gender}
+              onChange={(event) => setGeneratedVoice((current) => ({ ...current, gender: event.target.value }))}
+            />
             <textarea
               placeholder="音色描述"
               value={generatedVoice.description}
               onChange={(event) => setGeneratedVoice((current) => ({ ...current, description: event.target.value }))}
+            />
+            <input
+              placeholder="适合角色类型，用逗号分隔"
+              value={generatedVoice.suitableRoleTypes}
+              onChange={(event) => setGeneratedVoice((current) => ({ ...current, suitableRoleTypes: event.target.value }))}
             />
             <textarea
               placeholder="语音具体内容"
@@ -1972,7 +2270,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.251</h1>
+        <h1>NovelVoice-Agent v0.3.0</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

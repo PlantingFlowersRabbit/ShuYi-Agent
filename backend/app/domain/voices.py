@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +18,15 @@ class VoiceResource:
     reference_text: str
     reference_audio_path: str
     generated: bool = False
+    gender: str | None = None
+    suitable_role_types: list[str] = field(default_factory=list)
+    playable_audio_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if data["playable_audio_path"] is None:
+            data["playable_audio_path"] = self.reference_audio_path
+        return data
 
     def with_updates(self, **updates: Any) -> VoiceResource:
         return replace(self, **updates)
@@ -47,6 +53,9 @@ def _resource_from_mapping(data: VoiceResource | dict[str, Any]) -> VoiceResourc
         reference_text=data.get("reference_text", ""),
         reference_audio_path=data.get("reference_audio_path", ""),
         generated=bool(data.get("generated", False)),
+        gender=data.get("gender"),
+        suitable_role_types=[str(item) for item in data.get("suitable_role_types") or []],
+        playable_audio_path=data.get("playable_audio_path") or data.get("reference_audio_path", ""),
     )
 
 

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import json
 import os
+import re
+import shutil
 import urllib.error
 import urllib.request
 import wave
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -61,6 +65,35 @@ class VoiceJob:
     language: str = "Auto"
     other_control_text: str | None = None
     x_vector_only: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BatchAudioGenerationReport:
+    status: str
+    total_count: int
+    skipped_count: int
+    success_count: int
+    failed_count: int
+    groups: list[dict[str, Any]]
+    errors: list[dict[str, Any]]
+    utterances_by_paragraph: dict[str, list[dict[str, Any]]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ChapterAudioExportReport:
+    status: str
+    export_dir: str
+    manifest_path: str
+    item_count: int
+    missing_count: int
+    full_audio_path: str | None
+    message: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -406,8 +439,383 @@ def validate_wav_duration(output_path: Path, *, min_duration_seconds: float = 0.
     return duration
 
 
+def write_silent_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> float:
+    frame_count = int(duration_seconds * sample_rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"\x00\x00" * frame_count)
+    return duration_seconds
+
+
+def generate_chapter_audio_batch(
+    *,
+    chapter_id: str,
+    utterances_by_paragraph: dict[str, list[dict[str, Any]]],
+    roles: list[RoleCard | dict[str, Any]],
+    output_dir: Path,
+    synthesize_batch: Callable[[dict[str, Any]], list[dict[str, Any]]] | None = None,
+    skip_success: bool = True,
+) -> BatchAudioGenerationReport:
+    role_by_id = {_role_id(role): role for role in roles}
+    pending: list[dict[str, Any]] = []
+    skipped_count = 0
+    errors: list[dict[str, Any]] = []
+    now = _utc_now()
+
+    for order, utterance in enumerate(_iter_utterances(utterances_by_paragraph), start=1):
+        text = str(utterance.get("text") or "").strip()
+        role_id = _utterance_role_id(utterance)
+        if not text or not role_id:
+            continue
+        if skip_success and utterance.get("audio_status") == "success" and utterance.get("audio_path"):
+            skipped_count += 1
+            continue
+        role = role_by_id.get(role_id)
+        if role is None:
+            utterance.update(audio_status="failed", audio_error=f"role not found: {role_id}")
+            errors.append({"statement_id": _statement_id(utterance), "message": f"role not found: {role_id}"})
+            continue
+        voice_resource_id = _role_field(role, "voice_resource_id") or role_id
+        pending.append(
+            {
+                "order": order,
+                "utterance": utterance,
+                "role": role,
+                "role_id": role_id,
+                "voice_resource_id": voice_resource_id,
+            }
+        )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    groups: list[dict[str, Any]] = []
+    success_count = 0
+    failed_count = len(errors)
+    synthesize_batch = synthesize_batch or _default_synthesize_batch
+
+    for group_key, group_items in _group_pending_audio(pending).items():
+        first = group_items[0]
+        role = first["role"]
+        request = {
+            "chapter_id": chapter_id,
+            "role_id": first["role_id"],
+            "voice_resource_id": first["voice_resource_id"],
+            "reference_audio_path": _role_field(role, "reference_audio_path"),
+            "reference_text": _role_field(role, "reference_text"),
+            "statement_ids": [_statement_id(item["utterance"]) for item in group_items],
+            "texts": [str(item["utterance"].get("text") or "") for item in group_items],
+            "languages": [str(item["utterance"].get("language") or "Auto") for item in group_items],
+        }
+        groups.append(
+            {
+                "group_key": group_key,
+                "voice_resource_id": request["voice_resource_id"],
+                "role_id": request["role_id"],
+                "count": len(group_items),
+            }
+        )
+        try:
+            results = synthesize_batch(request, output_dir=output_dir)
+        except TypeError:
+            results = synthesize_batch(request)
+        except (TTSServiceError, ValueError, RuntimeError, OSError) as exc:
+            failed_count += len(group_items)
+            for item in group_items:
+                utterance = item["utterance"]
+                utterance.update(audio_status="failed", audio_error=str(exc), audio_generated_at=now)
+                errors.append({"statement_id": _statement_id(utterance), "message": str(exc)})
+            continue
+
+        result_by_id = {str(result.get("statement_id")): result for result in results if result.get("statement_id")}
+        for item in group_items:
+            utterance = item["utterance"]
+            statement_id = _statement_id(utterance)
+            result = result_by_id.get(statement_id)
+            if result is None or result.get("error"):
+                message = str(result.get("error") if result else "batch TTS result missing")
+                utterance.update(audio_status="failed", audio_error=message, audio_generated_at=now)
+                errors.append({"statement_id": statement_id, "message": message})
+                failed_count += 1
+                continue
+            utterance.update(
+                audio_status="success",
+                audio_path=str(result.get("audio_path") or ""),
+                audio_duration=float(result.get("audio_duration") or result.get("duration_seconds") or 0.0),
+                audio_error=None,
+                audio_generated_at=now,
+                audio_provider=str(result.get("provider") or "local-qwen3-tts"),
+                audio_model=str(result.get("model") or "Qwen3-TTS"),
+                voice_resource_id=request["voice_resource_id"],
+            )
+            success_count += 1
+
+    status = "completed" if failed_count == 0 else "completed_with_errors"
+    return BatchAudioGenerationReport(
+        status=status,
+        total_count=success_count + failed_count + skipped_count,
+        skipped_count=skipped_count,
+        success_count=success_count,
+        failed_count=failed_count,
+        groups=groups,
+        errors=errors,
+        utterances_by_paragraph=utterances_by_paragraph,
+    )
+
+
+def export_chapter_audio(
+    *,
+    chapter_id: str,
+    chapter_title: str,
+    utterances_by_paragraph: dict[str, list[dict[str, Any]]],
+    roles: list[RoleCard | dict[str, Any]],
+    output_dir: Path,
+    pause_ms: int = 300,
+    speed: float = 1.0,
+) -> ChapterAudioExportReport:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    role_by_id = {_role_id(role): role for role in roles}
+    items: list[dict[str, Any]] = []
+    completed_audio_paths: list[Path] = []
+    missing_count = 0
+
+    for index, utterance in enumerate(_iter_utterances(utterances_by_paragraph), start=1):
+        text = str(utterance.get("text") or "").strip()
+        role_id = _utterance_role_id(utterance)
+        if not text or not role_id:
+            continue
+        role = role_by_id.get(role_id)
+        role_name = str(_role_field(role, "name") or role_id)
+        paragraph_id = str(utterance.get("paragraph_id") or f"p-{index:04d}")
+        statement_id = _statement_id(utterance)
+        filename = _export_audio_filename(chapter_id, paragraph_id, statement_id, role_name)
+        source_path = Path(str(utterance.get("audio_path") or ""))
+        if source_path and utterance.get("audio_status") == "success" and source_path.exists():
+            target = output_dir / filename
+            shutil.copy2(source_path, target)
+            completed_audio_paths.append(target)
+            items.append(
+                {
+                    "chapter_id": chapter_id,
+                    "chapter_title": chapter_title,
+                    "statement_id": statement_id,
+                    "paragraph_id": paragraph_id,
+                    "order": len(items) + 1,
+                    "text": text,
+                    "role_id": role_id,
+                    "role_name": role_name,
+                    "voice_resource_id": utterance.get("voice_resource_id") or _role_field(role, "voice_resource_id"),
+                    "voice_name": _role_field(role, "voice_description") or _role_field(role, "description"),
+                    "filename": filename,
+                    "duration": utterance.get("audio_duration"),
+                    "generated_at": utterance.get("audio_generated_at"),
+                }
+            )
+        else:
+            missing_count += 1
+
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "chapter_id": chapter_id,
+                "chapter_title": chapter_title,
+                "exported_at": _utc_now(),
+                "pause_ms": pause_ms,
+                "speed": speed,
+                "missing_count": missing_count,
+                "items": items,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    full_audio_path: str | None = None
+    if missing_count == 0 and completed_audio_paths:
+        full_path = output_dir / "chapter_full.wav"
+        _concatenate_wavs(completed_audio_paths, full_path, pause_ms=pause_ms)
+        full_audio_path = str(full_path)
+
+    message = (
+        "导出完成，已包含完整拼接音频。"
+        if full_audio_path
+        else f"导出完成；还有 {missing_count} 条语句未完成配音，未生成完整拼接音频。"
+    )
+    return ChapterAudioExportReport(
+        status="completed",
+        export_dir=str(output_dir),
+        manifest_path=str(manifest_path),
+        item_count=len(items),
+        missing_count=missing_count,
+        full_audio_path=full_audio_path,
+        message=message,
+    )
+
+
 def _safe_reference_audio_suffix(suffix: str) -> str:
     normalized = suffix.strip().lower()
     if normalized not in {".wav", ".mp3", ".flac", ".ogg", ".m4a"}:
         return ".wav"
     return normalized
+
+
+def _default_synthesize_batch(request: dict[str, Any], *, output_dir: Path) -> list[dict[str, Any]]:
+    output_paths = [output_dir / f"{_safe_file_stem(statement_id)}.wav" for statement_id in request["statement_ids"]]
+    return synthesize_local_qwen3_batch(request, output_paths=output_paths)
+
+
+def synthesize_local_qwen3_batch(
+    request_payload: dict[str, Any],
+    *,
+    output_paths: list[Path],
+    service_base_url: str | None = None,
+) -> list[dict[str, Any]]:
+    texts = [str(item) for item in request_payload.get("texts") or []]
+    if len(texts) != len(output_paths):
+        raise TTSServiceError("batch text count must match output path count")
+    if not texts:
+        return []
+    for text in texts:
+        validate_tts_text_length(text)
+    reference_audio_path = str(request_payload.get("reference_audio_path") or "")
+    reference_audio = Path(reference_audio_path)
+    if not reference_audio.exists():
+        raise TTSServiceError(f"reference audio does not exist: {reference_audio}")
+    payload = {
+        "input": texts,
+        "audio_sample": base64.b64encode(reference_audio.read_bytes()).decode("ascii"),
+        "audio_sample_suffix": _safe_reference_audio_suffix(reference_audio.suffix),
+        "ref_text": request_payload.get("reference_text") or "",
+        "language": request_payload.get("languages") or ["Auto"] * len(texts),
+        "response_format": "wav",
+        "x_vector_only": bool(request_payload.get("x_vector_only", False)),
+        "max_new_tokens": int(request_payload.get("max_new_tokens") or tts_max_new_tokens()),
+    }
+    base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
+        "/"
+    )
+    http_request = urllib.request.Request(
+        f"{base_url}/v1/audio/speech-batch",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        timeout_seconds = max(_tts_request_timeout_seconds(text) for text in texts)
+        with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise TTSServiceError(f"local Qwen3-TTS batch request failed: {exc}") from exc
+    audios = response_payload.get("audios") if isinstance(response_payload, dict) else None
+    if not isinstance(audios, list) or len(audios) != len(output_paths):
+        raise TTSServiceError("local Qwen3-TTS batch response did not include all audios")
+    results: list[dict[str, Any]] = []
+    for statement_id, audio_item, output_path in zip(request_payload["statement_ids"], audios, output_paths):
+        audio_base64 = audio_item.get("audio_base64") if isinstance(audio_item, dict) else None
+        if not audio_base64:
+            results.append({"statement_id": statement_id, "error": "empty batch audio"})
+            continue
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(base64.b64decode(audio_base64))
+        results.append(
+            {
+                "statement_id": statement_id,
+                "audio_path": str(output_path),
+                "audio_duration": validate_wav_duration(output_path),
+                "provider": "local-qwen3-tts",
+                "model": "Qwen3-TTS",
+            }
+        )
+    return results
+
+
+def _iter_utterances(utterances_by_paragraph: dict[str, list[dict[str, Any]]]):
+    for utterances in utterances_by_paragraph.values():
+        yield from utterances
+
+
+def _group_pending_audio(pending: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in pending:
+        key = str(item["voice_resource_id"] or item["role_id"])
+        groups.setdefault(key, []).append(item)
+    return groups
+
+
+def _role_id(role: RoleCard | dict[str, Any]) -> str:
+    return str(_role_field(role, "role_id") or "")
+
+
+def _role_field(role: RoleCard | dict[str, Any] | None, field: str) -> Any:
+    if role is None:
+        return None
+    if isinstance(role, dict):
+        return role.get(field)
+    return getattr(role, field)
+
+
+def _utterance_role_id(utterance: dict[str, Any]) -> str:
+    return str(utterance.get("speaker_role_id") or utterance.get("role_id") or "")
+
+
+def _statement_id(utterance: dict[str, Any]) -> str:
+    return str(utterance.get("utterance_id") or utterance.get("statement_id") or "")
+
+
+def _export_audio_filename(chapter_id: str, paragraph_id: str, statement_id: str, role_name: str) -> str:
+    chapter_no = _first_number(chapter_id)
+    paragraph_no = _first_number(paragraph_id)
+    statement_no = _last_number(statement_id)
+    safe_role = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", role_name).strip("-") or "role"
+    return f"c{chapter_no:04d}_p{paragraph_no:04d}_u{statement_no:04d}_{safe_role}.wav"
+
+
+def _first_number(value: str) -> int:
+    match = re.search(r"(\d+)", value)
+    return int(match.group(1)) if match else 1
+
+
+def _last_number(value: str) -> int:
+    matches = re.findall(r"(\d+)", value)
+    return int(matches[-1]) if matches else 1
+
+
+def _safe_file_stem(value: str) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff-]+", "-", value).strip("-") or "audio"
+
+
+def _concatenate_wavs(paths: list[Path], output_path: Path, *, pause_ms: int) -> None:
+    first_params = None
+    frames: list[bytes] = []
+    for path in paths:
+        with wave.open(str(path), "rb") as wav_file:
+            params = wav_file.getparams()
+            if first_params is None:
+                first_params = params
+            elif (
+                params.nchannels != first_params.nchannels
+                or params.sampwidth != first_params.sampwidth
+                or params.framerate != first_params.framerate
+            ):
+                raise TTSServiceError("export requires matching wav channel count, sample width, and sample rate")
+            frames.append(wav_file.readframes(wav_file.getnframes()))
+    if first_params is None:
+        return
+    pause_frames = int(first_params.framerate * max(0, pause_ms) / 1000)
+    pause = b"\x00" * pause_frames * first_params.nchannels * first_params.sampwidth
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(output_path), "wb") as output:
+        output.setnchannels(first_params.nchannels)
+        output.setsampwidth(first_params.sampwidth)
+        output.setframerate(first_params.framerate)
+        for index, frame_block in enumerate(frames):
+            if index:
+                output.writeframes(pause)
+            output.writeframes(frame_block)
+
+
+def _utc_now() -> str:
+    return dt.datetime.now(dt.UTC).isoformat()

@@ -291,6 +291,64 @@ async def speech_json(payload: dict):
             pass
 
 
+@app.post("/v1/audio/speech-batch")
+async def speech_batch_json(payload: dict):
+    texts = payload.get("input", [])
+    if isinstance(texts, str):
+        texts = [texts]
+    languages = payload.get("language", "Auto")
+    if isinstance(languages, str):
+        languages = [languages] * len(texts)
+    ref_text = payload.get("ref_text") or payload.get("audio_sample_text") or ""
+    response_format = payload.get("response_format", "wav")
+    x_vector_only = bool(payload.get("x_vector_only", False))
+    max_new_tokens = tts_max_new_tokens(payload.get("max_new_tokens"))
+    audio_sample = payload.get("audio_sample") or payload.get("voice_file")
+    if not texts or not audio_sample:
+        raise HTTPException(status_code=400, detail="input and audio_sample are required")
+    if len(languages) != len(texts):
+        raise HTTPException(status_code=400, detail="language count must match input count")
+    for text in texts:
+        validate_request_text(str(text))
+
+    reference_audio = base64.b64decode(audio_sample)
+    suffix = safe_reference_audio_suffix(payload.get("audio_sample_suffix") or payload.get("audio_sample_format"))
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as reference:
+        reference.write(reference_audio)
+        reference_path = reference.name
+
+    try:
+        wavs, sr = await asyncio.to_thread(
+            generate_voice_clone_with_reusable_prompt,
+            voice_clone_model,
+            text=[str(text) for text in texts],
+            language=[str(language) for language in languages],
+            reference_path=reference_path,
+            reference_audio=reference_audio,
+            reusable_prompt=ref_text,
+            x_vector_only=x_vector_only,
+            max_new_tokens=max_new_tokens,
+        )
+        audios = []
+        for index, wav in enumerate(wavs):
+            audio_bytes, fmt = encode_audio_bytes(wav, sr, response_format)
+            audios.append(
+                {
+                    "index": index,
+                    "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+                    "response_format": fmt,
+                }
+            )
+        return {"audios": audios}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
+    finally:
+        try:
+            os.remove(reference_path)
+        except OSError:
+            pass
+
+
 def safe_reference_audio_suffix(value: Any) -> str:
     suffix = str(value or "").strip().lower()
     if not suffix.startswith("."):
@@ -329,7 +387,7 @@ async def voice_design_json(payload: dict):
         raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
 
 
-def encode_audio_response(wav, sr, response_format: str) -> Response:
+def encode_audio_bytes(wav, sr, response_format: str) -> tuple[bytes, str]:
     if sf is None:
         raise HTTPException(status_code=500, detail="soundfile is required to encode Qwen3-TTS audio")
     fmt = response_format.lower()
@@ -347,7 +405,11 @@ def encode_audio_response(wav, sr, response_format: str) -> Response:
             os.remove(output_path)
         except OSError:
             pass
+    return data, fmt
 
+
+def encode_audio_response(wav, sr, response_format: str) -> Response:
+    data, fmt = encode_audio_bytes(wav, sr, response_format)
     media_type = {
         "wav": "audio/wav",
         "flac": "audio/flac",
