@@ -40,6 +40,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/development/v0.251-verification.md",
         "spec/v0.30-harness.md",
         "docs/development/v0.30-verification.md",
+        "spec/v0.31-harness.md",
+        "docs/development/v0.31-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -55,8 +57,8 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.3.0" in app
-    assert "NovelVoice-Agent v0.3.0" in index_html
+    assert "NovelVoice-Agent v0.3.1" in app
+    assert "NovelVoice-Agent v0.3.1" in index_html
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
@@ -155,7 +157,7 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.3.0" in app
+    assert "NovelVoice-Agent v0.3.1" in app
     assert "AI章节划分" in app
     assert "runAiChapterSplit" in app
     assert '"/api/novels/ai-chapter-split"' in app
@@ -182,7 +184,7 @@ def test_frontend_v0_20_model_config_exposes_deepseek_chapter_agent():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.3.0"' in package_json
+    assert '"version": "0.3.1"' in package_json
     assert "chapter_agent" in app
     assert "AI章节划分智能体" in app
     assert "https://api.deepseek.com" in app
@@ -209,7 +211,7 @@ def test_frontend_v0_22_uploads_epub_to_ai_chapter_agent_file_endpoint():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.3.0"' in package_json
+    assert '"version": "0.3.1"' in package_json
     assert 'accept=".txt,.epub,text/plain,application/epub+zip"' in app
     assert "uploadedNovelFileRef" in app
     assert "readNovelFileUpload" in app
@@ -223,7 +225,7 @@ def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.3.0" in app
+    assert "NovelVoice-Agent v0.3.1" in app
     assert "runAiSegmentationForParagraph" in app
     assert "Qwen/Qwen3-8B" in app
     assert "AI语句划分智能体正在分析" in app
@@ -264,19 +266,19 @@ def test_frontend_v0_24_paragraph_local_ai_segmentation_defaults():
 
 
 def test_frontend_v0_25_ai_one_click_analysis_flow():
-    """Covers v0.25 AI one-click analysis button, role-candidate pause, and streamed role assignment."""
+    """Covers v0.3.1 split AI role analysis and role matching controls."""
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
     for term in [
-        "AI一键分析",
-        "角色列表确认完成",
+        "AI角色分析",
+        "AI角色匹配",
         "一键生成配音",
         "一键导出",
         "AI角色候选建议",
         "aiRoleCandidates",
-        "runAiOneClickAnalysis",
-        "completeAiRoleListAndResumeWorkflow",
+        "runAiRoleAnalysis",
+        "runAiRoleMatching",
         "roles-completed-stream",
         "response.body.getReader",
         "role_selected",
@@ -288,6 +290,8 @@ def test_frontend_v0_25_ai_one_click_analysis_flow():
 
     assert "role-analysis-panel" in styles
     assert "role-candidate-card" in styles
+    assert "AI一键分析" not in app
+    assert "角色列表确认完成" not in app
 
 
 def test_frontend_v0_242_audio_generation_removes_language_and_starts_without_role_selection():

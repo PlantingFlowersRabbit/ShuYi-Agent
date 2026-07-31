@@ -1062,11 +1062,11 @@ function App() {
       .catch((error) => setApiStatus(`播放音色失败：${String(error)}`));
   }
 
-  async function runAiOneClickAnalysis() {
+  async function runAiRoleAnalysis() {
     if (!activeChapter || visibleParagraphs.length === 0) return;
     setAiOneClickRunning(true);
     setSegmentationProgress(8);
-    setApiStatus("AI一键分析正在同步当前章节并分析角色");
+    setApiStatus("AI角色分析正在同步当前章节、创建角色并匹配音色");
     try {
       await syncCurrentChapterParagraphs(false);
       const data = await requestJson<AiOneClickStartResponse>(
@@ -1082,22 +1082,22 @@ function App() {
       const autoSummary = data.auto_role_report
         ? `自动新增 ${data.auto_role_report.added_count} 个角色，生成 ${data.auto_role_report.generated_voice_count} 个音色。`
         : "";
-      setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“角色列表确认完成”。`);
+      setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“AI角色匹配”。`);
     } catch (error) {
       resetAiOneClickState();
       setSegmentationProgress(100);
-      setApiStatus(`AI一键分析角色分析失败：${String(error)}`);
+      setApiStatus(`AI角色分析失败：${String(error)}`);
     } finally {
       setAiOneClickRunning(false);
     }
   }
 
-  async function completeAiRoleListAndResumeWorkflow() {
+  async function runAiRoleMatching() {
     if (!aiOneClickThreadId) return;
     setAiOneClickRunning(true);
     setAiOneClickWaitingForRoles(false);
     setSegmentationProgress(45);
-    setApiStatus("角色列表已确认，AI一键分析正在划分语句并选择空角色");
+    setApiStatus("AI角色匹配正在划分语句并为未绑定语句选择角色");
     try {
       const response = await fetch(`/api/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`, {
         method: "POST",
@@ -1108,7 +1108,7 @@ function App() {
         }),
       });
       if (!response.ok) throw new Error(await response.text());
-      if (!response.body) throw new Error("AI一键分析没有返回流式响应");
+      if (!response.body) throw new Error("AI角色匹配没有返回流式响应");
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -1127,7 +1127,7 @@ function App() {
     } catch (error) {
       setAiOneClickWaitingForRoles(true);
       setSegmentationProgress(100);
-      setApiStatus(`AI一键分析语句划分/角色选择失败：${String(error)}`);
+      setApiStatus(`AI角色匹配失败：${String(error)}`);
     } finally {
       setAiOneClickRunning(false);
     }
@@ -1153,7 +1153,7 @@ function App() {
       const message = event.data?.failure?.message ?? event.data?.message ?? "模型输出未通过校验";
       setAiOneClickWaitingForRoles(true);
       setSegmentationProgress(100);
-      setApiStatus(`AI一键分析失败：${message}`);
+      setApiStatus(`AI角色匹配失败：${message}`);
     }
   }
 
@@ -1609,7 +1609,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.3.0 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.3.1 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1740,7 +1740,7 @@ function App() {
             {aiRoleCandidates.length > 0 && (
               <div className="role-analysis-panel" aria-label="AI角色候选建议">
                 <div className="section-title">AI角色候选建议</div>
-                <small>请先把所需角色添加到角色列表中，或绑定到已有角色。模型建议仅作参考。</small>
+                <small>请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“AI角色匹配”。模型建议仅作参考。</small>
                 {aiRoleCandidates.map((candidate, index) => (
                   <article className="role-candidate-card" key={`${candidate.name ?? "unknown"}-${index}`}>
                     <strong>{candidate.name ?? "未知角色"}</strong>
@@ -1752,16 +1752,6 @@ function App() {
                     <p>置信度：{Math.round(candidate.confidence * 100)}%；{candidate.needs_human_review ? "需要人工确认" : "仍可人工编辑"}</p>
                   </article>
                 ))}
-                {aiOneClickWaitingForRoles && (
-                  <button
-                    className="tool-button amber"
-                    type="button"
-                    disabled={aiOneClickRunning}
-                    onClick={() => void completeAiRoleListAndResumeWorkflow()}
-                  >
-                    角色列表确认完成
-                  </button>
-                )}
               </div>
             )}
           </section>
@@ -1791,10 +1781,18 @@ function App() {
                   <button
                     className="tool-button purple"
                     type="button"
-                    onClick={() => void runAiOneClickAnalysis()}
+                    onClick={() => void runAiRoleAnalysis()}
                     disabled={aiOneClickRunning || visibleParagraphs.length === 0}
                   >
-                    AI一键分析
+                    AI角色分析
+                  </button>
+                  <button
+                    className="tool-button purple"
+                    type="button"
+                    onClick={() => void runAiRoleMatching()}
+                    disabled={aiOneClickRunning || !aiOneClickWaitingForRoles || !aiOneClickThreadId}
+                  >
+                    AI角色匹配
                   </button>
                   <button
                     className="tool-button sky"
@@ -2270,7 +2268,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.3.0</h1>
+        <h1>NovelVoice-Agent v0.3.1</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

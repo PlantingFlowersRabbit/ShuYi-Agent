@@ -766,7 +766,7 @@ class AiOneClickWorkflow:
             result = AiOneClickResumeResult(
                 status="failed",
                 thread_id=state["thread_id"],
-                message=f"AI一键分析失败：{failure['message']}",
+                message=f"AI角色匹配失败：{failure['message']}",
                 utterances_by_paragraph={},
                 role_selection_events=batch_report.events,
                 failure=failure,
@@ -776,7 +776,7 @@ class AiOneClickWorkflow:
         result = AiOneClickResumeResult(
             status="completed",
             thread_id=state["thread_id"],
-            message="AI一键分析完成；请人工检查语句划分和角色，或点击“一键生成配音”。",
+            message="AI角色匹配完成；请人工检查语句划分和角色，或点击“一键生成配音”。",
             utterances_by_paragraph=utterances_by_paragraph,
             role_selection_events=batch_report.events,
             failure=None,

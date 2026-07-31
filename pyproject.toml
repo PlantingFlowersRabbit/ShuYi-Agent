@@ -1,7 +1,7 @@
 [project]
 name = "novelvoice-agent"
-version = "0.3.0"
-description = "Harness-first novel dubbing assistant with v0.3.0 batch role selection, dubbing, and export workflow."
+version = "0.3.1"
+description = "Harness-first novel dubbing assistant with v0.3.1 split AI role analysis and role matching workflow."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
