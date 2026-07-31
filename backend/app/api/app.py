@@ -184,7 +184,7 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="NovelVoice-Agent v0.3.0 Harness API")
+    app = FastAPI(title="NovelVoice-Agent v0.3.4 Harness API")
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_EXPORT_DIR.mkdir(parents=True, exist_ok=True)

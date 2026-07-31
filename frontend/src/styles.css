@@ -128,7 +128,7 @@ small {
 
 .workbench {
   display: grid;
-  grid-template-columns: minmax(300px, 25%) minmax(0, 75%);
+  grid-template-columns: minmax(320px, 25%) minmax(0, 75%);
   gap: 16px;
   max-width: 100vw;
   height: calc(100vh - 62px);
@@ -137,6 +137,11 @@ small {
   padding: 16px;
 }
 
+.workbench.chapters-collapsed {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+
+.chapter-sidebar,
 .sidebar,
 .main-panel,
 .library-page,
@@ -144,7 +149,9 @@ small {
   min-width: 0;
 }
 
+.chapter-sidebar,
 .sidebar {
+  position: relative;
   display: grid;
   align-content: start;
   gap: 16px;
@@ -153,9 +160,49 @@ small {
   overflow-x: hidden;
 }
 
+.chapter-sidebar.collapsed {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  padding-top: 12px;
+}
+
+.sidebar-toggle {
+  align-self: start;
+  justify-self: end;
+  min-width: 34px;
+  background: #e0f2fe;
+  color: #0369a1;
+  padding: 7px 10px;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.chapter-sidebar:not(.collapsed) .sidebar-toggle {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.collapsed-label {
+  writing-mode: vertical-rl;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0;
+  margin-top: 46px;
+}
+
 .main-panel {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: hidden;
   overflow-x: hidden;
 }
 
@@ -395,6 +442,58 @@ small {
 .gate span {
   color: #64748b;
   font-size: 13px;
+}
+
+.chapter-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+}
+
+.chapter-reader,
+.statement-panel {
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chapter-reader-body,
+.statement-list {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.chapter-reader-body {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #0f172a;
+  padding: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.75;
+  font-size: 14px;
+}
+
+.statement-panel {
+  align-content: start;
+}
+
+.statement-list {
+  display: grid;
+  gap: 10px;
+}
+
+.statement-empty {
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  padding: 16px;
+  line-height: 1.6;
 }
 
 .paragraph-card + .paragraph-card {

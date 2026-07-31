@@ -2,7 +2,7 @@
 
 小说辅助生成故事配音的 agent 项目。
 
-v0.3.3 移除前端独立 `AI语句划分` 入口；`AI角色匹配` 在同一个批量角色匹配 Agent 响应中同时完成必要的语句划分和角色选择。
+v0.3.4 将章节区改为可收起边栏；当前章节区左半显示完整正文，右半只显示 AI角色匹配后的台词和配音控件。
 
 ## 当前状态
 
@@ -18,7 +18,7 @@ AI worker 进入仓库后先读：
 
 1. `AGENTS.md`
 2. `docs/development/acceptance-standard.md`
-3. 当前任务相关 `spec/*.md`，本次 v0.3.3 增量默认参考现有 harness 文档和用户需求
+3. 当前任务相关 `spec/*.md`，本次 v0.3.4 增量默认参考现有 harness 文档和用户需求
 4. `docs/experience-library/active-rules.md`
 
 ## 验证

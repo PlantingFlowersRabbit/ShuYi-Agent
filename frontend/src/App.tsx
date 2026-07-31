@@ -301,7 +301,7 @@ function initialPageFromUrl(): Page {
 function makeNovelPreview(text: string): string {
   const trimmed = text.trimStart();
   if (trimmed.length <= MAX_NOVEL_PREVIEW_CHARS) return trimmed;
-  return `${trimmed.slice(0, MAX_NOVEL_PREVIEW_CHARS)}\n\n……仅展示开头预览，完整小说已保留用于章节划分。`;
+  return `${trimmed.slice(0, MAX_NOVEL_PREVIEW_CHARS)}\n\n……仅展示开头预览，完整小说已保留用于小说格式解析。`;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -346,7 +346,7 @@ async function readNovelFileUpload(file: File): Promise<NovelFileUpload> {
   if (isEpub) {
     return {
       text: "",
-      preview: `已上传 EPUB：${file.name}\n\n点击“AI章节划分”后将由后端解析 EPUB 目录和正文。`,
+      preview: `已上传 EPUB：${file.name}\n\n点击“AI小说格式解析”后将由后端解析 EPUB 目录和正文。`,
       uploadedFile: {
         filename: file.name,
         contentBase64: arrayBufferToBase64(buffer),
@@ -725,6 +725,7 @@ function App() {
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState("");
   const [paragraphs, setParagraphs] = useState<ParagraphModule[]>([]);
+  const [chapterSidebarCollapsed, setChapterSidebarCollapsed] = useState(false);
   const [hasSplitChapters, setHasSplitChapters] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [voices, setVoices] = useState<VoiceResource[]>(defaultVoices);
@@ -768,6 +769,15 @@ function App() {
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
+  const currentChapterText = useMemo(
+    () => visibleParagraphs.map((paragraph) => paragraph.text).join("\n\n"),
+    [visibleParagraphs],
+  );
+  const flattenedUtterances = useMemo(
+    () => visibleParagraphs.flatMap((paragraph) => utterancesByParagraph[paragraph.paragraphId] ?? []),
+    [utterancesByParagraph, visibleParagraphs],
+  );
+  const primaryStatementParagraphId = visibleParagraphs[0]?.paragraphId ?? "";
   const roleOptions = useMemo(
     () => roles.map((role) => ({ value: role.roleId, label: role.name })),
     [roles],
@@ -844,13 +854,13 @@ function App() {
     setGeneratingUtteranceIds({});
     resetAiOneClickState();
     setUploadProgress(62);
-    setApiStatus("小说已上传，仅展示开头预览；点击“AI章节划分”生成章节目录");
+    setApiStatus("小说已上传，仅展示开头预览；点击“AI小说格式解析”生成章节目录");
     setUploadProgress(100);
   }
 
   async function runAiChapterSplit() {
     setChapterSplitProgress(12);
-    setApiStatus("AI章节划分智能体正在检查可复用脚本");
+    setApiStatus("AI小说格式解析智能体正在检查可复用脚本");
     try {
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
@@ -870,13 +880,13 @@ function App() {
       const scriptName = data.agent.script_path?.split(/[\\/]/).pop() ?? "未记录脚本";
       const agentStatus =
         data.agent.status === "script_reused"
-          ? `AI章节划分完成：已复用 ${scriptName}`
-          : `AI章节划分完成：已生成并保存 ${scriptName}`;
+          ? `AI小说格式解析完成：已复用 ${scriptName}`
+          : `AI小说格式解析完成：已生成并保存 ${scriptName}`;
       applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
     } catch (error) {
       setChapterSplitProgress(76);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
-      applyChapters(parsed, `AI章节划分失败，已使用本地章节索引兜底：${String(error)}`);
+      applyChapters(parsed, `AI小说格式解析失败，已使用本地章节索引兜底：${String(error)}`);
     } finally {
       setChapterSplitProgress(100);
     }
@@ -964,6 +974,25 @@ function App() {
     });
     setChapterBackendSynced(false);
     setApiStatus(`已删除段落 ${paragraphId}；其余 AI角色匹配结果已保留`);
+  }
+
+  async function ensureChapterStatementsReady(): Promise<Record<string, UtteranceDraft[]>> {
+    const hasStatementDrafts = visibleParagraphs.some(
+      (paragraph) => (utterancesByParagraph[paragraph.paragraphId] ?? []).length > 0,
+    );
+    if (confirmed && hasStatementDrafts) return utterancesByParagraph;
+    setApiStatus("正在同步当前章节并准备可匹配语句草稿");
+    const synced = await syncCurrentChapterParagraphs(true);
+    const draftsByParagraph = Object.fromEntries(
+      synced.paragraphs.map((paragraph) => [
+        paragraph.paragraphId,
+        synced.utteranceDrafts.filter((utterance) => utterance.paragraph_id === paragraph.paragraphId),
+      ]),
+    );
+    const nextUtterances = apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles);
+    setUtterancesByParagraph(nextUtterances);
+    setApiStatus("当前章节已准备为可编辑语句草稿；AI角色匹配将自动完成语句划分和角色选择");
+    return nextUtterances;
   }
 
   async function confirmParagraphs() {
@@ -1121,12 +1150,13 @@ function App() {
     setRoleMatchingProgress(45);
     setApiStatus("AI角色匹配正在划分语句并为未绑定语句选择角色");
     try {
+      const readyUtterances = await ensureChapterStatementsReady();
       const response = await fetch(`/api/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           roles: roles.map(toApiRole),
-          utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+          utterances_by_paragraph: utteranceGroupsToApi(readyUtterances),
         }),
       });
       if (!response.ok) throw new Error(await response.text());
@@ -1534,9 +1564,9 @@ function App() {
         body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
       });
       setModelConfig(normalizeModelConfig(data.config));
-      setApiStatus("章节划分智能体配置保存成功");
+      setApiStatus("小说格式解析智能体配置保存成功");
     } catch (error) {
-      setApiStatus(`章节划分智能体配置保存失败：${String(error)}`);
+      setApiStatus(`小说格式解析智能体配置保存失败：${String(error)}`);
     }
   }
 
@@ -1558,9 +1588,9 @@ function App() {
         method: "POST",
         body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
       });
-      setApiStatus(data.message || "章节划分智能体连接成功");
+      setApiStatus(data.message || "小说格式解析智能体连接成功");
     } catch (error) {
-      setApiStatus(`章节划分智能体测试链接失败：${String(error)}`);
+      setApiStatus(`小说格式解析智能体测试链接失败：${String(error)}`);
     }
   }
 
@@ -1592,152 +1622,170 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.3.3 主页面">
-        <aside className="sidebar">
-          <section className="panel">
-            <div className="section-title">小说章节</div>
-            <div className="toolbar-row">
-              <button className="tool-button sky" type="button" onClick={() => fileInputRef.current?.click()}>
-                上传小说
-              </button>
-              <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
-                AI章节划分
-              </button>
-            </div>
-            <input
-              ref={fileInputRef}
-              className="hidden-input"
-              aria-label="上传小说"
-              type="file"
-              accept=".txt,.epub,text/plain,application/epub+zip"
-              onChange={handleTxtFile}
-            />
-            <ProgressBar label="上传小说进度" value={uploadProgress} />
-            <ProgressBar label="章节划分进度" value={chapterSplitProgress} />
-            <ProgressBar label="AI角色匹配进度" value={roleMatchingProgress} />
-            <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
-            <div className="novel-preview" aria-label="小说开头预览">
-              {novelPreview}
-            </div>
-            <small>{apiStatus}</small>
-            <div className="chapter-list" aria-label="章节列表">
-              {chapters.map((chapter) => (
-                <button
-                  className={chapter.chapterId === activeChapterId ? "active" : ""}
-                  key={chapter.chapterId}
-                  type="button"
-                  onClick={() => void selectChapter(chapter.chapterId)}
-                >
-                  {chapter.title}
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="section-heading">
-              <div className="section-title">角色列表</div>
-              <button className="tool-button teal" type="button" onClick={() => void addRole()}>
-                新增角色
-              </button>
-            </div>
-            <div className="role-stack">
-              {roles.map((role) => {
-                const voice = voices.find((item) => item.voiceId === role.voiceResourceId);
-                return (
-                  <article className="role-card" key={role.roleId}>
-                    <input
-                      aria-label={`${role.name} 角色名展示`}
-                      value={role.name}
-                      onChange={(event) => updateRole(role.roleId, { name: event.target.value })}
-                    />
-                    <input
-                      aria-label={`${role.name} 别名`}
-                      placeholder="别名/称呼，用逗号分隔"
-                      value={role.aliases.join("，")}
-                      onChange={(event) =>
-                        updateRole(role.roleId, {
-                          aliases: event.target.value
-                            .split(/[，,、]/)
-                            .map((item) => item.trim())
-                            .filter(Boolean),
-                        })
-                      }
-                    />
-                    <input
-                      aria-label={`${role.name} 性别`}
-                      placeholder="性别"
-                      value={role.gender}
-                      onChange={(event) => updateRole(role.roleId, { gender: event.target.value })}
-                    />
-                    <textarea
-                      aria-label={`${role.name} 人设身份性格`}
-                      placeholder="人设/身份/性格"
-                      value={role.profile}
-                      onChange={(event) => updateRole(role.roleId, { profile: event.target.value })}
-                    />
-                    <div className="inline-select">
-                      <label>
-                        音色选择
-                        <select
-                          value={role.voiceResourceId}
-                          onChange={(event) => updateRole(role.roleId, { voiceResourceId: event.target.value })}
-                        >
-                          {voices.map((item) => (
-                            <option key={item.voiceId} value={item.voiceId}>
-                              {item.name}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <button
-                        aria-label="播放音色"
-                        className="icon-button"
-                        type="button"
-                        title="播放音色"
-                        onClick={() => playVoicePreview(voice)}
-                      >
-                        ▶
-                      </button>
-                    </div>
-                    <button className="tool-button amber" type="button" onClick={() => void deleteRole(role.roleId)}>
-                      删除角色
+      <main
+        className={chapterSidebarCollapsed ? "workbench chapters-collapsed" : "workbench"}
+        aria-label="NovelVoice-Agent v0.3.4 主页面"
+      >
+        <aside className={chapterSidebarCollapsed ? "chapter-sidebar collapsed" : "chapter-sidebar"}>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            aria-label={chapterSidebarCollapsed ? "展开小说章节边栏" : "收起小说章节边栏"}
+            title={chapterSidebarCollapsed ? "展开小说章节边栏" : "收起小说章节边栏"}
+            onClick={() => setChapterSidebarCollapsed((current) => !current)}
+          >
+            {chapterSidebarCollapsed ? "›" : "‹"}
+          </button>
+          {chapterSidebarCollapsed ? (
+            <span className="collapsed-label">章节</span>
+          ) : (
+            <>
+              <section className="panel">
+                <div className="section-title">小说章节</div>
+                <div className="toolbar-row">
+                  <button className="tool-button sky" type="button" onClick={() => fileInputRef.current?.click()}>
+                    上传小说
+                  </button>
+                  <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
+                    AI小说格式解析
+                  </button>
+                </div>
+                <input
+                  ref={fileInputRef}
+                  className="hidden-input"
+                  aria-label="上传小说"
+                  type="file"
+                  accept=".txt,.epub,text/plain,application/epub+zip"
+                  onChange={handleTxtFile}
+                />
+                <ProgressBar label="上传小说进度" value={uploadProgress} />
+                <ProgressBar label="小说格式解析进度" value={chapterSplitProgress} />
+                <ProgressBar label="AI角色匹配进度" value={roleMatchingProgress} />
+                <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
+                <div className="novel-preview" aria-label="小说开头预览">
+                  {novelPreview}
+                </div>
+                <small>{apiStatus}</small>
+                <div className="chapter-list" aria-label="章节列表">
+                  {chapters.map((chapter) => (
+                    <button
+                      className={chapter.chapterId === activeChapterId ? "active" : ""}
+                      key={chapter.chapterId}
+                      type="button"
+                      onClick={() => void selectChapter(chapter.chapterId)}
+                    >
+                      {chapter.title}
                     </button>
-                    <p>
-                      <strong>音色描述</strong>
-                      {voice?.description ?? role.voiceDescription ?? role.description}
-                    </p>
-                    <p>
-                      <strong>语音具体内容</strong>
-                      {voice?.referenceText ?? role.voiceSampleText ?? role.referenceText}
-                    </p>
-                    <p>
-                      <strong>音色匹配</strong>
-                      {role.voiceMatchReason ?? "用户可手动调整"}
-                    </p>
-                    {voice && <audio controls src={voiceAudioSrc(voice)} />}
-                  </article>
-                );
-              })}
-            </div>
-            {aiRoleCandidates.length > 0 && (
-              <div className="role-analysis-panel" aria-label="AI角色候选建议">
-                <div className="section-title">AI角色候选建议</div>
-                <small>请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“AI角色匹配”。模型建议仅作参考。</small>
-                {aiRoleCandidates.map((candidate, index) => (
-                  <article className="role-candidate-card" key={`${candidate.name ?? "unknown"}-${index}`}>
-                    <strong>{candidate.name ?? "未知角色"}</strong>
-                    <p>别名/称呼：{candidate.aliases.length ? candidate.aliases.join("、") : "待确认"}</p>
-                    <p>性别：{candidate.gender ?? "待确认"}</p>
-                    <p>人设/身份/性格：{candidate.profile ?? "待确认"}</p>
-                    <p>推荐音色方向：{candidate.voice_direction ?? "待确认"}</p>
-                    <p>证据片段：{candidate.evidence.join(" / ") || "待确认"}</p>
-                    <p>置信度：{Math.round(candidate.confidence * 100)}%；{candidate.needs_human_review ? "需要人工确认" : "仍可人工编辑"}</p>
-                  </article>
-                ))}
-              </div>
-            )}
-          </section>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="section-heading">
+                  <div className="section-title">角色列表</div>
+                  <button className="tool-button teal" type="button" onClick={() => void addRole()}>
+                    新增角色
+                  </button>
+                </div>
+                <div className="role-stack">
+                  {roles.map((role) => {
+                    const voice = voices.find((item) => item.voiceId === role.voiceResourceId);
+                    return (
+                      <article className="role-card" key={role.roleId}>
+                        <input
+                          aria-label={`${role.name} 角色名展示`}
+                          value={role.name}
+                          onChange={(event) => updateRole(role.roleId, { name: event.target.value })}
+                        />
+                        <input
+                          aria-label={`${role.name} 别名`}
+                          placeholder="别名/称呼，用逗号分隔"
+                          value={role.aliases.join("，")}
+                          onChange={(event) =>
+                            updateRole(role.roleId, {
+                              aliases: event.target.value
+                                .split(/[，,、]/)
+                                .map((item) => item.trim())
+                                .filter(Boolean),
+                            })
+                          }
+                        />
+                        <input
+                          aria-label={`${role.name} 性别`}
+                          placeholder="性别"
+                          value={role.gender}
+                          onChange={(event) => updateRole(role.roleId, { gender: event.target.value })}
+                        />
+                        <textarea
+                          aria-label={`${role.name} 人设身份性格`}
+                          placeholder="人设/身份/性格"
+                          value={role.profile}
+                          onChange={(event) => updateRole(role.roleId, { profile: event.target.value })}
+                        />
+                        <div className="inline-select">
+                          <label>
+                            音色选择
+                            <select
+                              value={role.voiceResourceId}
+                              onChange={(event) => updateRole(role.roleId, { voiceResourceId: event.target.value })}
+                            >
+                              {voices.map((item) => (
+                                <option key={item.voiceId} value={item.voiceId}>
+                                  {item.name}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <button
+                            aria-label="播放音色"
+                            className="icon-button"
+                            type="button"
+                            title="播放音色"
+                            onClick={() => playVoicePreview(voice)}
+                          >
+                            ▶
+                          </button>
+                        </div>
+                        <button className="tool-button amber" type="button" onClick={() => void deleteRole(role.roleId)}>
+                          删除角色
+                        </button>
+                        <p>
+                          <strong>音色描述</strong>
+                          {voice?.description ?? role.voiceDescription ?? role.description}
+                        </p>
+                        <p>
+                          <strong>语音具体内容</strong>
+                          {voice?.referenceText ?? role.voiceSampleText ?? role.referenceText}
+                        </p>
+                        <p>
+                          <strong>音色匹配</strong>
+                          {role.voiceMatchReason ?? "用户可手动调整"}
+                        </p>
+                        {voice && <audio controls src={voiceAudioSrc(voice)} />}
+                      </article>
+                    );
+                  })}
+                </div>
+                {aiRoleCandidates.length > 0 && (
+                  <div className="role-analysis-panel" aria-label="AI角色候选建议">
+                    <div className="section-title">AI角色候选建议</div>
+                    <small>请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“AI角色匹配”。模型建议仅作参考。</small>
+                    {aiRoleCandidates.map((candidate, index) => (
+                      <article className="role-candidate-card" key={`${candidate.name ?? "unknown"}-${index}`}>
+                        <strong>{candidate.name ?? "未知角色"}</strong>
+                        <p>别名/称呼：{candidate.aliases.length ? candidate.aliases.join("、") : "待确认"}</p>
+                        <p>性别：{candidate.gender ?? "待确认"}</p>
+                        <p>人设/身份/性格：{candidate.profile ?? "待确认"}</p>
+                        <p>推荐音色方向：{candidate.voice_direction ?? "待确认"}</p>
+                        <p>证据片段：{candidate.evidence.join(" / ") || "待确认"}</p>
+                        <p>置信度：{Math.round(candidate.confidence * 100)}%；{candidate.needs_human_review ? "需要人工确认" : "仍可人工编辑"}</p>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
         </aside>
 
         <section className="main-panel">
@@ -1745,13 +1793,13 @@ function App() {
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>尚未划分章节</h2>
-              <p>上传小说后点击左侧“AI章节划分”，右侧暂不渲染具体章节内容。</p>
+              <p>上传小说后点击左侧“AI小说格式解析”，当前章节区暂不渲染具体正文。</p>
             </div>
           ) : !activeChapter ? (
             <div className="empty-state">
               <div className="section-title">当前章节</div>
-              <h2>请选择左侧章节</h2>
-              <p>选择某个章节后，才会加载并拆分这一章的正文。</p>
+              <h2>请选择小说章节</h2>
+              <p>选择某个章节后，左侧显示完整正文，右侧显示 AI角色匹配后的台词。</p>
             </div>
           ) : (
             <>
@@ -1793,93 +1841,85 @@ function App() {
                   >
                     一键导出
                   </button>
-                  <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
-                    确认无误
-                  </button>
-                  <span>{confirmed ? "已确认，可人工检查、批量配音或导出" : "确认后可执行 AI角色匹配"}</span>
+                  <span>{confirmed ? "台词已生成，可人工检查、批量配音或导出" : "按流程先执行 AI角色分析，再执行 AI角色匹配"}</span>
                 </div>
               </header>
 
-              <section className="paragraph-stack">
-                {visibleParagraphs.map((paragraph) => (
-                  <article className="paragraph-card" key={paragraph.paragraphId}>
-                    <div className="paragraph-toolbar">
-                      <strong>{paragraph.paragraphId}</strong>
-                      <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { collapsed: !paragraph.collapsed })}>
-                        {paragraph.collapsed ? "展开" : "折叠"}
+              <section className="chapter-workspace-grid">
+                <article className="panel chapter-reader" aria-label="当前章节完整小说内容">
+                  <div className="section-title">当前章节完整小说内容</div>
+                  <div className="chapter-reader-body">{currentChapterText || "当前章节正文为空。"}</div>
+                </article>
+
+                <article className="panel statement-panel" aria-label="划分语句与角色匹配">
+                  <div className="section-heading">
+                    <div className="section-title">划分语句与角色匹配</div>
+                    {confirmed && primaryStatementParagraphId && (
+                      <button className="tool-button amber" type="button" onClick={() => addUtteranceAfter(primaryStatementParagraphId)}>
+                        添加音频生成
                       </button>
-                      <button type="button" onClick={() => deleteParagraph(paragraph.paragraphId)}>
-                        删除
-                      </button>
-                    </div>
-                    {paragraph.collapsed ? null : (
-                      <>
-                        <textarea
-                          value={paragraph.text}
-                          onChange={(event) => updateParagraph(paragraph.paragraphId, { text: event.target.value })}
-                        />
-                        <div className="paragraph-utterances" aria-label={`${paragraph.paragraphId} 子语句`}>
-                          {(utterancesByParagraph[paragraph.paragraphId] ?? []).map((utterance) => (
-                            <article className="utterance-card" key={utterance.utteranceId}>
-                              <div className="utterance-toolbar">
-                                <strong>{utterance.utteranceId}</strong>
-                                <button type="button" onClick={() => deleteUtterance(paragraph.paragraphId, utterance.utteranceId)}>
-                                  删除音频生成
-                                </button>
-                              </div>
-                              <label className="utterance-wide">
-                                语句文本
-                                <input
-                                  value={utterance.text}
-                                  onChange={(event) =>
-                                    updateUtterance(paragraph.paragraphId, utterance.utteranceId, "text", event.target.value)
-                                  }
-                                  aria-label={`${utterance.utteranceId} 语句文本`}
-                                />
-                              </label>
-                              <label>
-                                选择角色
-                                <select
-                                  value={utterance.roleId}
-                                  onChange={(event) =>
-                                    updateUtterance(paragraph.paragraphId, utterance.utteranceId, "roleId", event.target.value)
-                                  }
-                                >
-                                  <option value="">请选择角色</option>
-                                  {roleOptions.map((option) => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.label}
-                                    </option>
-                                  ))}
-                                </select>
-                              </label>
-                              {(() => {
-                                const isGeneratingThisUtterance = Boolean(generatingUtteranceIds[utterance.utteranceId]);
-                                return (
-                                  <button
-                                    className="tool-button sky"
-                                    type="button"
-                                    disabled={isGeneratingThisUtterance}
-                                    onClick={() => void generateAudio(utterance)}
-                                  >
-                                    {isGeneratingThisUtterance ? "正在生成" : "音频生成"}
-                                  </button>
-                                );
-                              })()}
-                              <output>{utterance.audioStatus}</output>
-                              {utterance.audioUrl && <audio controls src={utterance.audioUrl} />}
-                            </article>
-                          ))}
-                          {confirmed && (
-                            <button className="tool-button amber" type="button" onClick={() => addUtteranceAfter(paragraph.paragraphId)}>
-                              添加音频生成
-                            </button>
-                          )}
-                        </div>
-                      </>
                     )}
-              </article>
-            ))}
+                  </div>
+                  {flattenedUtterances.length === 0 ? (
+                    <div className="statement-empty">
+                      点击“AI角色匹配”后，这里只显示拆分后的语句、匹配角色和音频生成控件。
+                    </div>
+	                  ) : (
+	                    <div className="statement-list">
+	                      {flattenedUtterances.map((utterance) => (
+                        <article className="utterance-card" key={utterance.utteranceId}>
+                          <div className="utterance-toolbar">
+                            <strong>{utterance.utteranceId}</strong>
+                            <button type="button" onClick={() => deleteUtterance(utterance.paragraphId, utterance.utteranceId)}>
+                              删除音频生成
+                            </button>
+                          </div>
+                          <label className="utterance-wide">
+                            语句文本
+                            <input
+                              value={utterance.text}
+                              onChange={(event) =>
+                                updateUtterance(utterance.paragraphId, utterance.utteranceId, "text", event.target.value)
+                              }
+                              aria-label={`${utterance.utteranceId} 语句文本`}
+                            />
+                          </label>
+                          <label>
+                            选择角色
+                            <select
+                              value={utterance.roleId}
+                              onChange={(event) =>
+                                updateUtterance(utterance.paragraphId, utterance.utteranceId, "roleId", event.target.value)
+                              }
+                            >
+                              <option value="">请选择角色</option>
+                              {roleOptions.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          {(() => {
+                            const isGeneratingThisUtterance = Boolean(generatingUtteranceIds[utterance.utteranceId]);
+                            return (
+                              <button
+                                className="tool-button sky"
+                                type="button"
+                                disabled={isGeneratingThisUtterance}
+                                onClick={() => void generateAudio(utterance)}
+                              >
+                                {isGeneratingThisUtterance ? "正在生成" : "音频生成"}
+                              </button>
+                            );
+                          })()}
+                          <output>{utterance.audioStatus}</output>
+                          {utterance.audioUrl && <audio controls src={utterance.audioUrl} />}
+                        </article>
+                      ))}
+	                    </div>
+	                  )}
+                </article>
               </section>
             </>
           )}
@@ -2189,7 +2229,7 @@ function App() {
         </section>
 
         <section className="panel">
-          <div className="section-title">AI章节划分智能体</div>
+          <div className="section-title">AI小说格式解析智能体</div>
           <label>
             Base URL
             <input
@@ -2243,7 +2283,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.3.3</h1>
+        <h1>NovelVoice-Agent v0.3.4</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

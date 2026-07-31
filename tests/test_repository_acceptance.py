@@ -46,6 +46,8 @@ def test_docs_index_links_new_plan_and_existing_acceptance_sources():
         "docs/development/v0.32-verification.md",
         "spec/v0.33-harness.md",
         "docs/development/v0.33-verification.md",
+        "spec/v0.34-harness.md",
+        "docs/development/v0.34-verification.md",
     ]
     for link in required_links:
         assert link in index
@@ -61,14 +63,14 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
 
     assert '"react"' in package_json
     assert '"vite"' in package_json
-    assert "NovelVoice-Agent v0.3.3" in app
-    assert "NovelVoice-Agent v0.3.3" in index_html
+    assert "NovelVoice-Agent v0.3.4" in app
+    assert "NovelVoice-Agent v0.3.4" in index_html
     for tab in ["主页面", "音色资源库", "模型配置"]:
         assert tab in app
     assert 'type="file"' in app
     assert 'accept=".txt,.epub,text/plain,application/epub+zip"' in app
     assert "上传小说" in app
-    assert "划分章节" in app
+    assert "AI小说格式解析" in app
     assert "章节列表" in app
     assert "角色列表" in app
     assert "音色选择" in app
@@ -78,9 +80,9 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     assert "音色描述" in app
     assert "语音具体内容" in app
     assert "当前章节" in app
-    assert "确认无误" in app
+    assert "划分语句与角色匹配" in app
     assert "utterancesByParagraph" in app
-    assert "paragraph-utterances" in app
+    assert "statement-list" in app
     assert "音色名称" in app
     assert "保存音色" in app
     assert "生成音色" in app
@@ -104,7 +106,7 @@ def test_frontend_workbench_structure_matches_v0_11_flow():
     assert '"/api": "http://127.0.0.1:8000"' in vite_config
     assert '"/outputs": "http://127.0.0.1:8000"' in vite_config
 
-    for control in ["折叠", "展开", "删除", "textarea", "select"]:
+    for control in ["收起小说章节边栏", "展开小说章节边栏", "删除音频生成", "textarea", "select"]:
         assert control in app
     for labeled_control in ["语句文本", "选择角色"]:
         assert labeled_control in app
@@ -160,25 +162,25 @@ def test_frontend_v0_12_defers_chapter_body_and_uses_split_progress():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.3.3" in app
-    assert "AI章节划分" in app
+    assert "NovelVoice-Agent v0.3.4" in app
+    assert "AI小说格式解析" in app
     assert "runAiChapterSplit" in app
     assert '"/api/novels/ai-chapter-split"' in app
     assert "确认划分章节" not in app
     assert "chapterSplitProgress" in app
-    assert "章节划分进度" in app
+    assert "小说格式解析进度" in app
     assert "hasSplitChapters" in app
     assert "parseChapterIndex" in app
     assert "extractChapterBody" in app
     assert "setParagraphs([])" in app
-    assert "请选择左侧章节" in app
+    assert "请选择小说章节" in app
     assert "paragraphsFromChapter(parseChapters(sampleNovel)[0])" not in app
     assert "setActiveChapterId(parsed[0]?.chapterId" not in app
     assert "setParagraphs(parsed[0] ? paragraphsFromChapter(parsed[0]) : [])" not in app
 
     assert "height: calc(100vh - 62px)" in styles
-    assert ".sidebar" in styles and "overflow-y: auto" in styles
-    assert ".main-panel" in styles and "overflow-y: auto" in styles
+    assert ".chapter-sidebar" in styles and "overflow-y: auto" in styles
+    assert ".main-panel" in styles and "overflow-y: hidden" in styles
     assert "body {" in styles and "overflow: hidden" in styles
 
 
@@ -187,12 +189,12 @@ def test_frontend_v0_20_model_config_exposes_deepseek_chapter_agent():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.3.3"' in package_json
+    assert '"version": "0.3.4"' in package_json
     assert "chapter_agent" in app
-    assert "AI章节划分智能体" in app
+    assert "AI小说格式解析智能体" in app
     assert "https://api.deepseek.com" in app
     assert "deepseek-v4-flash" in app
-    assert "章节划分智能体配置保存成功" in app
+    assert "小说格式解析智能体配置保存成功" in app
     assert "testChapterAgentModelLink" in app
     assert '"/api/model-config/chapter-agent/test"' in app
     assert app.count("测试链接") >= 2
@@ -214,7 +216,7 @@ def test_frontend_v0_22_uploads_epub_to_ai_chapter_agent_file_endpoint():
     app = read("frontend/src/App.tsx")
     package_json = read("frontend/package.json")
 
-    assert '"version": "0.3.3"' in package_json
+    assert '"version": "0.3.4"' in package_json
     assert 'accept=".txt,.epub,text/plain,application/epub+zip"' in app
     assert "uploadedNovelFileRef" in app
     assert "readNovelFileUpload" in app
@@ -228,7 +230,7 @@ def test_frontend_v0_14_qwen_segmentation_and_scrollable_subpages():
     app = read("frontend/src/App.tsx")
     styles = read("frontend/src/styles.css")
 
-    assert "NovelVoice-Agent v0.3.3" in app
+    assert "NovelVoice-Agent v0.3.4" in app
     assert "runAiSegmentationForParagraph" not in app
     assert "Qwen/Qwen3-8B" in app
     assert "AI语句划分智能体正在分析" not in app
@@ -307,7 +309,6 @@ def test_frontend_v0_32_delete_paragraph_preserves_other_ai_role_matches():
         "remainingGeneratingIds",
         "delete remainingUtterances[paragraphId]",
         "delete remainingGeneratingIds[utterance.utteranceId]",
-        "onClick={() => deleteParagraph(paragraph.paragraphId)}",
     ]:
         assert term in app
 
@@ -348,6 +349,51 @@ def test_frontend_v0_33_role_matching_owns_segmentation_and_no_standalone_button
         assert required_term in app
 
 
+def test_frontend_v0_34_collapsible_format_parse_and_statement_workspace():
+    """Covers v0.3.4 collapsible chapter rail and 1/2 chapter reader + 1/2 statement role matching workspace."""
+    app = read("frontend/src/App.tsx")
+    styles = read("frontend/src/styles.css")
+    package_json = read("frontend/package.json")
+    index_html = read("frontend/index.html")
+
+    assert "NovelVoice-Agent v0.3.4" in app
+    assert "NovelVoice-Agent v0.3.4" in index_html
+    assert '"version": "0.3.4"' in package_json
+
+    for required_term in [
+        "AI小说格式解析",
+        "AI小说格式解析智能体",
+        "小说格式解析进度",
+        "chapterSidebarCollapsed",
+        "chapter-sidebar collapsed",
+        "收起小说章节边栏",
+        "展开小说章节边栏",
+        "当前章节完整小说内容",
+        "划分语句与角色匹配",
+        "chapter-workspace-grid",
+        "chapter-reader",
+        "statement-panel",
+        "flattenedUtterances",
+        "ensureChapterStatementsReady",
+    ]:
+        assert required_term in app
+
+    assert "AI章节划分" not in app
+    assert "AI章节划分智能体" not in app
+    assert "确认无误" not in app
+    assert "选择某个章节后，才会加载并拆分这一章的正文。" not in app
+    assert "paragraph-card" not in app
+    assert "paragraph-toolbar" not in app
+
+    assert "grid-template-columns: minmax(320px, 25%) minmax(0, 75%)" in styles
+    assert ".workbench.chapters-collapsed" in styles
+    assert "grid-template-columns: 56px minmax(0, 1fr)" in styles
+    assert ".chapter-workspace-grid" in styles
+    assert "grid-template-columns: minmax(0, 1fr) minmax(0, 1fr)" in styles
+    assert ".chapter-reader" in styles
+    assert ".statement-panel" in styles
+
+
 def test_frontend_v0_242_audio_generation_removes_language_and_starts_without_role_selection():
     """Covers v0.25: language selector is removed and utterance role starts blank."""
     app = read("frontend/src/App.tsx")
@@ -374,10 +420,10 @@ def test_frontend_v0_14_audio_module_controls_and_no_mobile_layout():
         assert term in app
 
     assert "addUtteranceAfter(paragraph.paragraphId, utterance.utteranceId)" not in app
-    assert "addUtteranceAfter(paragraph.paragraphId)" in app
+    assert "addUtteranceAfter(primaryStatementParagraphId)" in app
     for removed_audio_control in ["<option value=\"\">空</option>", "取值 0.0-2.0", "取值 0.5-2.0"]:
         assert removed_audio_control not in app
-    assert "paragraph.collapsed ? null" in app
+    assert "statement-panel" in app
     assert "min-width: 1180px" in styles
     assert "@media (max-width" not in styles
 
