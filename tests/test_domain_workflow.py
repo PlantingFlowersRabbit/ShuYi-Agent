@@ -1390,7 +1390,7 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
         "/api/model-config/chapter-agent/test",
         json={
             "chapter_agent": {
-                "base_url": "https://api.deepseek.com",
+                "base_url": "https://api.deepseek.com/v1",
                 "model": "deepseek-v4-flash",
                 "api_key": "chapter-test-key",
             }
@@ -1588,7 +1588,7 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    from backend.app.api.app import create_app
+    from backend.app.api.app import _create_ai_one_click_workflow, create_app
     from backend.app.domain.ai_one_click_workflow import (
         LangChainRoleAnalysisSkill,
         RoleAnalysisCandidate,
@@ -1597,6 +1597,8 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
 
     def fake_analyze_roles(self, **kwargs):
         assert kwargs["chapter_id"] == "chapter-0001"
+        assert self.provider["base_url"] == "https://api.deepseek.com"
+        assert self.provider["model"] == "deepseek-v4-flash"
         return [
             RoleAnalysisCandidate(
                 name="旁白",
@@ -1627,6 +1629,25 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
     monkeypatch.setattr(LangChainRoleAnalysisSkill, "choose_role", fake_choose_role)
 
     client = TestClient(create_app())
+    config_response = client.patch(
+        "/api/model-config",
+        json={
+            "llm": {
+                "base_url": "https://api.siliconflow.cn/v1",
+                "model": "Qwen/Qwen3-8B",
+                "api_key": "llm-test-key",
+            },
+            "chapter_agent": {
+                "base_url": "https://api.deepseek.com/v1",
+                "model": "deepseek-v4-flash",
+                "api_key": "chapter-test-key",
+            },
+        },
+    )
+    assert config_response.status_code == 200
+    workflow = _create_ai_one_click_workflow(client.app)
+    assert workflow.role_skill.provider["base_url"] == "https://api.deepseek.com"
+    assert workflow.segmentation_service.provider["base_url"] == "https://api.siliconflow.cn/v1"
     sync = client.put(
         "/api/chapters/chapter-0001/paragraphs",
         json={

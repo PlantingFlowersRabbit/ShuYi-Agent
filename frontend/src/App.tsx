@@ -1413,7 +1413,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.25 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.251 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1972,7 +1972,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.25</h1>
+        <h1>NovelVoice-Agent v0.251</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],

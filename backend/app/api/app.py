@@ -610,7 +610,7 @@ def create_app() -> FastAPI:
             **((payload or {}).get("chapter_agent") or {}),
         }
         try:
-            await _test_model_link(config)
+            await _test_model_link(config, deepseek_compatible=True)
         except HTTPException:
             raise
         except Exception as exc:
@@ -822,14 +822,15 @@ async def _run_ai_chapter_split(app: FastAPI, text: str) -> dict[str, Any]:
 
 
 def _create_ai_one_click_workflow(app: FastAPI) -> AiOneClickWorkflow:
-    provider = _segmentation_provider_from_config(app)
+    role_provider = _chapter_agent_provider_from_config(app)
+    segmentation_provider = _segmentation_provider_from_config(app)
     return AiOneClickWorkflow(
         role_skill=LangChainRoleAnalysisSkill(
-            provider=provider,
-            api_key_lookup=_api_key_lookup_from_config(app),
+            provider=role_provider,
+            api_key_lookup=_chapter_agent_api_key_lookup_from_config(app),
         ),
         segmentation_service=AiSegmentationService(
-            provider=provider,
+            provider=segmentation_provider,
             api_key_lookup=_api_key_lookup_from_config(app),
         ),
     )
@@ -924,7 +925,7 @@ def _api_key_lookup_from_config(app: FastAPI):
 def _chapter_agent_provider_from_config(app: FastAPI) -> dict[str, Any]:
     provider = default_provider_registry()["deepseek-harness"]
     config = _state(app)["model_config"]["chapter_agent"]
-    provider["base_url"] = config.get("base_url") or provider["base_url"]
+    provider["base_url"] = _deepseek_base_url(config.get("base_url") or provider["base_url"])
     provider["model"] = config.get("model") or provider["model"]
     return provider
 
@@ -957,15 +958,20 @@ def _test_models_endpoint(request: urllib.request.Request) -> None:
         response.read()
 
 
-async def _test_model_link(config: dict[str, Any]) -> None:
+def _deepseek_base_url(base_url: str) -> str:
+    return str(base_url or "").rstrip("/").removesuffix("/v1")
+
+
+async def _test_model_link(config: dict[str, Any], *, deepseek_compatible: bool = False) -> None:
     base_url = str(config.get("base_url") or "").rstrip("/")
     if not base_url:
         raise HTTPException(status_code=400, detail="base_url is required")
+    models_base_url = _deepseek_base_url(base_url) if deepseek_compatible else base_url
     headers = {"Content-Type": "application/json"}
     api_key = str(config.get("api_key") or "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(f"{base_url}/models", headers=headers, method="GET")
+    request = urllib.request.Request(f"{models_base_url}/models", headers=headers, method="GET")
     await asyncio.to_thread(_test_models_endpoint, request)
 
 

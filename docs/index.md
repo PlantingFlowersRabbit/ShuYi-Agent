@@ -32,6 +32,8 @@
 | [docs/development/v0.24-verification.md](./development/v0.24-verification.md) | v0.24 整段落默认草稿、段落内 AI语句划分和音色引用验证要求。 |
 | [spec/v0.25-harness.md](../spec/v0.25-harness.md) | v0.25 AI一键分析、角色候选暂停、语句划分和流式角色选择规格。 |
 | [docs/development/v0.25-verification.md](./development/v0.25-verification.md) | v0.25 AI一键分析真实流程、失败状态和无自动音频验证要求。 |
+| [spec/v0.251-harness.md](../spec/v0.251-harness.md) | v0.251 DeepSeek Base URL 兼容和 AI一键分析角色分析 provider 修复规格。 |
+| [docs/development/v0.251-verification.md](./development/v0.251-verification.md) | v0.251 DeepSeek 测试链接、角色分析和无回归验证要求。 |
 | [docs/experience-library/README.md](./experience-library/README.md) | 经验库入口，说明经验和规则怎么记录、怎么复用。 |
 | [docs/experience-library/active-rules.md](./experience-library/active-rules.md) | 当前开发前必须主动遵守的规则。 |
 | [docs/experience-library/lessons.md](./experience-library/lessons.md) | 已发生问题和处理经验记录。 |
