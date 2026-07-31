@@ -366,7 +366,6 @@ class BatchRoleSelectionService:
         failed_count = 0
         errors: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
-        split_paragraphs: set[str] = set()
         paragraph_by_id = {
             str(paragraph.get("paragraph_id") or paragraph.get("paragraphId") or ""): paragraph
             for paragraph in paragraphs
@@ -383,41 +382,6 @@ class BatchRoleSelectionService:
             pending = _pending_role_statements(utterances_by_paragraph, paragraph_by_id)
             if not pending:
                 break
-            pre_split_statement = next(
-                (
-                    statement
-                    for statement in pending
-                    if str(statement["paragraph_id"]) not in split_paragraphs
-                    and _needs_dialogue_narration_split(statement)
-                ),
-                None,
-            )
-            if pre_split_statement is not None:
-                paragraph_id = str(pre_split_statement["paragraph_id"])
-                split_paragraphs.add(paragraph_id)
-                split_count += 1
-                failure = self._split_paragraph(
-                    chapter_title=chapter_title,
-                    paragraph_id=paragraph_id,
-                    paragraph_by_id=paragraph_by_id,
-                    utterances_by_paragraph=utterances_by_paragraph,
-                    roles=roles,
-                )
-                if failure:
-                    failed_count += 1
-                    errors.append(failure)
-                    return BatchRoleSelectionReport(
-                        "failed",
-                        skipped_count + success_count + failed_count + uncertain_count,
-                        skipped_count,
-                        success_count,
-                        split_count,
-                        uncertain_count,
-                        failed_count,
-                        errors,
-                        events,
-                    )
-                continue
             chunk = pending[: self.batch_size]
             try:
                 parsed = self._choose_batch(
@@ -465,13 +429,6 @@ class BatchRoleSelectionService:
                 action = str(decision.get("action") or "uncertain")
                 role_id = str(decision.get("role_id") or "") if decision.get("role_id") else None
                 paragraph_id = str(statement["paragraph_id"])
-                if (
-                    action == "select_role"
-                    and paragraph_id not in split_paragraphs
-                    and _needs_dialogue_narration_split(statement)
-                ):
-                    action = "needs_split"
-                    role_id = None
                 forced_narrator_role_id = _forced_narrator_role_id(statement=statement, roles=roles)
                 if action == "select_role" and forced_narrator_role_id:
                     action = "select_role"
@@ -507,33 +464,61 @@ class BatchRoleSelectionService:
                     success_count += 1
                     progressed = True
                     continue
-                if action == "needs_split":
-                    if paragraph_id not in split_paragraphs:
-                        split_paragraphs.add(paragraph_id)
-                        split_count += 1
-                        failure = self._split_paragraph(
-                            chapter_title=chapter_title,
-                            paragraph_id=paragraph_id,
-                            paragraph_by_id=paragraph_by_id,
+                if action == "split_and_select":
+                    try:
+                        split_utterances, split_events = self._apply_split_and_select(
+                            decision=decision,
+                            statement=statement,
+                            source_utterance=utterance,
                             utterances_by_paragraph=utterances_by_paragraph,
                             roles=roles,
+                            role_by_id=role_by_id,
                         )
-                        if failure:
-                            failed_count += 1
-                            errors.append(failure)
-                            return BatchRoleSelectionReport(
-                                "failed",
-                                skipped_count + success_count + failed_count + uncertain_count,
-                                skipped_count,
-                                success_count,
-                                split_count,
-                                uncertain_count,
-                                failed_count,
-                                errors,
-                                events,
-                            )
+                    except (TypeError, ValueError) as exc:
+                        failed_count += 1
+                        errors.append(
+                            _failure(paragraph_id, "invalid_split_and_select", f"AI角色匹配分句结果无效：{exc}")
+                        )
+                        return BatchRoleSelectionReport(
+                            "failed",
+                            skipped_count + success_count + failed_count + uncertain_count,
+                            skipped_count,
+                            success_count,
+                            split_count,
+                            uncertain_count,
+                            failed_count,
+                            errors,
+                            events,
+                        )
+                    split_count += 1
+                    for event in split_events:
+                        events.append(event)
+                        if on_role_selected is not None:
+                            on_role_selected(event)
+                    success_count += len(split_events)
+                    uncertain_count += max(0, len(split_utterances) - len(split_events))
                     progressed = True
-                    break
+                    continue
+                if action == "needs_split":
+                    failed_count += 1
+                    errors.append(
+                        _failure(
+                            paragraph_id,
+                            "split_and_select_required",
+                            "AI角色匹配已合并语句划分；请在同一次批量响应中返回 action=split_and_select",
+                        )
+                    )
+                    return BatchRoleSelectionReport(
+                        "failed",
+                        skipped_count + success_count + failed_count + uncertain_count,
+                        skipped_count,
+                        success_count,
+                        split_count,
+                        uncertain_count,
+                        failed_count,
+                        errors,
+                        events,
+                    )
                 utterance["speaker_name"] = utterance.get("speaker_name") or "未知角色"
                 utterance["confidence"] = _safe_float(decision.get("confidence"), default=0.0)
                 utterance["needs_human_review"] = True
@@ -653,6 +638,124 @@ class BatchRoleSelectionService:
         for index, utterance in enumerate(utterances_by_paragraph[paragraph_id], start=1):
             _ensure_utterance_defaults(utterance, paragraph_id=paragraph_id, sequence=index)
         return None
+
+    def _apply_split_and_select(
+        self,
+        *,
+        decision: dict[str, Any],
+        statement: dict[str, Any],
+        source_utterance: dict[str, Any],
+        utterances_by_paragraph: dict[str, list[dict[str, Any]]],
+        roles: list[dict[str, Any]],
+        role_by_id: dict[str, dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        paragraph_id = str(statement["paragraph_id"])
+        statement_id = str(statement["statement_id"])
+        raw_items = decision.get("utterances")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise TypeError("split_and_select must include non-empty utterances")
+
+        source_text = str(statement.get("text") or "").strip()
+        split_texts: list[str] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise TypeError("split utterance must be an object")
+            text = str(item.get("text") or "").strip()
+            if not text:
+                raise ValueError("split utterance text cannot be empty")
+            split_texts.append(text)
+        if _compact_text("".join(split_texts)) != _compact_text(source_text):
+            raise ValueError("split utterances must preserve the original statement text")
+
+        paragraph_utterances = utterances_by_paragraph.get(paragraph_id)
+        if paragraph_utterances is None:
+            raise ValueError(f"paragraph not found: {paragraph_id}")
+        target_index = next(
+            (
+                index
+                for index, utterance in enumerate(paragraph_utterances)
+                if utterance is source_utterance or str(utterance.get("utterance_id") or "") == statement_id
+            ),
+            -1,
+        )
+        if target_index < 0:
+            raise ValueError(f"statement not found: {statement_id}")
+
+        replacement: list[dict[str, Any]] = []
+        used_ids = {
+            str(utterance.get("utterance_id") or "")
+            for index, utterance in enumerate(paragraph_utterances)
+            if index != target_index
+        }
+        for offset, _item in enumerate(raw_items):
+            utterance_id = (
+                statement_id
+                if offset == 0
+                else _next_utterance_id(paragraph_id, used_ids, target_index + offset + 1)
+            )
+            used_ids.add(utterance_id)
+            next_utterance = {
+                "utterance_id": utterance_id,
+                "paragraph_id": paragraph_id,
+                "speaker_name": "",
+                "speaker_role_id": None,
+                "voice_mode": source_utterance.get("voice_mode") or "voice_cloning",
+                "text": split_texts[offset],
+                "emotion": source_utterance.get("emotion") or "neutral",
+                "speed": source_utterance.get("speed", 1.0),
+                "volume": source_utterance.get("volume", 1.0),
+                "design_prompt": source_utterance.get("design_prompt"),
+                "confidence": 0.0,
+                "needs_human_review": True,
+            }
+            replacement.append(next_utterance)
+
+        paragraph_utterances[target_index : target_index + 1] = replacement
+        events: list[dict[str, Any]] = []
+        for item, utterance in zip(raw_items, replacement, strict=True):
+            split_statement = {
+                **statement,
+                "statement_id": utterance["utterance_id"],
+                "text": utterance["text"],
+            }
+            role_id = str(item.get("role_id") or "") if item.get("role_id") else None
+            forced_narrator_role_id = _forced_narrator_role_id(statement=split_statement, roles=roles)
+            if forced_narrator_role_id:
+                role_id = forced_narrator_role_id
+                item = {
+                    **item,
+                    "confidence": max(_safe_float(item.get("confidence"), default=0.0), 0.95),
+                    "reason": "分句后该片段是引号外说话动作/旁白，强制按旁白处理。",
+                }
+            if role_id in role_by_id:
+                role = role_by_id[role_id]
+                selection = RoleSelectionResult(
+                    role_id=role_id,
+                    speaker_name=str(role.get("name") or item.get("speaker_name") or role_id),
+                    confidence=_safe_float(item.get("confidence"), default=0.0),
+                    needs_human_review=False,
+                    reason=str(item.get("reason") or decision.get("reason") or ""),
+                )
+                _apply_role_selection(utterance, selection)
+                events.append(
+                    {
+                        "paragraph_id": paragraph_id,
+                        "utterance_id": utterance["utterance_id"],
+                        "text": utterance["text"],
+                        "speaker_role_id": role_id,
+                        "speaker_name": selection.speaker_name,
+                        "confidence": selection.confidence,
+                        "needs_human_review": selection.needs_human_review,
+                        "reason": selection.reason,
+                    }
+                )
+            else:
+                utterance["speaker_name"] = str(item.get("speaker_name") or "未知角色")
+                utterance["confidence"] = _safe_float(item.get("confidence"), default=0.0)
+                utterance["needs_human_review"] = True
+        for index, utterance in enumerate(paragraph_utterances, start=1):
+            _ensure_utterance_defaults(utterance, paragraph_id=paragraph_id, sequence=index)
+        return replacement, events
 
 
 class AiOneClickWorkflow:
@@ -1125,13 +1228,15 @@ def _build_batch_role_selection_prompt(
     statements_json = json.dumps(statements, ensure_ascii=False, indent=2)
     paragraphs_json = json.dumps(paragraphs, ensure_ascii=False, indent=2)
     return f"""
-请批量判断当前章节多条语句的配音角色。
+请批量判断当前章节多条语句的配音角色；如果语句需要拆分，请在同一次响应中完成语句划分和角色匹配。
 
 硬性要求：
 - 只输出严格 JSON，不要 Markdown。
 - 只能从已知角色 role_id 中选择；旁白也必须是一个已有角色。
-- 只处理传入 statements 中的 statement_id，不要新增、删除或改写 text。
-- 如果某条语句不是单人配音文本，包含多人对白、对白 + 旁白动作 + 对白，返回 action=\"needs_split\"。
+- 只处理传入 statements 中的 statement_id；不要改写原文内容。
+- 如果某条语句不是单人配音文本，包含多人对白、对白 + 说话动作/旁白、对白 + 旁白动作 + 对白，返回 action=\"split_and_select\"，并给出 utterances。
+- split_and_select 的 utterances 文本按原顺序拼接后必须与原 statement.text 完全一致（允许空白差异），每个子句都要直接给出 role_id/confidence/reason。
+- 引号外的“他说/问/怒道/佩罗恼火道”等说话动作属于旁白，不属于被提到的说话人。
 - 如果角色归属不确定，返回 action=\"uncertain\"，role_id=null，不要乱选。
 - 已有 role_id 的语句不会传给你；不要推测未提供语句。
 
@@ -1140,11 +1245,25 @@ def _build_batch_role_selection_prompt(
   "items": [
     {{
       "statement_id": "p-0001-u-001",
-      "action": "select_role | needs_split | uncertain | skip",
+      "action": "select_role | split_and_select | uncertain | skip",
       "role_id": "narrator 或 null",
       "confidence": 0.0,
       "reason": "简短原因",
-      "evidence": "文本片段"
+      "evidence": "文本片段",
+      "utterances": [
+        {{
+          "text": "“对白。”",
+          "role_id": "speaker_role_id",
+          "confidence": 0.9,
+          "reason": "子句角色原因"
+        }},
+        {{
+          "text": "他说。",
+          "role_id": "narrator",
+          "confidence": 0.9,
+          "reason": "引号外说话动作归旁白"
+        }}
+      ]
     }}
   ]
 }}
@@ -1226,6 +1345,19 @@ def _safe_float(value: Any, *, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _compact_text(value: str) -> str:
+    return re.sub(r"\s+", "", value)
+
+
+def _next_utterance_id(paragraph_id: str, used_ids: set[str], preferred_sequence: int) -> str:
+    sequence = max(1, preferred_sequence)
+    while True:
+        candidate = f"{paragraph_id}-u-{sequence:03d}"
+        if candidate not in used_ids:
+            return candidate
+        sequence += 1
 
 
 def _ensure_utterance_defaults(utterance: dict[str, Any], *, paragraph_id: str, sequence: int) -> None:

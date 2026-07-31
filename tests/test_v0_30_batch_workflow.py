@@ -93,69 +93,47 @@ def test_v0_30_batch_role_selection_preserves_existing_roles_and_uses_one_llm_ca
     assert report.skipped_count == 1
 
 
-def test_v0_30_batch_role_selection_splits_ambiguous_paragraph_and_retries_blank_results():
-    """Covers v0.3.0 needs_split fallback into existing AI statement segmentation."""
+def test_v0_33_batch_role_selection_splits_and_selects_roles_in_one_agent_response():
+    """Covers v0.3.3: role matching Agent splits mixed text and assigns roles in one response."""
     from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
-    from backend.app.domain.segmentation import SegmentationValidationResult
 
-    class FakeBatchSkill:
+    class SplitAndSelectBatchSkill:
         def __init__(self):
-            self.calls = 0
+            self.calls = []
 
         def choose_roles_batch(self, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                return {
-                    "items": [
-                        {
-                            "statement_id": "p-0002-u-001",
-                            "action": "needs_split",
-                            "role_id": None,
-                            "confidence": 0.3,
-                            "reason": "dialogue plus narration",
-                            "evidence": "“走。”他说。",
-                        }
-                    ]
-                }
+            self.calls.append(kwargs)
             return {
                 "items": [
                     {
                         "statement_id": "p-0002-u-001",
-                        "action": "select_role",
-                        "role_id": "hero",
-                        "confidence": 0.9,
-                        "reason": "quoted speech",
-                        "evidence": "走",
-                    },
-                    {
-                        "statement_id": "p-0002-u-002",
-                        "action": "select_role",
-                        "role_id": "narrator",
-                        "confidence": 0.85,
-                        "reason": "narration",
-                        "evidence": "他说",
-                    },
+                        "action": "split_and_select",
+                        "reason": "dialogue plus speech tag",
+                        "utterances": [
+                            {
+                                "text": "“走。”",
+                                "role_id": "hero",
+                                "confidence": 0.9,
+                                "reason": "quoted speech",
+                            },
+                            {
+                                "text": "他说。",
+                                "role_id": "narrator",
+                                "confidence": 0.85,
+                                "reason": "speech tag narration",
+                            },
+                        ],
+                    }
                 ]
             }
 
-    class FakeSegmentationService:
-        def __init__(self):
-            self.calls = []
-
-        def segment_paragraph(self, *, paragraph_id, **kwargs):
-            self.calls.append(paragraph_id)
-            return SegmentationValidationResult(
-                ok=True,
-                paragraph_id=paragraph_id,
-                utterances=[
-                    _utterance("p-0002-u-001", "p-0002", "“走。”"),
-                    _utterance("p-0002-u-002", "p-0002", "他说。"),
-                ],
-            )
+    class ForbiddenSegmentationService:
+        def segment_paragraph(self, **kwargs):
+            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
 
     utterances_by_paragraph = {"p-0002": [_utterance("p-0002-u-001", "p-0002", "“走。”他说。")]}
-    segmentation = FakeSegmentationService()
-    service = BatchRoleSelectionService(FakeBatchSkill(), segmentation_service=segmentation)
+    role_skill = SplitAndSelectBatchSkill()
+    service = BatchRoleSelectionService(role_skill, segmentation_service=ForbiddenSegmentationService())
 
     report = service.select_roles_for_statements_batch(
         chapter_id="chapter-0001",
@@ -166,16 +144,15 @@ def test_v0_30_batch_role_selection_splits_ambiguous_paragraph_and_retries_blank
     )
 
     assert report.status == "completed"
-    assert segmentation.calls == ["p-0002"]
+    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [["“走。”他说。"]]
     assert [item["text"] for item in utterances_by_paragraph["p-0002"]] == ["“走。”", "他说。"]
     assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0002"]] == ["hero", "narrator"]
+    assert report.success_count == 2
     assert report.split_count == 1
 
-
 def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after_split():
-    """Covers v0.3.2: quoted speech belongs to speaker, trailing speech tag belongs to narrator."""
+    """Covers v0.3.3: split-and-select still protects speech-tag narration from speaker overmatch."""
     from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
-    from backend.app.domain.segmentation import SegmentationValidationResult
 
     class OvereagerPeruoBatchSkill:
         def __init__(self):
@@ -187,37 +164,29 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
                 "items": [
                     {
                         "statement_id": "p-0003-u-001",
-                        "action": "select_role",
-                        "role_id": "peruo",
-                        "confidence": 0.92,
-                        "reason": "quoted speech by Peruo",
-                        "evidence": "都怪你多嘴",
-                    },
-                    {
-                        "statement_id": "p-0003-u-002",
-                        "action": "select_role",
-                        "role_id": "peruo",
-                        "confidence": 0.88,
-                        "reason": "mentions Peruo",
-                        "evidence": "佩罗恼火道",
+                        "action": "split_and_select",
+                        "reason": "dialogue plus speech tag",
+                        "utterances": [
+                            {
+                                "text": "“都怪你多嘴，她认出我们了。”",
+                                "role_id": "peruo",
+                                "confidence": 0.92,
+                                "reason": "quoted speech by Peruo",
+                            },
+                            {
+                                "text": "佩罗恼火道。",
+                                "role_id": "peruo",
+                                "confidence": 0.88,
+                                "reason": "mentions Peruo",
+                            },
+                        ],
                     },
                 ]
             }
 
-    class SpeechTagSegmentationService:
-        def __init__(self):
-            self.calls = []
-
-        def segment_paragraph(self, *, paragraph_id, **kwargs):
-            self.calls.append(paragraph_id)
-            return SegmentationValidationResult(
-                ok=True,
-                paragraph_id=paragraph_id,
-                utterances=[
-                    _utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”"),
-                    _utterance("p-0003-u-002", "p-0003", "佩罗恼火道。"),
-                ],
-            )
+    class ForbiddenSegmentationService:
+        def segment_paragraph(self, **kwargs):
+            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
 
     utterances_by_paragraph = {
         "p-0003": [_utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”佩罗恼火道。")]
@@ -225,7 +194,7 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
     role_skill = OvereagerPeruoBatchSkill()
     service = BatchRoleSelectionService(
         role_skill,
-        segmentation_service=SpeechTagSegmentationService(),
+        segmentation_service=ForbiddenSegmentationService(),
     )
 
     report = service.select_roles_for_statements_batch(
@@ -242,7 +211,7 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
         "佩罗恼火道。",
     ]
     assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [
-        ["“都怪你多嘴，她认出我们了。”", "佩罗恼火道。"]
+        ["“都怪你多嘴，她认出我们了。”佩罗恼火道。"]
     ]
     assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0003"]] == ["peruo", "narrator"]
     assert report.success_count == 2

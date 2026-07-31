@@ -587,86 +587,49 @@ def test_v0_25_role_analysis_workflow_pauses_with_human_editable_candidates():
 
 
 def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_paragraphs_and_streams_updates():
-    """Resume creates drafts, segments ambiguous paragraphs, and assigns only blank role_id values."""
-    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow, RoleSelectionResult
-    from backend.app.domain.segmentation import SegmentationValidationResult
+    """Resume creates drafts and lets AI角色匹配 split/select in one Agent response."""
+    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow
 
     class FakeRoleSkill:
-        def analyze_roles(self, **kwargs):
-            return []
-
-        def choose_role(self, *, utterance, roles, paragraph_text, chapter_title):
-            if utterance["text"].startswith("旁白"):
-                return RoleSelectionResult(
-                    role_id="narrator",
-                    speaker_name="旁白",
-                    confidence=0.91,
-                    needs_human_review=False,
-                    reason="narration",
-                )
-            if "你好" in utterance["text"]:
-                return RoleSelectionResult(
-                    role_id="hero",
-                    speaker_name="伊南娜",
-                    confidence=0.76,
-                    needs_human_review=True,
-                    reason="dialogue cue",
-                )
-            return RoleSelectionResult(
-                role_id=None,
-                speaker_name="未知角色",
-                confidence=0.2,
-                needs_human_review=True,
-                reason="unclear",
-            )
-
-        def needs_segmentation(self, *, utterance, paragraph_text, roles):
-            return "“你好。”她挥手。" in utterance["text"]
-
-    class FakeSegmentationService:
         def __init__(self):
             self.calls = []
 
-        def segment_paragraph(self, *, chapter_title, paragraph_id, paragraph_text, known_roles):
-            self.calls.append(paragraph_id)
-            return SegmentationValidationResult(
-                ok=True,
-                paragraph_id=paragraph_id,
-                utterances=[
+        def analyze_roles(self, **kwargs):
+            return []
+
+        def choose_roles_batch(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "items": [
                     {
-                        "utterance_id": f"{paragraph_id}-u-001",
-                        "paragraph_id": paragraph_id,
-                        "speaker_name": "伊南娜",
-                        "speaker_role_id": None,
-                        "voice_mode": "voice_cloning",
-                        "text": "“你好。”",
-                        "emotion": "neutral",
-                        "speed": 1.0,
-                        "volume": 1.0,
-                        "design_prompt": None,
-                        "confidence": 0.8,
-                        "needs_human_review": True,
-                    },
-                    {
-                        "utterance_id": f"{paragraph_id}-u-002",
-                        "paragraph_id": paragraph_id,
-                        "speaker_name": "旁白",
-                        "speaker_role_id": "narrator",
-                        "voice_mode": "voice_cloning",
-                        "text": "她挥手。",
-                        "emotion": "neutral",
-                        "speed": 1.0,
-                        "volume": 1.0,
-                        "design_prompt": None,
-                        "confidence": 0.8,
-                        "needs_human_review": False,
-                    },
-                ],
-            )
+                        "statement_id": "p-0002-u-001",
+                        "action": "split_and_select",
+                        "reason": "dialogue plus narration",
+                        "utterances": [
+                            {
+                                "text": "“你好。”",
+                                "role_id": "hero",
+                                "confidence": 0.76,
+                                "reason": "dialogue cue",
+                            },
+                            {
+                                "text": "她挥手。",
+                                "role_id": "narrator",
+                                "confidence": 0.91,
+                                "reason": "narration",
+                            },
+                        ],
+                    }
+                ]
+            }
+
+    class ForbiddenSegmentationService:
+        def segment_paragraph(self, **kwargs):
+            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
 
     events = []
-    service = FakeSegmentationService()
-    workflow = AiOneClickWorkflow(role_skill=FakeRoleSkill(), segmentation_service=service)
+    role_skill = FakeRoleSkill()
+    workflow = AiOneClickWorkflow(role_skill=role_skill, segmentation_service=ForbiddenSegmentationService())
     start = workflow.start_role_analysis(
         chapter_id="chapter-0001",
         chapter_title="第一章",
@@ -695,40 +658,46 @@ def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_parag
     )
 
     assert result.status == "completed"
-    assert service.calls == ["p-0002"]
+    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [["“你好。”她挥手。"]]
     assert result.utterances_by_paragraph["p-0001"][0]["speaker_role_id"] == "narrator"
     assert result.utterances_by_paragraph["p-0002"][0]["speaker_role_id"] == "hero"
     assert result.utterances_by_paragraph["p-0002"][1]["speaker_role_id"] == "narrator"
-    assert [event["utterance_id"] for event in events] == ["p-0002-u-001"]
-    assert events[0]["speaker_role_id"] == "hero"
+    assert [event["utterance_id"] for event in events] == ["p-0002-u-001", "p-0002-u-002"]
+    assert [event["speaker_role_id"] for event in events] == ["hero", "narrator"]
 
 
-def test_v0_25_workflow_returns_readable_failure_when_segmentation_validation_fails():
+def test_v0_25_workflow_returns_readable_failure_when_split_and_select_text_conservation_fails():
     """Invalid model output must not be silently rewritten or accepted."""
-    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow, RoleSelectionResult
-    from backend.app.domain.segmentation import SegmentationValidationResult
+    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow
 
     class FakeRoleSkill:
         def analyze_roles(self, **kwargs):
             return []
 
-        def choose_role(self, **kwargs):
-            return RoleSelectionResult(None, "未知角色", 0.2, True, "ambiguous")
+        def choose_roles_batch(self, **kwargs):
+            return {
+                "items": [
+                    {
+                        "statement_id": "p-0001-u-001",
+                        "action": "split_and_select",
+                        "reason": "bad split",
+                        "utterances": [
+                            {
+                                "text": "“你好。”",
+                                "role_id": "hero",
+                                "confidence": 0.8,
+                                "reason": "dropped narration",
+                            }
+                        ],
+                    }
+                ]
+            }
 
-        def needs_segmentation(self, **kwargs):
-            return True
-
-    class FailingSegmentationService:
+    class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            return SegmentationValidationResult(
-                ok=False,
-                paragraph_id=kwargs["paragraph_id"],
-                raw_output="{bad json",
-                error_code="invalid_json",
-                error="Expecting property name enclosed in double quotes",
-            )
+            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
 
-    workflow = AiOneClickWorkflow(role_skill=FakeRoleSkill(), segmentation_service=FailingSegmentationService())
+    workflow = AiOneClickWorkflow(role_skill=FakeRoleSkill(), segmentation_service=ForbiddenSegmentationService())
     start = workflow.start_role_analysis(
         chapter_id="chapter-0001",
         chapter_title="第一章",
@@ -736,13 +705,17 @@ def test_v0_25_workflow_returns_readable_failure_when_segmentation_validation_fa
         existing_roles=[],
     )
 
-    result = workflow.resume_after_roles(thread_id=start.thread_id, roles=[], existing_utterances_by_paragraph={})
+    result = workflow.resume_after_roles(
+        thread_id=start.thread_id,
+        roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "hero", "name": "伊南娜"}],
+        existing_utterances_by_paragraph={},
+    )
 
     assert result.status == "failed"
     assert result.failure is not None
     assert result.failure["paragraph_id"] == "p-0001"
-    assert result.failure["error_code"] == "invalid_json"
-    assert "Expecting property name" in result.failure["message"]
+    assert result.failure["error_code"] == "invalid_split_and_select"
+    assert "preserve the original statement text" in result.failure["message"]
     assert result.utterances_by_paragraph == {}
 
 

@@ -755,7 +755,7 @@ function App() {
   const [apiStatus, setApiStatus] = useState("等待上传小说");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
-  const [segmentationProgress, setSegmentationProgress] = useState(0);
+  const [roleMatchingProgress, setRoleMatchingProgress] = useState(0);
   const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
   const [generatingUtteranceIds, setGeneratingUtteranceIds] = useState<Record<string, boolean>>({});
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
@@ -839,7 +839,7 @@ function App() {
     setHasSplitChapters(false);
     setChapterBackendSynced(false);
     setChapterSplitProgress(0);
-    setSegmentationProgress(0);
+    setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
     resetAiOneClickState();
@@ -891,7 +891,7 @@ function App() {
     setConfirmed(false);
     setChapterBackendSynced(false);
     setUtterancesByParagraph({});
-    setSegmentationProgress(0);
+    setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
     resetAiOneClickState();
@@ -978,7 +978,7 @@ function App() {
         ]),
       );
       setUtterancesByParagraph(apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles));
-      setApiStatus("段落已确认，已默认按整段落生成语句文本；每段可单独使用 AI语句划分");
+      setApiStatus("段落已确认，已默认按整段落生成语句文本；AI角色匹配将自动完成语句划分和角色选择");
     } catch (error) {
       setConfirmed(false);
       setChapterBackendSynced(false);
@@ -1087,7 +1087,7 @@ function App() {
   async function runAiRoleAnalysis() {
     if (!activeChapter || visibleParagraphs.length === 0) return;
     setAiOneClickRunning(true);
-    setSegmentationProgress(8);
+    setRoleMatchingProgress(8);
     setApiStatus("AI角色分析正在同步当前章节、创建角色并匹配音色");
     try {
       await syncCurrentChapterParagraphs(false);
@@ -1100,14 +1100,14 @@ function App() {
       setAiOneClickThreadId(data.thread_id);
       setAiRoleCandidates(data.role_candidates);
       setAiOneClickWaitingForRoles(true);
-      setSegmentationProgress(35);
+      setRoleMatchingProgress(35);
       const autoSummary = data.auto_role_report
         ? `自动新增 ${data.auto_role_report.added_count} 个角色，生成 ${data.auto_role_report.generated_voice_count} 个音色。`
         : "";
       setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“AI角色匹配”。`);
     } catch (error) {
       resetAiOneClickState();
-      setSegmentationProgress(100);
+      setRoleMatchingProgress(100);
       setApiStatus(`AI角色分析失败：${String(error)}`);
     } finally {
       setAiOneClickRunning(false);
@@ -1118,7 +1118,7 @@ function App() {
     if (!aiOneClickThreadId) return;
     setAiOneClickRunning(true);
     setAiOneClickWaitingForRoles(false);
-    setSegmentationProgress(45);
+    setRoleMatchingProgress(45);
     setApiStatus("AI角色匹配正在划分语句并为未绑定语句选择角色");
     try {
       const response = await fetch(`/api/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`, {
@@ -1148,7 +1148,7 @@ function App() {
       if (buffer.trim()) handleAiOneClickStreamEvent(JSON.parse(buffer));
     } catch (error) {
       setAiOneClickWaitingForRoles(true);
-      setSegmentationProgress(100);
+      setRoleMatchingProgress(100);
       setApiStatus(`AI角色匹配失败：${String(error)}`);
     } finally {
       setAiOneClickRunning(false);
@@ -1158,7 +1158,7 @@ function App() {
   function handleAiOneClickStreamEvent(event: { event: string; data: any }) {
     if (event.event === "role_selected") {
       applyAiRoleSelectionEvent(event.data as AiRoleSelectionEvent);
-      setSegmentationProgress((current) => Math.min(95, Math.max(current + 5, 55)));
+      setRoleMatchingProgress((current) => Math.min(95, Math.max(current + 5, 55)));
       return;
     }
     if (event.event === "completed") {
@@ -1167,14 +1167,14 @@ function App() {
       setConfirmed(true);
       setChapterBackendSynced(true);
       setAiOneClickWaitingForRoles(false);
-      setSegmentationProgress(100);
+      setRoleMatchingProgress(100);
       setApiStatus(data.message);
       return;
     }
     if (event.event === "failed") {
       const message = event.data?.failure?.message ?? event.data?.message ?? "模型输出未通过校验";
       setAiOneClickWaitingForRoles(true);
-      setSegmentationProgress(100);
+      setRoleMatchingProgress(100);
       setApiStatus(`AI角色匹配失败：${message}`);
     }
   }
@@ -1199,45 +1199,6 @@ function App() {
           : [...list, next],
       };
     });
-  }
-
-  async function runAiSegmentationForParagraph(paragraphId: string) {
-    const target = visibleParagraphs.find((paragraph) => paragraph.paragraphId === paragraphId);
-    if (!target) return;
-    if (!confirmed) {
-      setApiStatus("请先点击确认无误，再使用 AI语句划分");
-      return;
-    }
-    setApiStatus(`AI语句划分智能体正在分析 ${paragraphId}`);
-    setSegmentationProgress(0);
-    try {
-      let paragraph = target;
-      if (!chapterBackendSynced) {
-        const synced = await syncCurrentChapterParagraphs(true);
-        paragraph = synced.paragraphs.find((item) => item.paragraphId === paragraphId) ?? target;
-      }
-      const data = await requestJson<{ ok: boolean; utterances: ApiUtterance[]; error?: string }>(
-        `/api/paragraphs/${paragraph.paragraphId}/segment`,
-        { method: "POST", body: JSON.stringify({}) },
-      );
-      const nextUtterances = data.ok
-        ? data.utterances.map((utterance) => fromApiUtterance(utterance, paragraph, roles))
-        : [
-            {
-              ...makeUtteranceDraft(paragraph),
-              audioStatus: `AI语句划分失败，请手动编辑：${data.error ?? "模型输出未通过校验"}`,
-            },
-          ];
-      setUtterancesByParagraph((current) => ({
-        ...current,
-        [paragraph.paragraphId]: nextUtterances,
-      }));
-      setSegmentationProgress(100);
-      setApiStatus(`已完成 ${paragraph.paragraphId} 的 AI语句划分；结果可继续人工编辑`);
-    } catch (error) {
-      setSegmentationProgress(100);
-      setApiStatus(`AI语句划分失败：请检查远端模型配置、api_key 和网络连接。${String(error)}`);
-    }
   }
 
   function updateUtterance(
@@ -1631,7 +1592,7 @@ function App() {
 
   function renderMainPage() {
     return (
-      <main className="workbench" aria-label="NovelVoice-Agent v0.3.2 主页面">
+      <main className="workbench" aria-label="NovelVoice-Agent v0.3.3 主页面">
         <aside className="sidebar">
           <section className="panel">
             <div className="section-title">小说章节</div>
@@ -1653,7 +1614,7 @@ function App() {
             />
             <ProgressBar label="上传小说进度" value={uploadProgress} />
             <ProgressBar label="章节划分进度" value={chapterSplitProgress} />
-            <ProgressBar label="AI语句划分进度" value={segmentationProgress} />
+            <ProgressBar label="AI角色匹配进度" value={roleMatchingProgress} />
             <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
             <div className="novel-preview" aria-label="小说开头预览">
               {novelPreview}
@@ -1835,7 +1796,7 @@ function App() {
                   <button className="tool-button teal" type="button" onClick={() => void confirmParagraphs()}>
                     确认无误
                   </button>
-                  <span>{confirmed ? "已确认，可人工检查、批量配音或导出" : "确认前不能执行 AI语句划分"}</span>
+                  <span>{confirmed ? "已确认，可人工检查、批量配音或导出" : "确认后可执行 AI角色匹配"}</span>
                 </div>
               </header>
 
@@ -1844,14 +1805,6 @@ function App() {
                   <article className="paragraph-card" key={paragraph.paragraphId}>
                     <div className="paragraph-toolbar">
                       <strong>{paragraph.paragraphId}</strong>
-                      <button
-                        className="tool-button purple"
-                        type="button"
-                        onClick={() => void runAiSegmentationForParagraph(paragraph.paragraphId)}
-                        disabled={!confirmed}
-                      >
-                        AI语句划分
-                      </button>
                       <button type="button" onClick={() => updateParagraph(paragraph.paragraphId, { collapsed: !paragraph.collapsed })}>
                         {paragraph.collapsed ? "展开" : "折叠"}
                       </button>
@@ -2290,7 +2243,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>NovelVoice-Agent v0.3.2</h1>
+        <h1>NovelVoice-Agent v0.3.3</h1>
         <nav className="tabbar" aria-label="页面切换">
           {[
             ["main", "主页面"],
