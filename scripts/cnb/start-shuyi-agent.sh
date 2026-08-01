@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-: "${SHUYI_HOST_PORT:=8686}"
+: "${SHUYI_HOST_PORT:=8000}"
 export SHUYI_HOST_PORT
 
 echo "=================================================="
@@ -49,13 +49,8 @@ else
   token_hint="你设置的 SHUYI_API_TOKEN"
 fi
 
-if [ -n "${CNB_VSCODE_PROXY_URI:-}" ]; then
-  public_url="${CNB_VSCODE_PROXY_URI/\{\{port\}\}/$SHUYI_HOST_PORT}"
-  echo "后端公网访问地址：$public_url"
-  echo "前端 API Base URL 可填写：$public_url/api/v1"
-else
-  echo "未发现 CNB_VSCODE_PROXY_URI；本地后端地址：http://127.0.0.1:$SHUYI_HOST_PORT"
-fi
+echo "后端已映射到工作区端口 ${SHUYI_HOST_PORT}；公网地址请在 VS Code PORTS 面板查看。"
+echo "GitHub Pages 的 VITE_API_BASE_URL 应填写：<PORTS 面板公网地址>/api/v1"
 echo "请求头格式：Authorization: Bearer <$token_hint>"
 echo "容器内 FastAPI 端口为 8000；CNB 工作区对外预览端口为 ${SHUYI_HOST_PORT}。"
 
@@ -65,4 +60,5 @@ if [ "${SHUYI_CNB_LAUNCH_DRY_RUN:-0}" = "1" ]; then
 fi
 
 export SHUYI_MODEL_AUTO_DOWNLOAD="${SHUYI_MODEL_AUTO_DOWNLOAD:-1}"
+docker compose -f compose.cuda.yaml down --remove-orphans || true
 docker compose -f compose.cuda.yaml up --build

@@ -102,8 +102,10 @@ def test_v0_4_cnb_workspace_launch_button_starts_shuyi_agent():
     assert "启动 ShuYi-Agent" in settings
     assert "CNB_WELCOME_CMD" in cnb_config
     assert "bash scripts/cnb/start-shuyi-agent.sh" in cnb_config
-    assert "SHUYI_HOST_PORT:=8686" in launcher
-    assert "CNB_VSCODE_PROXY_URI" in launcher
+    assert "SHUYI_HOST_PORT:=8000" in launcher
+    assert "docker compose -f compose.cuda.yaml down --remove-orphans" in launcher
+    assert "CNB_VSCODE_PROXY_URI" not in launcher
+    assert "后端公网访问地址" not in launcher
     assert ".shuyi-api-token" in launcher
     assert "Authorization: Bearer" in launcher
     assert "docker compose -f compose.cuda.yaml up --build" in launcher

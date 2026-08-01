@@ -261,8 +261,8 @@ type ConnectionTestResponse = {
 
 const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
-const DEFAULT_BASE_MODEL_PATH = "./models/Qwen3-TTS-12Hz-1.7B-Base";
-const DEFAULT_VOICE_DESIGN_MODEL_PATH = "./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
+const DEFAULT_BASE_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-Base";
+const DEFAULT_VOICE_DESIGN_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
 
 const defaultVoices: VoiceResource[] = [];
 

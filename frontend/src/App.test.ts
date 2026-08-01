@@ -47,6 +47,9 @@ describe("v0.4 application shell", () => {
     expect(markup).toContain('placeholder="eg: https://api.deepseek.com"');
     expect(markup).toContain('placeholder="eg: deepseek-v4-flash"');
     expect(markup).toContain('placeholder="sk-xxx..."');
+    expect(markup).toContain('value="/models/Qwen3-TTS-12Hz-1.7B-Base"');
+    expect(markup).toContain('value="/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign"');
+    expect(markup).not.toContain('value="./models/Qwen3-TTS-12Hz-1.7B-Base"');
     expect(markup).not.toContain('aria-label="测试连接进度"');
   });
 

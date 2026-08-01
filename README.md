@@ -95,7 +95,7 @@ docker compose -f compose.cuda.yaml up --build
 | --- | --- | --- |
 | `SHUYI_API_TOKEN` | v1 API Bearer token；CNB 启动脚本未检测到时会自动生成 | 空，直接 Docker 启动时受保护接口会被拒绝 |
 | `SHUYI_CORS_ORIGINS` | 允许的浏览器来源，逗号分隔 | 空 |
-| `SHUYI_HOST_PORT` | Docker 暴露到宿主机的后端端口；CNB 启动脚本默认用 `8686` | `8000` |
+| `SHUYI_HOST_PORT` | Docker 暴露到宿主机的后端端口；CNB 启动脚本默认用 `8000` | `8000` |
 | `SHUYI_DEVICE` | `auto`、`cpu` 或 `cuda` | `auto` |
 | `SHUYI_DATA_DIR` | 持久数据目录 | 容器内 `/data` |
 | `SHUYI_MODEL_DIR` | 模型缓存根目录 | 容器内 `/models` |
@@ -117,12 +117,9 @@ docker compose -f compose.cuda.yaml up --build
 
 ## CNB 启动、公网访问与访问令牌
 
-CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会把容器内 FastAPI `8000` 端口映射到 CNB 工作区的 `8686` 端口，并在启动日志中打印公网访问地址：
+CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会先停止旧的同名 Compose 服务，再把容器内 FastAPI `8000` 端口映射到 CNB 工作区的 `8000` 端口，避免旧的 `8686` 映射占用导致 `bind: address already in use`。公网地址由 VS Code 工作区的 PORTS/端口面板显示；如果没有自动弹出，在 PORTS 面板手动添加 `8000`。
 
-```text
-后端公网访问地址：https://...cnb.run
-前端 API Base URL 可填写：https://...cnb.run/api/v1
-```
+GitHub Pages 访问 CNB 后端时，把 PORTS 面板显示的公网地址加上 `/api/v1` 配置为仓库变量 `VITE_API_BASE_URL`，例如 `<PORTS 面板公网地址>/api/v1`。模型配置页的 TTS 默认值按 CNB/Docker 后端显示为 `http://127.0.0.1:7811`、`/models/Qwen3-TTS-12Hz-1.7B-Base`、`/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`；后端容器内部会用这些路径读取下载好的模型。
 
 身份验证链路是：启动环境先提供后端访问令牌，后端读取 `SHUYI_API_TOKEN` 并校验 `Authorization: Bearer ...`，前端顶部“访问令牌”输入框填写同一个令牌后才会连接成功。
 
@@ -137,7 +134,7 @@ CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi
 请求头格式：Authorization: Bearer <上方后端访问令牌>
 ```
 
-如果 CNB 界面没有自动弹出公网端口，在 WebIDE 的 Ports/端口面板中手动添加 `8686`。本地 Docker 启动默认仍使用 `http://127.0.0.1:8000`；CNB 场景使用日志中的公网地址。
+本地 Docker 启动默认仍使用 `http://127.0.0.1:8000`；CNB 场景使用 PORTS 面板显示的公网地址。
 
 ## GitHub Pages
 
