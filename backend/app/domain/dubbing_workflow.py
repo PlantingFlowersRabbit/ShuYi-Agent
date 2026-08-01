@@ -71,7 +71,7 @@ class AutoRoleCreationReport:
 
 
 @dataclass(frozen=True)
-class AiOneClickStartResult:
+class RoleAnalysisRunResult:
     status: str
     thread_id: str
     message: str
@@ -93,7 +93,7 @@ class AiOneClickStartResult:
 
 
 @dataclass(frozen=True)
-class AiOneClickResumeResult:
+class DubbingArrangementResult:
     status: str
     thread_id: str
     message: str
@@ -105,7 +105,7 @@ class AiOneClickResumeResult:
         return asdict(self)
 
 
-class AiOneClickState(TypedDict, total=False):
+class DubbingWorkflowState(TypedDict, total=False):
     stage: str
     thread_id: str
     chapter_id: str
@@ -115,7 +115,7 @@ class AiOneClickState(TypedDict, total=False):
     roles: list[dict[str, Any]]
     existing_utterances_by_paragraph: dict[str, list[dict[str, Any]]]
     role_candidates: list[RoleAnalysisCandidate]
-    result: AiOneClickStartResult | AiOneClickResumeResult
+    result: RoleAnalysisRunResult | DubbingArrangementResult
     on_role_selected: Callable[[dict[str, Any]], None] | None
 
 
@@ -151,9 +151,17 @@ class LangChainRoleAnalysisSkill:
         *,
         provider: dict[str, Any],
         api_key_lookup: ApiKeyLookup,
+        role_analysis_system_prompt: str | None = None,
+        dubbing_system_prompt: str | None = None,
     ):
         self.provider = provider
         self.api_key_lookup = api_key_lookup
+        self.role_analysis_system_prompt = role_analysis_system_prompt or (
+            "你是书弈 Agent 的角色分析 Agent，只返回严格 JSON。"
+        )
+        self.dubbing_system_prompt = dubbing_system_prompt or (
+            "你是书弈 Agent 的配音编排 Agent，只返回严格 JSON。"
+        )
 
     def analyze_roles(
         self,
@@ -168,7 +176,7 @@ class LangChainRoleAnalysisSkill:
             [
                 {
                     "role": "system",
-                    "content": "你是小说配音角色分析助手，只返回严格 JSON。",
+                    "content": self.role_analysis_system_prompt,
                 },
                 {
                     "role": "user",
@@ -190,7 +198,9 @@ class LangChainRoleAnalysisSkill:
         paragraph_text: str,
         roles: list[dict[str, Any]],
     ) -> bool:
-        decision = self._judge_utterance(utterance=utterance, paragraph_text=paragraph_text, roles=roles)
+        decision = self._judge_utterance(
+            utterance=utterance, paragraph_text=paragraph_text, roles=roles
+        )
         return bool(decision.get("segmentation_required", False))
 
     def choose_role(
@@ -231,7 +241,7 @@ class LangChainRoleAnalysisSkill:
             [
                 {
                     "role": "system",
-                    "content": "你是小说配音批量语句角色选择助手，只返回严格 JSON。",
+                    "content": self.dubbing_system_prompt,
                 },
                 {
                     "role": "user",
@@ -259,7 +269,7 @@ class LangChainRoleAnalysisSkill:
             [
                 {
                     "role": "system",
-                    "content": "你是小说配音语句角色选择助手，只返回严格 JSON。",
+                    "content": self.dubbing_system_prompt,
                 },
                 {
                     "role": "user",
@@ -344,10 +354,18 @@ class AiSegmentationService:
 
 
 class BatchRoleSelectionService:
-    def __init__(self, role_skill: Any, *, segmentation_service: Any | None = None, batch_size: int = 60):
+    def __init__(
+        self,
+        role_skill: Any,
+        *,
+        segmentation_service: Any | None = None,
+        batch_size: int = 60,
+        max_rounds: int = 3,
+    ):
         self.role_skill = role_skill
         self.segmentation_service = segmentation_service
         self.batch_size = max(1, batch_size)
+        self.max_rounds = max(1, max_rounds)
 
     def select_roles_for_statements_batch(
         self,
@@ -378,11 +396,13 @@ class BatchRoleSelectionService:
                 if _has_role(utterance):
                     skipped_count += 1
 
-        while True:
+        rounds = 0
+        while rounds < self.max_rounds:
             pending = _pending_role_statements(utterances_by_paragraph, paragraph_by_id)
             if not pending:
                 break
             chunk = pending[: self.batch_size]
+            rounds += 1
             try:
                 parsed = self._choose_batch(
                     chapter_id=chapter_id,
@@ -435,14 +455,18 @@ class BatchRoleSelectionService:
                     role_id = forced_narrator_role_id
                     decision = {
                         **decision,
-                        "confidence": max(_safe_float(decision.get("confidence"), default=0.0), 0.95),
+                        "confidence": max(
+                            _safe_float(decision.get("confidence"), default=0.0), 0.95
+                        ),
                         "reason": "分句后该片段是引号外说话动作/旁白，强制按旁白处理。",
                     }
                 if action == "select_role" and role_id in role_by_id and not _has_role(utterance):
                     role = role_by_id[role_id]
                     selection = RoleSelectionResult(
                         role_id=role_id,
-                        speaker_name=str(role.get("name") or decision.get("speaker_name") or role_id),
+                        speaker_name=str(
+                            role.get("name") or decision.get("speaker_name") or role_id
+                        ),
                         confidence=_safe_float(decision.get("confidence"), default=0.0),
                         needs_human_review=False,
                         reason=str(decision.get("reason") or ""),
@@ -477,7 +501,11 @@ class BatchRoleSelectionService:
                     except (TypeError, ValueError) as exc:
                         failed_count += 1
                         errors.append(
-                            _failure(paragraph_id, "invalid_split_and_select", f"AI角色匹配分句结果无效：{exc}")
+                            _failure(
+                                paragraph_id,
+                                "invalid_split_and_select",
+                                f"配音编排 Agent分句结果无效：{exc}",
+                            )
                         )
                         return BatchRoleSelectionReport(
                             "failed",
@@ -505,7 +533,7 @@ class BatchRoleSelectionService:
                         _failure(
                             paragraph_id,
                             "split_and_select_required",
-                            "AI角色匹配已合并语句划分；请在同一次批量响应中返回 action=split_and_select",
+                            "配音编排 Agent已合并语句划分；请在同一次批量响应中返回 action=split_and_select",
                         )
                     )
                     return BatchRoleSelectionReport(
@@ -527,8 +555,19 @@ class BatchRoleSelectionService:
             if not progressed:
                 break
 
+        remaining = _pending_role_statements(utterances_by_paragraph, paragraph_by_id)
+        status = "needs_human_review" if remaining else "completed"
+        if remaining:
+            errors.append(
+                {
+                    "paragraph_id": str(remaining[0].get("paragraph_id") or ""),
+                    "error_code": "selection_round_limit",
+                    "message": "配音编排 Agent 已达到最大判断轮次，请人工指定剩余角色。",
+                }
+            )
+
         return BatchRoleSelectionReport(
-            "completed",
+            status,
             skipped_count + success_count + failed_count + uncertain_count,
             skipped_count,
             success_count,
@@ -549,7 +588,10 @@ class BatchRoleSelectionService:
         paragraphs: list[dict[str, Any]],
         paragraph_by_id: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        model_statements = [{key: value for key, value in item.items() if key != "_utterance"} for item in statements]
+        model_statements = [
+            {key: value for key, value in item.items() if key != "_utterance"}
+            for item in statements
+        ]
         if hasattr(self.role_skill, "choose_roles_batch"):
             raw = self.role_skill.choose_roles_batch(
                 chapter_id=chapter_id,
@@ -600,7 +642,13 @@ class BatchRoleSelectionService:
             paragraph_text=paragraph_text,
             chapter_title=chapter_title,
         )
-        action = "select_role" if selection.role_id else "needs_split" if selection.needs_human_review else "uncertain"
+        action = (
+            "select_role"
+            if selection.role_id
+            else "needs_split"
+            if selection.needs_human_review
+            else "uncertain"
+        )
         return {
             "statement_id": statement["statement_id"],
             "action": action,
@@ -659,27 +707,28 @@ class BatchRoleSelectionService:
         split_texts: list[str] = []
         for item in raw_items:
             if not isinstance(item, dict):
-                raise TypeError("split utterance must be an object")
+                raise TypeError("拆分后的台词必须是对象")
             text = str(item.get("text") or "").strip()
             if not text:
-                raise ValueError("split utterance text cannot be empty")
+                raise ValueError("拆分后的台词文本不能为空")
             split_texts.append(text)
         if _compact_text("".join(split_texts)) != _compact_text(source_text):
-            raise ValueError("split utterances must preserve the original statement text")
+            raise ValueError("拆分后的台词必须完整保留原台词文本")
 
         paragraph_utterances = utterances_by_paragraph.get(paragraph_id)
         if paragraph_utterances is None:
-            raise ValueError(f"paragraph not found: {paragraph_id}")
+            raise ValueError(f"段落不存在：{paragraph_id}")
         target_index = next(
             (
                 index
                 for index, utterance in enumerate(paragraph_utterances)
-                if utterance is source_utterance or str(utterance.get("utterance_id") or "") == statement_id
+                if utterance is source_utterance
+                or str(utterance.get("utterance_id") or "") == statement_id
             ),
             -1,
         )
         if target_index < 0:
-            raise ValueError(f"statement not found: {statement_id}")
+            raise ValueError(f"台词不存在：{statement_id}")
 
         replacement: list[dict[str, Any]] = []
         used_ids = {
@@ -719,7 +768,9 @@ class BatchRoleSelectionService:
                 "text": utterance["text"],
             }
             role_id = str(item.get("role_id") or "") if item.get("role_id") else None
-            forced_narrator_role_id = _forced_narrator_role_id(statement=split_statement, roles=roles)
+            forced_narrator_role_id = _forced_narrator_role_id(
+                statement=split_statement, roles=roles
+            )
             if forced_narrator_role_id:
                 role_id = forced_narrator_role_id
                 item = {
@@ -758,7 +809,7 @@ class BatchRoleSelectionService:
         return replacement, events
 
 
-class AiOneClickWorkflow:
+class DubbingWorkflow:
     def __init__(
         self,
         *,
@@ -766,14 +817,15 @@ class AiOneClickWorkflow:
         segmentation_service: Any,
         role_collection: RoleCollection | None = None,
         voice_collection: VoiceResourceCollection | None = None,
-        voice_generator: Callable[[RoleAnalysisCandidate], VoiceResource | dict[str, Any]] | None = None,
+        voice_generator: Callable[[RoleAnalysisCandidate], VoiceResource | dict[str, Any]]
+        | None = None,
     ):
         self.role_skill = role_skill
         self.segmentation_service = segmentation_service
         self.role_collection = role_collection
         self.voice_collection = voice_collection
         self.voice_generator = voice_generator
-        self._sessions: dict[str, AiOneClickState] = {}
+        self._sessions: dict[str, DubbingWorkflowState] = {}
         self._graph = self._build_graph()
 
     def start_role_analysis(
@@ -783,9 +835,9 @@ class AiOneClickWorkflow:
         chapter_title: str,
         paragraphs: list[dict[str, Any]],
         existing_roles: list[dict[str, Any]],
-    ) -> AiOneClickStartResult:
-        thread_id = f"ai-one-click-{uuid.uuid4().hex}"
-        state: AiOneClickState = {
+    ) -> RoleAnalysisRunResult:
+        thread_id = f"agent-run-{uuid.uuid4().hex}"
+        state: DubbingWorkflowState = {
             "stage": "role_analysis",
             "thread_id": thread_id,
             "chapter_id": chapter_id,
@@ -804,9 +856,9 @@ class AiOneClickWorkflow:
         roles: list[dict[str, Any]],
         existing_utterances_by_paragraph: dict[str, list[dict[str, Any]]],
         on_role_selected: Callable[[dict[str, Any]], None] | None = None,
-    ) -> AiOneClickResumeResult:
+    ) -> DubbingArrangementResult:
         if thread_id not in self._sessions:
-            raise KeyError(f"Unknown ai-one-click thread_id: {thread_id}")
+            raise KeyError(f"未知 Agent 运行标识: {thread_id}")
         state = dict(self._sessions[thread_id])
         state.update(
             {
@@ -820,16 +872,35 @@ class AiOneClickWorkflow:
         self._sessions[thread_id] = dict(next_state)
         return next_state["result"]
 
+    def restore_waiting_session(
+        self,
+        *,
+        thread_id: str,
+        chapter_id: str,
+        chapter_title: str,
+        paragraphs: list[dict[str, Any]],
+        existing_roles: list[dict[str, Any]],
+    ) -> None:
+        """从持久化业务资源重建等待人工确认的 Agent 会话。"""
+        self._sessions[thread_id] = {
+            "stage": "role_analysis",
+            "thread_id": thread_id,
+            "chapter_id": chapter_id,
+            "chapter_title": chapter_title,
+            "paragraphs": paragraphs,
+            "existing_roles": existing_roles,
+        }
+
     def _build_graph(self):
         from langgraph.graph import END, StateGraph
 
-        graph = StateGraph(AiOneClickState)
+        graph = StateGraph(DubbingWorkflowState)
         graph.add_node("role_analysis", self._role_analysis_node)
         graph.add_node("sentence_role_selection", self._sentence_role_selection_node)
         graph.set_conditional_entry_point(
-            lambda state: "sentence_role_selection"
-            if state.get("stage") == "resume"
-            else "role_analysis",
+            lambda state: (
+                "sentence_role_selection" if state.get("stage") == "resume" else "role_analysis"
+            ),
             {
                 "role_analysis": "role_analysis",
                 "sentence_role_selection": "sentence_role_selection",
@@ -839,7 +910,7 @@ class AiOneClickWorkflow:
         graph.add_edge("sentence_role_selection", END)
         return graph.compile()
 
-    def _role_analysis_node(self, state: AiOneClickState) -> AiOneClickState:
+    def _role_analysis_node(self, state: DubbingWorkflowState) -> DubbingWorkflowState:
         paragraphs = state.get("paragraphs", [])
         chapter_text = "\n\n".join(str(paragraph.get("text") or "") for paragraph in paragraphs)
         candidates = self.role_skill.analyze_roles(
@@ -867,7 +938,7 @@ class AiOneClickWorkflow:
         return {
             **state,
             "role_candidates": candidates,
-            "result": AiOneClickStartResult(
+            "result": RoleAnalysisRunResult(
                 status="waiting_for_roles",
                 thread_id=state["thread_id"],
                 message=message,
@@ -878,7 +949,7 @@ class AiOneClickWorkflow:
             ),
         }
 
-    def _sentence_role_selection_node(self, state: AiOneClickState) -> AiOneClickState:
+    def _sentence_role_selection_node(self, state: DubbingWorkflowState) -> DubbingWorkflowState:
         roles = state.get("roles", [])
         utterances_by_paragraph: dict[str, list[dict[str, Any]]] = {}
         existing = state.get("existing_utterances_by_paragraph", {})
@@ -890,7 +961,9 @@ class AiOneClickWorkflow:
             if not paragraph_id or not paragraph_text:
                 continue
             paragraph_utterances = [
-                dict(item) for item in existing.get(paragraph_id, []) if str(item.get("text") or "").strip()
+                dict(item)
+                for item in existing.get(paragraph_id, [])
+                if str(item.get("text") or "").strip()
             ]
             if not paragraph_utterances:
                 paragraph_utterances = [
@@ -912,25 +985,34 @@ class AiOneClickWorkflow:
             on_role_selected=state.get("on_role_selected"),
         )
         if batch_report.status == "failed":
-            failure = batch_report.errors[0] if batch_report.errors else {
-                "paragraph_id": "",
-                "error_code": "batch_role_selection_failed",
-                "message": "批量角色选择失败",
-            }
-            result = AiOneClickResumeResult(
+            failure = (
+                batch_report.errors[0]
+                if batch_report.errors
+                else {
+                    "paragraph_id": "",
+                    "error_code": "batch_role_selection_failed",
+                    "message": "批量角色选择失败",
+                }
+            )
+            result = DubbingArrangementResult(
                 status="failed",
                 thread_id=state["thread_id"],
-                message=f"AI角色匹配失败：{failure['message']}",
+                message=f"配音编排 Agent失败：{failure['message']}",
                 utterances_by_paragraph={},
                 role_selection_events=batch_report.events,
                 failure=failure,
             )
             return {**state, "result": result}
 
-        result = AiOneClickResumeResult(
-            status="completed",
+        needs_human_review = batch_report.status == "needs_human_review"
+        result = DubbingArrangementResult(
+            status="needs_human_review" if needs_human_review else "completed",
             thread_id=state["thread_id"],
-            message="AI角色匹配完成；请人工检查语句划分和角色，或点击“一键生成配音”。",
+            message=(
+                "部分台词仍需人工确认角色；确认后可以继续生成配音。"
+                if needs_human_review
+                else "配音编排 Agent完成；请人工检查台词划分和角色，或点击“批量生成配音”。"
+            ),
             utterances_by_paragraph=utterances_by_paragraph,
             role_selection_events=batch_report.events,
             failure=None,
@@ -966,7 +1048,11 @@ class AiOneClickWorkflow:
                     index += 1
                     continue
                 if self.segmentation_service is None:
-                    return utterances, _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用"), role_selection_events
+                    return (
+                        utterances,
+                        _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用"),
+                        role_selection_events,
+                    )
                 segmentation = self.segmentation_service.segment_paragraph(
                     chapter_title=chapter_title,
                     paragraph_id=paragraph_id,
@@ -974,11 +1060,15 @@ class AiOneClickWorkflow:
                     known_roles=roles,
                 )
                 if not segmentation.ok:
-                    return utterances, _failure(
-                        paragraph_id,
-                        segmentation.error_code or "segmentation_failed",
-                        segmentation.error or "模型输出未通过 JSON/schema/文本守恒校验",
-                    ), role_selection_events
+                    return (
+                        utterances,
+                        _failure(
+                            paragraph_id,
+                            segmentation.error_code or "segmentation_failed",
+                            segmentation.error or "模型输出未通过 JSON/schema/文本守恒校验",
+                        ),
+                        role_selection_events,
+                    )
                 utterances = [dict(item) for item in segmentation.utterances]
                 did_segment = True
                 index = 0
@@ -992,7 +1082,11 @@ class AiOneClickWorkflow:
             )
             if selection.role_id is None and selection.needs_human_review and not did_segment:
                 if self.segmentation_service is None:
-                    return utterances, _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用"), role_selection_events
+                    return (
+                        utterances,
+                        _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用"),
+                        role_selection_events,
+                    )
                 segmentation = self.segmentation_service.segment_paragraph(
                     chapter_title=chapter_title,
                     paragraph_id=paragraph_id,
@@ -1000,11 +1094,15 @@ class AiOneClickWorkflow:
                     known_roles=roles,
                 )
                 if not segmentation.ok:
-                    return utterances, _failure(
-                        paragraph_id,
-                        segmentation.error_code or "segmentation_failed",
-                        segmentation.error or "模型输出未通过 JSON/schema/文本守恒校验",
-                    ), role_selection_events
+                    return (
+                        utterances,
+                        _failure(
+                            paragraph_id,
+                            segmentation.error_code or "segmentation_failed",
+                            segmentation.error or "模型输出未通过 JSON/schema/文本守恒校验",
+                        ),
+                        role_selection_events,
+                    )
                 utterances = [dict(item) for item in segmentation.utterances]
                 did_segment = True
                 index = 0
@@ -1025,7 +1123,9 @@ class AiOneClickWorkflow:
                 if on_role_selected is not None:
                     on_role_selected(event)
             else:
-                utterance["speaker_name"] = selection.speaker_name or utterance.get("speaker_name") or "未知角色"
+                utterance["speaker_name"] = (
+                    selection.speaker_name or utterance.get("speaker_name") or "未知角色"
+                )
                 utterance["confidence"] = selection.confidence
                 utterance["needs_human_review"] = True
             index += 1
@@ -1074,13 +1174,19 @@ def auto_apply_role_candidates(
 
         voice, score, reason = _best_voice_match(candidate, voices.list())
         generated_by_ai = False
-        if (voice is None or score < voice_match_threshold) and action == "matched_existing" and role.voice_resource_id:
+        if (
+            (voice is None or score < voice_match_threshold)
+            and action == "matched_existing"
+            and role.voice_resource_id
+        ):
             voice = VoiceResource(
                 voice_id=role.voice_resource_id,
                 name=role.name,
                 description=role.voice_description or role.description,
-                reference_text=role.reference_text or generated_voice_content(role.name, role.description),
-                reference_audio_path=role.reference_audio_path or "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
+                reference_text=role.reference_text
+                or generated_voice_content(role.name, role.description),
+                reference_audio_path=role.reference_audio_path
+                or "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
                 generated=role.voice_generated_by_ai,
                 gender=role.gender,
                 suitable_role_types=[item for item in [role.profile, role.description] if item],
@@ -1324,7 +1430,9 @@ def _candidate_from_any(candidate: Any) -> RoleAnalysisCandidate:
         aliases=[str(alias) for alias in candidate.get("aliases") or []],
         gender=str(candidate["gender"]) if candidate.get("gender") is not None else None,
         profile=str(candidate["profile"]) if candidate.get("profile") is not None else None,
-        voice_direction=str(candidate["voice_direction"]) if candidate.get("voice_direction") is not None else None,
+        voice_direction=str(candidate["voice_direction"])
+        if candidate.get("voice_direction") is not None
+        else None,
         evidence=[str(item) for item in candidate.get("evidence") or []],
         confidence=max(0.0, min(1.0, _safe_float(candidate.get("confidence"), default=0.0))),
         needs_human_review=bool(candidate.get("needs_human_review", True)),
@@ -1360,7 +1468,9 @@ def _next_utterance_id(paragraph_id: str, used_ids: set[str], preferred_sequence
         sequence += 1
 
 
-def _ensure_utterance_defaults(utterance: dict[str, Any], *, paragraph_id: str, sequence: int) -> None:
+def _ensure_utterance_defaults(
+    utterance: dict[str, Any], *, paragraph_id: str, sequence: int
+) -> None:
     utterance.setdefault("utterance_id", f"{paragraph_id}-u-{sequence:03d}")
     utterance.setdefault("paragraph_id", paragraph_id)
     utterance.setdefault("speaker_name", "")
@@ -1397,12 +1507,17 @@ def _find_matching_role(candidate: RoleAnalysisCandidate, roles: RoleCollection)
     candidate_name = _normalize_name(candidate.name)
     candidate_aliases = {_normalize_name(alias) for alias in candidate.aliases}
     for role in roles.list():
-        role_names = {_normalize_name(role.name), *{_normalize_name(alias) for alias in role.aliases}}
+        role_names = {
+            _normalize_name(role.name),
+            *{_normalize_name(alias) for alias in role.aliases},
+        }
         if candidate_name and candidate_name in role_names:
             return role
         if candidate_aliases.intersection(role_names):
             return role
-        if candidate_name == _normalize_name("旁白") and _normalize_name(role.name) == _normalize_name("旁白"):
+        if candidate_name == _normalize_name("旁白") and _normalize_name(
+            role.name
+        ) == _normalize_name("旁白"):
             return role
     return None
 
@@ -1500,7 +1615,9 @@ def _pending_role_statements(
                 continue
             statements.append(
                 {
-                    "statement_id": str(utterance.get("utterance_id") or utterance.get("statement_id")),
+                    "statement_id": str(
+                        utterance.get("utterance_id") or utterance.get("statement_id")
+                    ),
                     "paragraph_id": paragraph_id,
                     "paragraph_order": _first_number(paragraph_id),
                     "statement_order": order,
@@ -1522,10 +1639,14 @@ def _needs_dialogue_narration_split(statement: dict[str, Any]) -> bool:
         return False
     if not re.search(r"[”\"』」][^“”\"『』「」]+[。！？!?]?$", text):
         return False
-    return bool(re.search(r"[”\"』」]\s*[\u4e00-\u9fff]{1,20}(?:道|说|问|喊|叫|答)[。！？!?]?$", text))
+    return bool(
+        re.search(r"[”\"』」]\s*[\u4e00-\u9fff]{1,20}(?:道|说|问|喊|叫|答)[。！？!?]?$", text)
+    )
 
 
-def _forced_narrator_role_id(*, statement: dict[str, Any], roles: list[dict[str, Any]]) -> str | None:
+def _forced_narrator_role_id(
+    *, statement: dict[str, Any], roles: list[dict[str, Any]]
+) -> str | None:
     text = str(statement.get("text") or "").strip()
     paragraph_text = str(statement.get("context") or "")
     if not _is_speech_tag_narration(text=text, paragraph_text=paragraph_text):
@@ -1534,13 +1655,13 @@ def _forced_narrator_role_id(*, statement: dict[str, Any], roles: list[dict[str,
 
 
 def _is_speech_tag_narration(*, text: str, paragraph_text: str) -> bool:
-    if not text or any(mark in text for mark in "“”\"『』「」"):
+    if not text or any(mark in text for mark in '“”"『』「」'):
         return False
-    if not any(mark in paragraph_text for mark in "”\"』」"):
+    if not any(mark in paragraph_text for mark in '”"』」'):
         return False
     if text in paragraph_text:
         prefix = paragraph_text.split(text, maxsplit=1)[0]
-        if not any(mark in prefix for mark in "”\"』」"):
+        if not any(mark in prefix for mark in '”"』」'):
             return False
     speech_verbs = (
         "说道",

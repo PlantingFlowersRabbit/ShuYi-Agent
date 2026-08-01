@@ -6,6 +6,35 @@ import {
 } from "./features/agent-workflow/workflowMachine";
 import { APP_BRAND, APP_VERSION, runtimeConfig } from "./shared/config/runtimeConfig";
 
+const ACCESS_TOKEN_KEY = "shuyi-agent-api-token";
+let inMemoryAccessToken = "";
+
+function readAccessToken(): string {
+  try {
+    const stored =
+      typeof window !== "undefined" && window.sessionStorage
+        ? window.sessionStorage.getItem(ACCESS_TOKEN_KEY)
+        : null;
+    return stored ?? inMemoryAccessToken;
+  } catch {
+    return inMemoryAccessToken;
+  }
+}
+
+function storeAccessToken(value: string): void {
+  inMemoryAccessToken = value;
+  try {
+    if (value) window.sessionStorage.setItem(ACCESS_TOKEN_KEY, value);
+    else window.sessionStorage.removeItem(ACCESS_TOKEN_KEY);
+  } catch {
+    // 当前页面继续使用内存中的访问令牌。
+  }
+}
+
+function authorizationHeaders(token = readAccessToken()): Record<string, string> {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 type Page = "main" | "voices" | "models";
 type VoiceMode = "voice_cloning" | "voice_design";
 
@@ -45,7 +74,7 @@ type ApiChapterSplitResponse = {
   chapters: ApiChapter[];
   agent: {
     status: string;
-    script_path: string | null;
+    rule_path: string | null;
     trace: string[];
     validation_errors: string[];
   };
@@ -141,6 +170,7 @@ type UtteranceDraft = {
   audioDuration?: number;
   audioProvider?: string;
   audioModel?: string;
+  needsHumanReview: boolean;
 };
 
 type ApiUtterance = {
@@ -158,6 +188,7 @@ type ApiUtterance = {
   needs_human_review?: boolean;
   audio_status?: string;
   audio_path?: string;
+  audio_url?: string;
   audio_duration?: number;
   audio_provider?: string;
   audio_model?: string;
@@ -180,7 +211,7 @@ type AiRoleCandidate = {
   needs_human_review: boolean;
 };
 
-type AiOneClickStartResponse = {
+type RoleAnalysisRunResponse = {
   status: string;
   thread_id: string;
   message: string;
@@ -201,7 +232,7 @@ type AiRoleSelectionEvent = {
   reason: string;
 };
 
-type AiOneClickResumeResponse = {
+type DubbingArrangementResponse = {
   status: string;
   thread_id: string;
   message: string;
@@ -214,7 +245,7 @@ type ModelConfig = {
   llm: {
     base_url: string;
     model: string;
-    api_key: string;
+    has_api_key: boolean;
   };
   tts: {
     base_url: string;
@@ -224,7 +255,7 @@ type ModelConfig = {
   chapter_agent: {
     base_url: string;
     model: string;
-    api_key: string;
+    has_api_key: boolean;
   };
 };
 
@@ -242,8 +273,8 @@ const sampleNovel = `1.变成蘑菇的公爵千金
 
 const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
-const DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base";
-const DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
+const DEFAULT_BASE_MODEL_PATH = "./models/Qwen3-TTS-12Hz-1.7B-Base";
+const DEFAULT_VOICE_DESIGN_MODEL_PATH = "./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
 
 const defaultVoices: VoiceResource[] = [
   {
@@ -253,8 +284,8 @@ const defaultVoices: VoiceResource[] = [
     description: "沉稳、叙事感强，适合旁白和长段说明。",
     suitableRoleTypes: ["旁白", "叙述", "长段说明"],
     referenceText: "探索那些被遗忘的地下空间，比如废弃的地铁站、防空洞。",
-    referenceAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/男声旁白/男声旁白.mp3",
-    playableAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/男声旁白/男声旁白.mp3",
+    referenceAudioPath: "/api/v1/voice-profiles/voice-male-narrator/audio",
+    playableAudioPath: "/api/v1/voice-profiles/voice-male-narrator/audio",
     generated: false,
   },
   {
@@ -264,8 +295,8 @@ const defaultVoices: VoiceResource[] = [
     description: "清亮自然，适合年轻男性角色对白。",
     suitableRoleTypes: ["年轻男性", "对白"],
     referenceText: "光柱最终落在那株已经遍布猩红纹路的神木幼苗上。",
-    referenceAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/年轻男/年轻男.mp3",
-    playableAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/年轻男/年轻男.mp3",
+    referenceAudioPath: "/api/v1/voice-profiles/voice-young-male/audio",
+    playableAudioPath: "/api/v1/voice-profiles/voice-young-male/audio",
     generated: false,
   },
   {
@@ -275,8 +306,8 @@ const defaultVoices: VoiceResource[] = [
     description: "成熟亲近，适合女性角色对白。",
     suitableRoleTypes: ["女性角色", "成熟", "对白"],
     referenceText: "宝宝，今天你可得好好陪我逛逛。",
-    referenceAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/御姐音/御姐音.mp3",
-    playableAudioPath: "/Users/gaojing/Downloads/真实测试样本/音频/御姐音/御姐音.mp3",
+    referenceAudioPath: "/api/v1/voice-profiles/voice-yujie/audio",
+    playableAudioPath: "/api/v1/voice-profiles/voice-yujie/audio",
     generated: false,
   },
 ];
@@ -285,7 +316,7 @@ const defaultModelConfig: ModelConfig = {
   llm: {
     base_url: "https://api.siliconflow.cn/v1",
     model: "Qwen/Qwen3-8B",
-    api_key: "",
+    has_api_key: false,
   },
   tts: {
     base_url: "http://127.0.0.1:7811",
@@ -295,7 +326,7 @@ const defaultModelConfig: ModelConfig = {
   chapter_agent: {
     base_url: "https://api.deepseek.com",
     model: "deepseek-v4-flash",
-    api_key: "",
+    has_api_key: false,
   },
 };
 
@@ -339,7 +370,7 @@ function decodeNovelTextBuffer(buffer: ArrayBuffer): string {
       try {
         return decoder.decode(bytes);
       } catch {
-        // Try the next legacy Chinese encoding supported by the browser.
+        // 继续尝试浏览器支持的下一种中文编码。
       }
     }
   }
@@ -352,7 +383,7 @@ async function readNovelFileUpload(file: File): Promise<NovelFileUpload> {
   if (isEpub) {
     return {
       text: "",
-      preview: `已上传 EPUB：${file.name}\n\n点击“AI小说格式解析”后将由后端解析 EPUB 目录和正文。`,
+      preview: `已上传 EPUB：${file.name}\n\n点击“小说解析 Agent”后将由后端解析 EPUB 目录和正文。`,
       uploadedFile: {
         filename: file.name,
         contentBase64: arrayBufferToBase64(buffer),
@@ -567,13 +598,14 @@ function utteranceGroupsToApi(groups: Record<string, UtteranceDraft[]>): Record<
         audio_duration: utterance.audioDuration,
         audio_provider: utterance.audioProvider,
         audio_model: utterance.audioModel,
+        needs_human_review: utterance.needsHumanReview,
       })),
     ]),
   );
 }
 
 function voiceAudioSrc(voice: VoiceResource): string {
-  return runtimeConfig.apiUrl(`/voice-resources/${voice.voiceId}/audio`);
+  return runtimeConfig.apiUrl(`/voice-profiles/${voice.voiceId}/audio`);
 }
 
 function roleFromVoice(roleId: string, name: string, voice: VoiceResource): RoleCard {
@@ -609,10 +641,12 @@ function createDefaultRoles(voices: VoiceResource[]): RoleCard[] {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const isMultipart = init?.body instanceof FormData;
   const response = await fetch(runtimeConfig.apiUrl(path), {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(isMultipart ? {} : { "Content-Type": "application/json" }),
+      ...authorizationHeaders(),
       ...(init?.headers ?? {}),
     },
   });
@@ -624,6 +658,73 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+function mediaRequestUrl(source: string): string {
+  if (/^(blob:|data:)/.test(source)) return source;
+  if (source.startsWith("/outputs/") || source.startsWith("outputs/")) {
+    return runtimeConfig.mediaUrl(source);
+  }
+  if (source.startsWith("/api/")) return runtimeConfig.mediaUrl(source);
+  return /^https?:\/\//.test(source) ? source : runtimeConfig.apiUrl(source);
+}
+
+type AgentStreamEvent = { id: number; event: string; data: any };
+
+export function parseAgentSseBuffer(buffer: string): {
+  events: AgentStreamEvent[];
+  remainder: string;
+} {
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const frames = normalized.split("\n\n");
+  const remainder = frames.pop() ?? "";
+  const events: AgentStreamEvent[] = [];
+  for (const frame of frames) {
+    if (!frame.trim()) continue;
+    let id = 0;
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("id:")) id = Number(line.slice(3).trim()) || 0;
+      else if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+    if (dataLines.length) {
+      events.push({ id, event, data: JSON.parse(dataLines.join("\n")) });
+    }
+  }
+  return { events, remainder };
+}
+
+function AuthorizedAudio({ source, accessToken }: { source: string; accessToken: string }) {
+  const [playableUrl, setPlayableUrl] = useState("");
+
+  useEffect(() => {
+    if (!source) return undefined;
+    if (/^(blob:|data:)/.test(source)) {
+      setPlayableUrl(source);
+      return undefined;
+    }
+    let revokedUrl = "";
+    let cancelled = false;
+    fetch(mediaRequestUrl(source), { headers: authorizationHeaders(accessToken) })
+      .then((response) => {
+        if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => {
+        if (cancelled) return;
+        revokedUrl = URL.createObjectURL(blob);
+        setPlayableUrl(revokedUrl);
+      })
+      .catch(() => setPlayableUrl(""));
+    return () => {
+      cancelled = true;
+      if (revokedUrl) URL.revokeObjectURL(revokedUrl);
+    };
+  }, [accessToken, source]);
+
+  return playableUrl ? <audio controls src={playableUrl} /> : <small>音频需要有效访问令牌</small>;
+}
+
 function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
   return {
     utteranceId: `${paragraph.paragraphId}-u-001`,
@@ -632,6 +733,7 @@ function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
     roleId: "",
     speakerName: "",
     audioStatus: "尚未生成",
+    needsHumanReview: true,
   };
 }
 
@@ -670,7 +772,7 @@ function audioPathToUrl(path?: string): string | undefined {
 
 function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
   const role = roles.find((item) => item.roleId === utterance.speaker_role_id);
-  const audioUrl = audioPathToUrl(utterance.audio_path);
+  const audioUrl = utterance.audio_url ?? audioPathToUrl(utterance.audio_path);
   return {
     utteranceId: utterance.utterance_id,
     paragraphId: utterance.paragraph_id ?? paragraph.paragraphId,
@@ -683,6 +785,7 @@ function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, r
     audioDuration: utterance.audio_duration,
     audioProvider: utterance.audio_provider,
     audioModel: utterance.audio_model,
+    needsHumanReview: Boolean(utterance.needs_human_review),
   };
 }
 
@@ -691,7 +794,7 @@ function normalizeModelConfig(config: Partial<ModelConfig>): ModelConfig {
     llm: {
       base_url: config.llm?.base_url ?? defaultModelConfig.llm.base_url,
       model: config.llm?.model ?? defaultModelConfig.llm.model,
-      api_key: config.llm?.api_key ?? "",
+      has_api_key: config.llm?.has_api_key ?? false,
     },
     tts: {
       base_url: config.tts?.base_url ?? defaultModelConfig.tts.base_url,
@@ -701,7 +804,7 @@ function normalizeModelConfig(config: Partial<ModelConfig>): ModelConfig {
     chapter_agent: {
       base_url: config.chapter_agent?.base_url ?? defaultModelConfig.chapter_agent.base_url,
       model: config.chapter_agent?.model ?? defaultModelConfig.chapter_agent.model,
-      api_key: config.chapter_agent?.api_key ?? "",
+      has_api_key: config.chapter_agent?.has_api_key ?? false,
     },
   };
 }
@@ -726,6 +829,9 @@ function App() {
   const voiceAudioInputRef = useRef<HTMLInputElement>(null);
   const fullNovelTextRef = useRef(sampleNovel);
   const uploadedNovelFileRef = useRef<UploadedNovelFile | null>(null);
+  const automaticDubbingStartedRef = useRef(false);
+  const automaticRoleMatchingAttemptedRef = useRef(false);
+  const dubbingInFlightRef = useRef(false);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState(() => makeNovelPreview(sampleNovel));
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -769,10 +875,11 @@ function App() {
   const [localTtsStartProgress, setLocalTtsStartProgress] = useState(0);
   const [localTtsStarting, setLocalTtsStarting] = useState(false);
   const [aiRoleCandidates, setAiRoleCandidates] = useState<AiRoleCandidate[]>([]);
-  const [aiOneClickThreadId, setAiOneClickThreadId] = useState("");
-  const [aiOneClickWaitingForRoles, setAiOneClickWaitingForRoles] = useState(false);
-  const [aiOneClickRunning, setAiOneClickRunning] = useState(false);
+  const [agentRunThreadId, setAgentRunThreadId] = useState("");
+  const [agentRunWaitingForRoles, setAgentRunWaitingForRoles] = useState(false);
+  const [agentRunRunning, setAgentRunRunning] = useState(false);
   const [workflowState, setWorkflowState] = useState(() => createWorkflowState("automatic"));
+  const [apiToken, setApiToken] = useState(readAccessToken);
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
@@ -784,21 +891,24 @@ function App() {
     () => visibleParagraphs.flatMap((paragraph) => utterancesByParagraph[paragraph.paragraphId] ?? []),
     [utterancesByParagraph, visibleParagraphs],
   );
+  const hasPendingHumanReview = flattenedUtterances.some(
+    (utterance) => utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
+  );
   const primaryStatementParagraphId = visibleParagraphs[0]?.paragraphId ?? "";
   const roleOptions = useMemo(
     () => roles.map((role) => ({ value: role.roleId, label: role.name })),
     [roles],
   );
 
-  function resetAiOneClickState() {
+  function resetAgentRunState() {
     setAiRoleCandidates([]);
-    setAiOneClickThreadId("");
-    setAiOneClickWaitingForRoles(false);
-    setAiOneClickRunning(false);
+    setAgentRunThreadId("");
+    setAgentRunWaitingForRoles(false);
+    setAgentRunRunning(false);
   }
 
   useEffect(() => {
-    requestJson<{ voices: ApiVoiceResource[] }>("/voice-resources")
+    requestJson<{ voices: ApiVoiceResource[] }>("/voice-profiles")
       .then((data) => {
         const loaded = data.voices.map(fromApiVoice);
         if (loaded.length > 0) {
@@ -811,13 +921,42 @@ function App() {
     requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
       .catch(() => undefined);
-  }, []);
+  }, [apiToken]);
+
+  useEffect(() => {
+    if (workflowState.mode !== "automatic" || workflowState.status !== "running") return;
+    if (
+      workflowState.activeAgent === "role_analyzer" &&
+      agentRunWaitingForRoles &&
+      !agentRunRunning &&
+      !automaticRoleMatchingAttemptedRef.current
+    ) {
+      automaticRoleMatchingAttemptedRef.current = true;
+      void runAiRoleMatching();
+      return;
+    }
+    if (
+      workflowState.activeAgent === "dubbing_director" &&
+      confirmed &&
+      !automaticDubbingStartedRef.current
+    ) {
+      automaticDubbingStartedRef.current = true;
+      void generateChapterDubbing();
+    }
+  }, [
+    agentRunRunning,
+    agentRunWaitingForRoles,
+    confirmed,
+    workflowState.activeAgent,
+    workflowState.mode,
+    workflowState.status,
+  ]);
 
   async function importNovelText(text: string) {
     fullNovelTextRef.current = text;
     setNovelPreview(makeNovelPreview(text));
     try {
-      const data = await requestJson<{ chapters: ApiChapter[] }>("/novels/parse", {
+      const data = await requestJson<{ chapters: ApiChapter[] }>("/books/parse", {
         method: "POST",
         body: JSON.stringify({ text }),
       });
@@ -837,7 +976,7 @@ function App() {
     setChapterBackendSynced(false);
     setUtterancesByParagraph({});
     setGeneratingUtteranceIds({});
-    resetAiOneClickState();
+    resetAgentRunState();
     setApiStatus(status);
   }
 
@@ -859,41 +998,46 @@ function App() {
     setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
-    resetAiOneClickState();
+    resetAgentRunState();
     setUploadProgress(62);
-    setApiStatus("小说已上传，仅展示开头预览；点击“AI小说格式解析”生成章节目录");
+    setApiStatus("小说已上传，仅展示开头预览；点击“小说解析 Agent”生成章节目录");
     setUploadProgress(100);
   }
 
   async function runAiChapterSplit() {
     setChapterSplitProgress(12);
-    setApiStatus("AI小说格式解析智能体正在检查可复用脚本");
+    setApiStatus("小说解析 Agent 正在检查可复用规则");
     try {
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
-        ? await requestJson<ApiChapterSplitResponse>("/novels/ai-chapter-split-file", {
-            method: "POST",
-            body: JSON.stringify({
-              filename: uploadedFile.filename,
-              content_base64: uploadedFile.contentBase64,
-            }),
-          })
-        : await requestJson<ApiChapterSplitResponse>("/novels/ai-chapter-split", {
+        ? await requestJson<ApiChapterSplitResponse>("/books/agent-chapter-split-file", (() => {
+            const form = new FormData();
+            form.append(
+              "file",
+              new File(
+                [Uint8Array.from(atob(uploadedFile.contentBase64), (character) => character.charCodeAt(0))],
+                uploadedFile.filename,
+                { type: "application/epub+zip" },
+              ),
+            );
+            return { method: "POST", body: form };
+          })())
+        : await requestJson<ApiChapterSplitResponse>("/books/agent-chapter-split", {
             method: "POST",
             body: JSON.stringify({ text: fullNovelTextRef.current }),
           });
       setChapterSplitProgress(84);
       const parsed = data.chapters.map(fromApiChapter);
-      const scriptName = data.agent.script_path?.split(/[\\/]/).pop() ?? "未记录脚本";
+      const ruleName = data.agent.rule_path?.split(/[\\/]/).pop() ?? "未记录规则";
       const agentStatus =
-        data.agent.status === "script_reused"
-          ? `AI小说格式解析完成：已复用 ${scriptName}`
-          : `AI小说格式解析完成：已生成并保存 ${scriptName}`;
+        data.agent.status === "rule_reused"
+          ? `小说解析 Agent 完成：已复用 ${ruleName}`
+          : `小说解析 Agent 完成：已生成并保存 ${ruleName}`;
       applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
     } catch (error) {
       setChapterSplitProgress(76);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
-      applyChapters(parsed, `AI小说格式解析失败，已使用本地章节索引兜底：${String(error)}`);
+      applyChapters(parsed, `小说解析 Agent 失败，已使用本地章节索引兜底：${String(error)}`);
     } finally {
       setChapterSplitProgress(100);
     }
@@ -911,7 +1055,7 @@ function App() {
     setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
-    resetAiOneClickState();
+    resetAgentRunState();
     setApiStatus(`已加载章节：${chapter.title}`);
   }
 
@@ -957,7 +1101,7 @@ function App() {
       setChapterBackendSynced(false);
       setUtterancesByParagraph({});
       setGeneratingUtteranceIds({});
-      resetAiOneClickState();
+      resetAgentRunState();
     }
   }
 
@@ -980,7 +1124,7 @@ function App() {
       return remainingGeneratingIds;
     });
     setChapterBackendSynced(false);
-    setApiStatus(`已删除段落 ${paragraphId}；其余 AI角色匹配结果已保留`);
+    setApiStatus(`已删除段落 ${paragraphId}；其余配音编排 Agent 结果已保留`);
   }
 
   async function ensureChapterStatementsReady(): Promise<Record<string, UtteranceDraft[]>> {
@@ -998,7 +1142,7 @@ function App() {
     );
     const nextUtterances = apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles);
     setUtterancesByParagraph(nextUtterances);
-    setApiStatus("当前章节已准备为可编辑语句草稿；AI角色匹配将自动完成语句划分和角色选择");
+    setApiStatus("当前章节已准备为可编辑台词草稿；配音编排 Agent 将自动完成台词划分和角色选择");
     return nextUtterances;
   }
 
@@ -1014,7 +1158,7 @@ function App() {
         ]),
       );
       setUtterancesByParagraph(apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles));
-      setApiStatus("段落已确认，已默认按整段落生成语句文本；AI角色匹配将自动完成语句划分和角色选择");
+      setApiStatus("段落已确认，已默认按整段落生成台词文本；配音编排 Agent 将自动完成台词划分和角色选择");
     } catch (error) {
       setConfirmed(false);
       setChapterBackendSynced(false);
@@ -1049,7 +1193,7 @@ function App() {
     const updatedRole =
       updates.voiceResourceId !== undefined ? applyVoiceToRole(merged, updates.voiceResourceId) : merged;
     setRoles((current) => current.map((role) => (role.roleId === roleId ? updatedRole : role)));
-    requestJson(`/roles/${roleId}`, {
+    requestJson(`/characters/${roleId}`, {
       method: "PATCH",
       body: JSON.stringify(toApiRole(updatedRole)),
     }).catch((error) => setApiStatus(`角色同步失败：${String(error)}`));
@@ -1066,7 +1210,7 @@ function App() {
     };
     setRoles((current) => [...current, role]);
     try {
-      const data = await requestJson<{ roles: ApiRoleCard[] }>("/roles", {
+      const data = await requestJson<{ roles: ApiRoleCard[] }>("/characters", {
         method: "POST",
         body: JSON.stringify(toApiRole(role)),
       });
@@ -1081,7 +1225,7 @@ function App() {
     const payload = { roles: roles.map(toApiRole), utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph) };
     try {
       const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
-        `/roles/${roleId}`,
+        `/characters/${roleId}`,
         { method: "DELETE", body: JSON.stringify(payload) },
       );
       setRoles(data.roles.map(fromApiRole));
@@ -1095,7 +1239,7 @@ function App() {
       }
       try {
         const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
-          `/roles/${roleId}`,
+          `/characters/${roleId}`,
           { method: "DELETE", body: JSON.stringify({ ...payload, action: "unbind" }) },
         );
         const nextRoles = data.roles.map(fromApiRole);
@@ -1108,114 +1252,152 @@ function App() {
     }
   }
 
-  function playVoicePreview(voice?: VoiceResource) {
+  async function playVoicePreview(voice?: VoiceResource) {
     if (!voice) {
       setApiStatus("播放音色失败：该角色尚未选择音色");
       return;
     }
-    const audio = new Audio(voiceAudioSrc(voice));
-    audio
-      .play()
-      .then(() => setApiStatus(`正在播放音色：${voice.name}`))
-      .catch((error) => setApiStatus(`播放音色失败：${String(error)}`));
+    try {
+      const response = await fetch(mediaRequestUrl(voiceAudioSrc(voice)), {
+        headers: authorizationHeaders(apiToken),
+      });
+      if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const audio = new Audio(objectUrl);
+      audio.addEventListener("ended", () => URL.revokeObjectURL(objectUrl), { once: true });
+      await audio.play();
+      setApiStatus(`正在播放音色：${voice.name}`);
+    } catch (error) {
+      setApiStatus(`播放音色失败：${String(error)}`);
+    }
   }
 
   async function runAiRoleAnalysis() {
     if (!activeChapter || visibleParagraphs.length === 0) return;
-    setAiOneClickRunning(true);
+    setAgentRunRunning(true);
+    automaticDubbingStartedRef.current = false;
+    automaticRoleMatchingAttemptedRef.current = false;
+    setWorkflowState((current) => transitionWorkflow(current, { type: "START" }));
     setRoleMatchingProgress(8);
-    setApiStatus("AI角色分析正在同步当前章节、创建角色并匹配音色");
+    setApiStatus("角色分析 Agent 正在同步当前章节、创建角色并匹配音色");
     try {
       await syncCurrentChapterParagraphs(false);
-      const data = await requestJson<AiOneClickStartResponse>(
-        `/chapters/${activeChapter.chapterId}/ai-one-click-analysis/start`,
+      const data = await requestJson<RoleAnalysisRunResponse>(
+        `/chapters/${activeChapter.chapterId}/agent-runs`,
         { method: "POST", body: JSON.stringify({}) },
       );
       if (data.voices?.length) setVoices(data.voices.map(fromApiVoice));
       if (data.roles?.length) setRoles(data.roles.map(fromApiRole));
-      setAiOneClickThreadId(data.thread_id);
+      setAgentRunThreadId(data.thread_id);
       setAiRoleCandidates(data.role_candidates);
-      setAiOneClickWaitingForRoles(true);
+      setAgentRunWaitingForRoles(true);
+      setWorkflowState((current) => transitionWorkflow(current, { type: "AGENT_COMPLETED" }));
       setRoleMatchingProgress(35);
       const autoSummary = data.auto_role_report
         ? `自动新增 ${data.auto_role_report.added_count} 个角色，生成 ${data.auto_role_report.generated_voice_count} 个音色。`
         : "";
-      setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“AI角色匹配”。`);
+      setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“配音编排 Agent”。`);
     } catch (error) {
-      resetAiOneClickState();
+      resetAgentRunState();
       setRoleMatchingProgress(100);
-      setApiStatus(`AI角色分析失败：${String(error)}`);
+      setApiStatus(`角色分析 Agent 失败：${String(error)}`);
     } finally {
-      setAiOneClickRunning(false);
+      setAgentRunRunning(false);
     }
   }
 
   async function runAiRoleMatching() {
-    if (!aiOneClickThreadId) return;
-    setAiOneClickRunning(true);
-    setAiOneClickWaitingForRoles(false);
+    if (!agentRunThreadId) return;
+    setAgentRunRunning(true);
+    setWorkflowState((current) => transitionWorkflow(current, { type: "CONTINUE" }));
+    setAgentRunWaitingForRoles(false);
     setRoleMatchingProgress(45);
-    setApiStatus("AI角色匹配正在划分语句并为未绑定语句选择角色");
+    setApiStatus("配音编排 Agent 正在划分台词并为未绑定台词选择角色");
     try {
       const readyUtterances = await ensureChapterStatementsReady();
-      const response = await fetch(
-        runtimeConfig.apiUrl(`/ai-one-click-analysis/${aiOneClickThreadId}/roles-completed-stream`),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            roles: roles.map(toApiRole),
-            utterances_by_paragraph: utteranceGroupsToApi(readyUtterances),
-          }),
-        },
-      );
-      if (!response.ok) throw new Error(await response.text());
-      if (!response.body) throw new Error("AI角色匹配没有返回流式响应");
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done } = await reader.read();
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          handleAiOneClickStreamEvent(JSON.parse(line));
+      const requestBody = JSON.stringify({
+        roles: roles.map(toApiRole),
+        utterances_by_paragraph: utteranceGroupsToApi(readyUtterances),
+      });
+      let lastEventId = 0;
+      let terminalReceived = false;
+      for (let attempt = 0; attempt < 3 && !terminalReceived; attempt += 1) {
+        try {
+          const response = await fetch(
+            runtimeConfig.apiUrl(`/agent-runs/${agentRunThreadId}/events`),
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(lastEventId ? { "Last-Event-ID": String(lastEventId) } : {}),
+                ...authorizationHeaders(apiToken),
+              },
+              body: requestBody,
+            },
+          );
+          if (!response.ok) throw new Error(await response.text());
+          if (!response.body) throw new Error("配音编排 Agent 没有返回进度流");
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            const parsed = parseAgentSseBuffer(buffer);
+            buffer = parsed.remainder;
+            for (const event of parsed.events) {
+              lastEventId = Math.max(lastEventId, event.id);
+              handleAgentRunStreamEvent(event);
+              terminalReceived ||= event.event === "completed" || event.event === "failed";
+            }
+            if (done) break;
+          }
+          if (!terminalReceived && attempt < 2) {
+            await new Promise((resolve) => window.setTimeout(resolve, 250 * 2 ** attempt));
+          }
+        } catch (error) {
+          if (attempt >= 2) throw error;
+          await new Promise((resolve) => window.setTimeout(resolve, 250 * 2 ** attempt));
         }
-        if (done) break;
       }
-      if (buffer.trim()) handleAiOneClickStreamEvent(JSON.parse(buffer));
+      if (!terminalReceived) throw new Error("配音编排 Agent 进度流提前结束");
     } catch (error) {
-      setAiOneClickWaitingForRoles(true);
+      setAgentRunWaitingForRoles(true);
       setRoleMatchingProgress(100);
-      setApiStatus(`AI角色匹配失败：${String(error)}`);
+      setApiStatus(`配音编排 Agent 失败：${String(error)}`);
     } finally {
-      setAiOneClickRunning(false);
+      setAgentRunRunning(false);
     }
   }
 
-  function handleAiOneClickStreamEvent(event: { event: string; data: any }) {
+  function handleAgentRunStreamEvent(event: { event: string; data: any }) {
     if (event.event === "role_selected") {
       applyAiRoleSelectionEvent(event.data as AiRoleSelectionEvent);
       setRoleMatchingProgress((current) => Math.min(95, Math.max(current + 5, 55)));
       return;
     }
     if (event.event === "completed") {
-      const data = event.data as AiOneClickResumeResponse;
+      const data = event.data as DubbingArrangementResponse;
       setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, roles));
-      setConfirmed(true);
+      const requiresHumanReview = data.status === "needs_human_review" ||
+        data.role_selection_events.some((item) => item.needs_human_review);
+      setConfirmed(!requiresHumanReview);
       setChapterBackendSynced(true);
-      setAiOneClickWaitingForRoles(false);
+      setAgentRunWaitingForRoles(false);
       setRoleMatchingProgress(100);
       setApiStatus(data.message);
+      setWorkflowState((current) =>
+        transitionWorkflow(current, {
+          type: data.status === "needs_human_review" ? "PAUSE" : "AGENT_COMPLETED",
+        }),
+      );
       return;
     }
     if (event.event === "failed") {
       const message = event.data?.failure?.message ?? event.data?.message ?? "模型输出未通过校验";
-      setAiOneClickWaitingForRoles(true);
+      setAgentRunWaitingForRoles(true);
       setRoleMatchingProgress(100);
-      setApiStatus(`AI角色匹配失败：${message}`);
+      setApiStatus(`配音编排 Agent 失败：${message}`);
     }
   }
 
@@ -1230,6 +1412,7 @@ function App() {
         roleId: role?.roleId ?? event.speaker_role_id ?? "",
         speakerName: event.speaker_name || role?.name || "",
         audioStatus: event.needs_human_review ? "AI已选择角色，请人工确认" : "AI已选择角色",
+        needsHumanReview: event.needs_human_review,
       };
       const found = list.some((item) => item.utteranceId === event.utterance_id);
       return {
@@ -1255,6 +1438,7 @@ function App() {
         if (field === "roleId") {
           const role = roles.find((item) => item.roleId === value);
           updated.speakerName = role?.name ?? "";
+          updated.needsHumanReview = false;
         }
         return updated;
       }),
@@ -1311,7 +1495,7 @@ function App() {
         voice_job: { status: string; output_path?: string; provider?: string; response_format?: string };
         warning?: string;
       }>(
-        `/utterances/${utterance.utteranceId}/speech`,
+        `/dubbing-segments/${utterance.utteranceId}/dubbing-jobs`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -1352,11 +1536,18 @@ function App() {
   }
 
   async function generateChapterDubbing() {
+    if (dubbingInFlightRef.current) return;
     if (!activeChapter) {
-      setApiStatus("一键生成配音失败：请先选择章节");
+      setApiStatus("批量生成配音失败：请先选择章节");
       return;
     }
+    if (!confirmed || hasPendingHumanReview) {
+      setApiStatus("批量生成配音失败：请先确认所有配音片段的台词与角色");
+      return;
+    }
+    dubbingInFlightRef.current = true;
     setVoiceGenerationProgress(10);
+    setWorkflowState((current) => transitionWorkflow(current, { type: "CONTINUE" }));
     setApiStatus("正在按角色/音色分组批量生成当前章节配音");
     try {
       const data = await requestJson<{
@@ -1367,7 +1558,7 @@ function App() {
         groups: { voice_resource_id: string; count: number }[];
         errors: { statement_id: string; message: string }[];
         utterances_by_paragraph: Record<string, ApiUtterance[]>;
-      }>(`/chapters/${activeChapter.chapterId}/speech/batch`, {
+      }>(`/dubbing-jobs/${activeChapter.chapterId}`, {
         method: "POST",
         body: JSON.stringify({
           roles: roles.map(toApiRole),
@@ -1378,28 +1569,30 @@ function App() {
       setVoiceGenerationProgress(100);
       const groupSummary = data.groups.map((group) => `${group.voice_resource_id}×${group.count}`).join("，");
       const errorSummary = data.failed_count ? `；失败 ${data.failed_count} 条：${data.errors[0]?.message ?? "请检查详情"}` : "";
-      setApiStatus(`一键生成配音完成：成功 ${data.success_count} 条，跳过 ${data.skipped_count} 条；分组 ${groupSummary || "无待生成"}${errorSummary}`);
+      setApiStatus(`批量生成配音完成：成功 ${data.success_count} 条，跳过 ${data.skipped_count} 条；分组 ${groupSummary || "无待生成"}${errorSummary}`);
+      setWorkflowState((current) => transitionWorkflow(current, { type: "AGENT_COMPLETED" }));
     } catch (error) {
       setVoiceGenerationProgress(100);
-      setApiStatus(`一键生成配音失败：${String(error)}`);
+      setApiStatus(`批量生成配音失败：${String(error)}`);
+    } finally {
+      dubbingInFlightRef.current = false;
     }
   }
 
   async function exportChapterAudio() {
     if (!activeChapter) {
-      setApiStatus("一键导出失败：请先选择章节");
+      setApiStatus("导出制作包失败：请先选择章节");
       return;
     }
     setApiStatus("正在导出当前章节逐条音频和 manifest");
     try {
       const data = await requestJson<{
-        export_dir: string;
-        manifest_path: string;
+        status: string;
         item_count: number;
         missing_count: number;
-        full_audio_path: string | null;
+        download_url: string;
         message: string;
-      }>(`/chapters/${activeChapter.chapterId}/audio/export`, {
+      }>(`/exports/${activeChapter.chapterId}`, {
         method: "POST",
         body: JSON.stringify({
           chapter_title: activeChapter.title,
@@ -1409,16 +1602,25 @@ function App() {
           speed: 1.0,
         }),
       });
-      const fullAudio = data.full_audio_path ? `；完整音频：${data.full_audio_path}` : "";
-      setApiStatus(`一键导出完成：${data.item_count} 条，manifest：${data.manifest_path}${fullAudio}；${data.message}`);
+      const response = await fetch(mediaRequestUrl(data.download_url), {
+        headers: authorizationHeaders(apiToken),
+      });
+      if (!response.ok) throw new Error(`制作包下载失败：${response.status}`);
+      const objectUrl = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `${activeChapter.title || activeChapter.chapterId}-制作包.zip`;
+      anchor.click();
+      URL.revokeObjectURL(objectUrl);
+      setApiStatus(`制作包导出完成：${data.item_count} 条；${data.message}`);
     } catch (error) {
-      setApiStatus(`一键导出失败：${String(error)}`);
+      setApiStatus(`导出制作包失败：${String(error)}`);
     }
   }
 
   async function saveVoiceResource(payload: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & { suitableRoleTypes?: string[] | string }): Promise<boolean> {
     try {
-      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/voice-resources", {
+      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/voice-profiles", {
         method: "POST",
         body: JSON.stringify(toApiVoice(payload)),
       });
@@ -1433,7 +1635,7 @@ function App() {
 
   async function updateVoiceResource(voice: VoiceResource) {
     try {
-      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>(`/voice-resources/${voice.voiceId}`, {
+      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>(`/voice-profiles/${voice.voiceId}`, {
         method: "PATCH",
         body: JSON.stringify(toApiVoice(voice)),
       });
@@ -1448,16 +1650,11 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     setApiStatus(`正在上传参考音频文件：${file.name}`);
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result ?? ""));
-      reader.onerror = () => reject(reader.error ?? new Error("读取参考音频失败"));
-      reader.readAsDataURL(file);
-    });
-    const dataBase64 = dataUrl.split(",")[1] ?? "";
-    const data = await requestJson<{ reference_audio_path: string }>("/voice-resources/reference-audio", {
+    const form = new FormData();
+    form.append("file", file);
+    const data = await requestJson<{ reference_audio_path: string }>("/voice-profiles/reference-audio", {
       method: "POST",
-      body: JSON.stringify({ filename: file.name, data_base64: dataBase64 }),
+      body: form,
     });
     if (newVoiceAudioPreviewUrl) URL.revokeObjectURL(newVoiceAudioPreviewUrl);
     setNewVoiceAudioPreviewUrl(URL.createObjectURL(file));
@@ -1480,7 +1677,7 @@ function App() {
         generation_note: string;
         model_requirement?: string | null;
       }>(
-        "/voice-resources/generate",
+        "/voice-profiles/generate",
         {
           method: "POST",
           body: JSON.stringify({
@@ -1528,7 +1725,7 @@ function App() {
     try {
       let remaining = voices;
       for (const voice of selected) {
-        const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/voice-resources/${voice.voiceId}`, {
+        const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/voice-profiles/${voice.voiceId}`, {
           method: "DELETE",
         });
         remaining = data.voices.map(fromApiVoice);
@@ -1657,7 +1854,7 @@ function App() {
                     上传小说
                   </button>
                   <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
-                    AI小说格式解析
+                    小说解析 Agent
                   </button>
                 </div>
                 <input
@@ -1670,7 +1867,7 @@ function App() {
                 />
                 <ProgressBar label="上传小说进度" value={uploadProgress} />
                 <ProgressBar label="小说格式解析进度" value={chapterSplitProgress} />
-                <ProgressBar label="AI角色匹配进度" value={roleMatchingProgress} />
+                <ProgressBar label="配音编排 Agent 进度" value={roleMatchingProgress} />
                 <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
                 <div className="novel-preview" aria-label="小说开头预览">
                   {novelPreview}
@@ -1771,15 +1968,15 @@ function App() {
                           <strong>音色匹配</strong>
                           {role.voiceMatchReason ?? "用户可手动调整"}
                         </p>
-                        {voice && <audio controls src={voiceAudioSrc(voice)} />}
+                        {voice && <AuthorizedAudio source={voiceAudioSrc(voice)} accessToken={apiToken} />}
                       </article>
                     );
                   })}
                 </div>
                 {aiRoleCandidates.length > 0 && (
-                  <div className="role-analysis-panel" aria-label="AI角色候选建议">
-                    <div className="section-title">AI角色候选建议</div>
-                    <small>请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“AI角色匹配”。模型建议仅作参考。</small>
+                  <div className="role-analysis-panel" aria-label="角色分析建议">
+                    <div className="section-title">角色分析建议</div>
+                    <small>请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“配音编排 Agent”。模型建议仅作参考。</small>
                     {aiRoleCandidates.map((candidate, index) => (
                       <article className="role-candidate-card" key={`${candidate.name ?? "unknown"}-${index}`}>
                         <strong>{candidate.name ?? "未知角色"}</strong>
@@ -1803,13 +2000,13 @@ function App() {
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>尚未划分章节</h2>
-              <p>上传小说后点击左侧“AI小说格式解析”，当前章节区暂不渲染具体正文。</p>
+              <p>上传小说后点击左侧“小说解析 Agent”，当前章节区暂不渲染具体正文。</p>
             </div>
           ) : !activeChapter ? (
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>请选择小说章节</h2>
-              <p>选择某个章节后，左侧显示完整正文，右侧显示 AI角色匹配后的台词。</p>
+              <p>选择某个章节后，左侧显示完整正文，右侧显示配音编排 Agent 生成后的台词。</p>
             </div>
           ) : (
             <>
@@ -1823,35 +2020,39 @@ function App() {
                     className="tool-button purple"
                     type="button"
                     onClick={() => void runAiRoleAnalysis()}
-                    disabled={aiOneClickRunning || visibleParagraphs.length === 0}
+                    disabled={agentRunRunning || visibleParagraphs.length === 0}
                   >
-                    AI角色分析
+                    角色分析 Agent
                   </button>
                   <button
                     className="tool-button purple"
                     type="button"
                     onClick={() => void runAiRoleMatching()}
-                    disabled={aiOneClickRunning || !aiOneClickWaitingForRoles || !aiOneClickThreadId}
+                    disabled={agentRunRunning || !agentRunWaitingForRoles || !agentRunThreadId}
                   >
-                    AI角色匹配
+                    配音编排 Agent
                   </button>
                   <button
                     className="tool-button sky"
                     type="button"
                     onClick={() => void generateChapterDubbing()}
-                    disabled={!confirmed}
+                    disabled={!confirmed || hasPendingHumanReview}
                   >
-                    一键生成配音
+                    批量生成配音
                   </button>
                   <button
                     className="tool-button amber"
                     type="button"
                     onClick={() => void exportChapterAudio()}
-                    disabled={!confirmed}
+                    disabled={!confirmed || hasPendingHumanReview}
                   >
-                    一键导出
+                    导出制作包
                   </button>
-                  <span>{confirmed ? "台词已生成，可人工检查、批量配音或导出" : "按流程先执行 AI角色分析，再执行 AI角色匹配"}</span>
+                  <span>
+                    {confirmed && !hasPendingHumanReview
+                      ? "台词已确认，可以批量配音或导出"
+                      : "请完成角色分析、配音编排并确认所有配音片段"}
+                  </span>
                 </div>
               </header>
 
@@ -1872,7 +2073,7 @@ function App() {
                   </div>
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
-                      点击“AI角色匹配”后，这里只显示拆分后的语句、匹配角色和音频生成控件。
+                      点击“配音编排 Agent”后，这里只显示拆分后的语句、匹配角色和音频生成控件。
                     </div>
 	                  ) : (
 	                    <div className="statement-list">
@@ -1910,6 +2111,24 @@ function App() {
                               ))}
                             </select>
                           </label>
+                          <label className="checkline utterance-check">
+                            <input
+                              type="checkbox"
+                              checked={!utterance.needsHumanReview}
+                              onChange={(event) => {
+                                updateUtterance(
+                                  utterance.paragraphId,
+                                  utterance.utteranceId,
+                                  "needsHumanReview",
+                                  !event.target.checked,
+                                );
+                                if (event.target.checked && utterance.roleId && utterance.text.trim()) {
+                                  setConfirmed(true);
+                                }
+                              }}
+                            />
+                            已确认台词与角色
+                          </label>
                           {(() => {
                             const isGeneratingThisUtterance = Boolean(generatingUtteranceIds[utterance.utteranceId]);
                             return (
@@ -1924,7 +2143,9 @@ function App() {
                             );
                           })()}
                           <output>{utterance.audioStatus}</output>
-                          {utterance.audioUrl && <audio controls src={utterance.audioUrl} />}
+                          {utterance.audioUrl && (
+                            <AuthorizedAudio source={utterance.audioUrl} accessToken={apiToken} />
+                          )}
                         </article>
                       ))}
 	                    </div>
@@ -2043,7 +2264,7 @@ function App() {
                     }
                   />
                 </label>
-                <audio controls src={voiceAudioSrc(voice)} />
+                <AuthorizedAudio source={voiceAudioSrc(voice)} accessToken={apiToken} />
                 <button className="tool-button teal" type="button" onClick={() => void updateVoiceResource(voice)}>
                   保存音色
                 </button>
@@ -2095,7 +2316,9 @@ function App() {
               添加参考音频文件
             </button>
             {newVoice.referenceAudioPath && <small>已选择：{newVoice.referenceAudioPath}</small>}
-            {newVoiceAudioPreviewUrl && <audio controls src={newVoiceAudioPreviewUrl} />}
+            {newVoiceAudioPreviewUrl && (
+              <AuthorizedAudio source={newVoiceAudioPreviewUrl} accessToken={apiToken} />
+            )}
             <button className="tool-button teal" type="button" onClick={() => void saveVoiceResource(newVoice)}>
               保存音色
             </button>
@@ -2139,7 +2362,7 @@ function App() {
             {generatedVoicePreviewUrl && (
               <div className="generated-preview">
                 <small>试听生成音色：{generatedVoicePreview?.name}</small>
-                <audio controls src={generatedVoicePreviewUrl} />
+                <AuthorizedAudio source={generatedVoicePreviewUrl} accessToken={apiToken} />
               </div>
             )}
             <button className="tool-button teal" type="button" onClick={() => void saveGeneratedVoiceResource()}>
@@ -2175,16 +2398,9 @@ function App() {
               }
             />
           </label>
-          <label>
-            api_key
-            <input
-              type="password"
-              value={modelConfig.llm.api_key}
-              onChange={(event) =>
-                setModelConfig((current) => ({ ...current, llm: { ...current.llm, api_key: event.target.value } }))
-              }
-            />
-          </label>
+          <p className="config-secret-status">
+            后端密钥状态：{modelConfig.llm.has_api_key ? "已配置" : "未配置"}
+          </p>
           <div className="toolbar-row">
             <button className="tool-button teal" type="button" onClick={() => void saveRemoteModelConfig()}>
               保存模型配置
@@ -2239,7 +2455,7 @@ function App() {
         </section>
 
         <section className="panel">
-          <div className="section-title">AI小说格式解析智能体</div>
+          <div className="section-title">小说解析 Agent</div>
           <label>
             Base URL
             <input
@@ -2264,19 +2480,9 @@ function App() {
               }
             />
           </label>
-          <label>
-            api_key
-            <input
-              type="password"
-              value={modelConfig.chapter_agent.api_key}
-              onChange={(event) =>
-                setModelConfig((current) => ({
-                  ...current,
-                  chapter_agent: { ...current.chapter_agent, api_key: event.target.value },
-                }))
-              }
-            />
-          </label>
+          <p className="config-secret-status">
+            后端密钥状态：{modelConfig.chapter_agent.has_api_key ? "已配置" : "未配置"}
+          </p>
           <div className="toolbar-row">
             <button className="tool-button teal" type="button" onClick={() => void saveChapterAgentModelConfig()}>
               保存智能体配置
@@ -2296,7 +2502,23 @@ function App() {
         <h1>
           {APP_BRAND} <span>v{APP_VERSION}</span>
         </h1>
+        <p className="product-subtitle">基于 Agent 的多人有声书自动配音工作台</p>
         <div className="topbar-actions">
+          <label className="access-token-field">
+            <span>访问令牌</span>
+            <input
+              aria-label="后端访问令牌"
+              autoComplete="off"
+              onChange={(event) => {
+                const value = event.target.value;
+                setApiToken(value);
+                storeAccessToken(value);
+              }}
+              placeholder="输入后端访问令牌"
+              type="password"
+              value={apiToken}
+            />
+          </label>
           <div className="mode-selector" role="group" aria-label="配音模式">
             {[
               ["automatic", "自动配音"],

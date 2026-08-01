@@ -139,7 +139,7 @@ class VoiceResourceCollection:
         try:
             return self._resources[voice_id]
         except KeyError as exc:
-            raise KeyError(f"Unknown voice_id: {voice_id}") from exc
+            raise KeyError(f"音色档案不存在：{voice_id}") from exc
 
     def upsert(self, resource: VoiceResource | dict[str, Any]) -> VoiceResource:
         item = _resource_from_mapping(resource)

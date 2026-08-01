@@ -1,1 +1,1 @@
-"""Application package for NovelVoice-Agent."""
+"""书弈 Agent 应用程序包。"""

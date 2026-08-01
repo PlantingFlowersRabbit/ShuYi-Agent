@@ -4,10 +4,10 @@ services:
       context: .
       target: cpu-runtime
     environment:
-      NOVELVOICE_DATA_DIR: /data
-      NOVELVOICE_DEVICE: cpu
-      NOVELVOICE_MODEL_AUTO_DOWNLOAD: "${NOVELVOICE_MODEL_AUTO_DOWNLOAD:-1}"
-      NOVELVOICE_MODEL_DIR: /models
+      SHUYI_DATA_DIR: /data
+      SHUYI_DEVICE: cpu
+      SHUYI_MODEL_AUTO_DOWNLOAD: "${SHUYI_MODEL_AUTO_DOWNLOAD:-1}"
+      SHUYI_MODEL_DIR: /models
       QWEN3_TTS_DEVICE: cpu
       QWEN3_TTS_MODEL_PATH: /models/Qwen3-TTS-12Hz-1.7B-Base
       QWEN3_TTS_VOICE_DESIGN_MODEL_PATH: /models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
@@ -17,10 +17,11 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - novelvoice-data:/data
-      - novelvoice-models:/models
+      - shuyi-data:/data
+      - shuyi-models:/models
+    stop_grace_period: 40s
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5)"]
+      test: ["CMD", "python", "/app/scripts/container/healthcheck.py"]
       interval: 30s
       timeout: 10s
       retries: 10
@@ -28,5 +29,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  novelvoice-data:
-  novelvoice-models:
+  shuyi-data:
+  shuyi-models:

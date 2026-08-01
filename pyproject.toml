@@ -18,6 +18,7 @@ backend = [
   "langchain-openai>=0.3",
   "langgraph>=0.2",
   "python-dotenv>=1.0",
+  "regex>=2024.11",
   "uvicorn[standard]>=0.30",
 ]
 tts = [

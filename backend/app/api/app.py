@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
-import queue
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -20,19 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
+from backend.app.agents.registry import AgentRegistry
+from backend.app.application.runtime_state import restore_runtime_state, save_runtime_state
 from backend.app.domain.ai_chapter_agent import AiChapterSplitAgent, ChapterSplitSkill
-from backend.app.domain.ai_one_click_workflow import (
-    AiOneClickWorkflow,
-    AiSegmentationService,
-    LangChainRoleAnalysisSkill,
-    RoleAnalysisCandidate,
-    create_whole_paragraph_utterance_drafts,
-)
 from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangChainSegmentationSkill
 from backend.app.domain.audio import (
     DEFAULT_GENERATED_VOICE_TEXT,
@@ -46,6 +39,13 @@ from backend.app.domain.audio import (
     synthesize_local_qwen3_batch,
     synthesize_voice_design_qwen3,
 )
+from backend.app.domain.dubbing_workflow import (
+    AiSegmentationService,
+    DubbingWorkflow,
+    LangChainRoleAnalysisSkill,
+    RoleAnalysisCandidate,
+    create_whole_paragraph_utterance_drafts,
+)
 from backend.app.domain.llm import MissingProviderCredential
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
 from backend.app.domain.novel_files import NovelFileError, extract_novel_file
@@ -57,20 +57,32 @@ from backend.app.domain.voices import (
     default_voice_resources,
     generated_voice_content,
 )
+from backend.app.repositories.sqlite import SQLiteRepository
 
 ROOT = Path(__file__).resolve().parents[3]
 LOCAL_DOTENV = dotenv_values(ROOT / ".env")
-OUTPUT_AUDIO_DIR = ROOT / "outputs/audio"
-OUTPUT_VOICE_RESOURCE_DIR = ROOT / "outputs/voice-resources"
-OUTPUT_EXPORT_DIR = ROOT / "outputs/exports"
-CHAPTER_PARSER_SCRIPT_DIR = ROOT / "scripts/chapter_parsers"
-REAL_VOICE_ROOT = Path(os.environ.get("NOVELVOICE_REAL_VOICE_ROOT", "/Users/gaojing/Downloads/真实测试样本/音频"))
+
+
+def _service_env(name: str, default: str = "") -> str:
+    """读取书弈 Agent 的统一运行时环境变量。"""
+    return str(os.environ.get(name) or default)
+
+
+DEFAULT_DATA_ROOT = Path(_service_env("SHUYI_DATA_DIR", str(ROOT / "data")))
+OUTPUT_AUDIO_DIR = DEFAULT_DATA_ROOT / "outputs/audio"
+OUTPUT_VOICE_RESOURCE_DIR = DEFAULT_DATA_ROOT / "blobs/voice-profiles"
+OUTPUT_EXPORT_DIR = DEFAULT_DATA_ROOT / "outputs/exports"
+CHAPTER_RULE_DIR = DEFAULT_DATA_ROOT / "cache/chapter-rules"
+BUNDLED_CHAPTER_RULE_DIR = ROOT / "scripts/chapter_rules"
+REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/samples/voices")))
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
-DEFAULT_BASE_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-Base"
-DEFAULT_VOICE_DESIGN_MODEL_PATH = "/Users/gaojing/Documents/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+DEFAULT_BASE_MODEL_PATH = str(ROOT / "models/Qwen3-TTS-12Hz-1.7B-Base")
+DEFAULT_VOICE_DESIGN_MODEL_PATH = str(ROOT / "models/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
 SERVICE_VERSION = "0.4.0"
+MAX_NOVEL_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024
 
 
 def _chapter_to_dict(chapter: Chapter) -> dict[str, Any]:
@@ -89,7 +101,47 @@ def _voice_to_dict(voice: VoiceResource) -> dict[str, Any]:
     return voice.to_dict()
 
 
+async def _read_limited_upload(file: UploadFile, *, max_bytes: int) -> bytes:
+    data = await file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail="上传文件超过大小限制")
+    return data
+
+
+def _public_voice_to_dict(voice: VoiceResource) -> dict[str, Any]:
+    payload = voice.to_dict()
+    audio_url = f"/api/v1/voice-profiles/{voice.voice_id}/audio"
+    payload["reference_audio_path"] = audio_url
+    payload["playable_audio_path"] = audio_url
+    return payload
+
+
+def _public_role_to_dict(role: RoleCard) -> dict[str, Any]:
+    payload = role.to_dict()
+    if role.voice_resource_id:
+        audio_url = f"/api/v1/voice-profiles/{role.voice_resource_id}/audio"
+        payload["reference_audio_path"] = audio_url
+        payload["playable_voice_path"] = audio_url
+    else:
+        payload["reference_audio_path"] = None
+        payload["playable_voice_path"] = None
+    return payload
+
+
 def _resolve_audio_path(path_text: str) -> Path:
+    download_prefix = "/api/v1/downloads/voice-profiles/"
+    if path_text.startswith(download_prefix):
+        target = (OUTPUT_VOICE_RESOURCE_DIR / path_text.removeprefix(download_prefix)).resolve()
+        if _is_inside(target, OUTPUT_VOICE_RESOURCE_DIR):
+            return target
+    voice_prefix = "/api/v1/voice-profiles/"
+    if path_text.startswith(voice_prefix) and path_text.endswith("/audio"):
+        voice_id = path_text.removeprefix(voice_prefix).removesuffix("/audio").strip("/")
+        matches = sorted(
+            OUTPUT_VOICE_RESOURCE_DIR.glob(f"{_safe_audio_filename(voice_id).rsplit('.', 1)[0]}.*")
+        )
+        if matches:
+            return matches[0]
     path = Path(path_text)
     return path if path.is_absolute() else ROOT / path
 
@@ -102,10 +154,19 @@ def _is_inside(path: Path, directory: Path) -> bool:
         return False
 
 
+def _is_allowed_audio_path(path: Path) -> bool:
+    allowed_roots = (
+        REAL_VOICE_ROOT,
+        OUTPUT_VOICE_RESOURCE_DIR.parent,
+        OUTPUT_AUDIO_DIR.parent,
+    )
+    return any(_is_inside(path, root) for root in allowed_roots)
+
+
 def _store_voice_resource_audio(path_text: str, *, voice_id: str) -> str:
     source = _resolve_audio_path(path_text)
-    if not source.exists():
-        raise HTTPException(status_code=400, detail=f"reference audio file does not exist: {path_text}")
+    if not source.is_file() or not _is_allowed_audio_path(source):
+        raise HTTPException(status_code=400, detail="参考音频必须来自受控的音频目录")
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     if _is_inside(source, OUTPUT_VOICE_RESOURCE_DIR):
         return str(source.resolve())
@@ -210,47 +271,87 @@ def _seed_roles_from_voices(voices: VoiceResourceCollection) -> RoleCollection:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Shuyi Agent v0.4.0 API", version=SERVICE_VERSION)
-    api_token = str(os.environ.get("NOVELVOICE_API_TOKEN") or "").strip()
+    app = FastAPI(
+        title="书弈 Agent API",
+        description="基于 Agent 的多人有声书自动配音工作台后端接口",
+        version=SERVICE_VERSION,
+    )
+    api_token = _service_env("SHUYI_API_TOKEN").strip()
     allowed_origins = [
-        origin.strip()
-        for origin in os.environ.get("NOVELVOICE_CORS_ORIGINS", "").split(",")
-        if origin.strip()
+        origin.strip() for origin in _service_env("SHUYI_CORS_ORIGINS").split(",") if origin.strip()
     ]
+    data_root_value = _service_env("SHUYI_DATA_DIR").strip()
+    data_root = Path(data_root_value).expanduser() if data_root_value else None
+    repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3" if data_root else ":memory:")
+    repository.initialize()
+    app.state.repository = repository
+    app.state.agent_registry = AgentRegistry.default()
+    app.state.chapter_rule_dir = (
+        data_root / "cache/chapter-rules" if data_root else CHAPTER_RULE_DIR
+    )
+    app.state.startup_ready = True
+    app.state.require_tts_ready = _service_env("SHUYI_REQUIRE_TTS_READY", "0") == "1"
+
+    @app.middleware("http")
+    async def versioned_api_boundary(request: Request, call_next):
+        path = str(request.scope.get("path") or "")
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if path.startswith("/api/") and not path.startswith("/api/v1/"):
+            return JSONResponse(status_code=404, content={"detail": "接口不存在"})
+        if path.startswith("/api/v1/"):
+            authorization = request.headers.get("Authorization", "")
+            provided_token = authorization.removeprefix("Bearer ").strip()
+            if not authorization.startswith("Bearer ") or not api_token:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "需要访问令牌"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            if not secrets.compare_digest(provided_token, api_token):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "访问令牌无效"},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        response = await call_next(request)
+        if request.method in {"POST", "PATCH", "PUT", "DELETE"} and response.status_code < 400:
+            try:
+                save_runtime_state(repository, _state(app))
+            except (OSError, RuntimeError, TypeError, ValueError):
+                app.state.startup_ready = False
+        return response
+
+    # CORS 必须包在鉴权中间件外层，确保浏览器能读取 401/403 的中文错误。
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
     )
 
     async def require_bearer(authorization: str | None = Header(default=None)) -> None:
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(
                 status_code=401,
-                detail="Bearer authentication required",
+                detail="需要访问令牌",
                 headers={"WWW-Authenticate": "Bearer"},
             )
         provided_token = authorization.removeprefix("Bearer ").strip()
         if not api_token or not secrets.compare_digest(provided_token, api_token):
             raise HTTPException(
                 status_code=401,
-                detail="Invalid bearer token",
+                detail="访问令牌无效",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    app.mount("/outputs/audio", StaticFiles(directory=OUTPUT_AUDIO_DIR), name="output_audio")
-    app.mount("/outputs/exports", StaticFiles(directory=OUTPUT_EXPORT_DIR), name="output_exports")
-    app.mount(
-        "/outputs/voice-resources",
-        StaticFiles(directory=OUTPUT_VOICE_RESOURCE_DIR),
-        name="output_voice_resources",
+    voices = VoiceResourceCollection(
+        _materialize_voice_resources(default_voice_resources(REAL_VOICE_ROOT))
     )
-    voices = VoiceResourceCollection(_materialize_voice_resources(default_voice_resources(REAL_VOICE_ROOT)))
     app.state.workflow = {
         "chapters": [],
         "workbenches": {},
@@ -260,39 +361,81 @@ def create_app() -> FastAPI:
         "voice_previews": {},
         "tts_process": None,
         "model_config": _default_model_config(),
-        "ai_one_click_workflows": {},
+        "dubbing_workflows": {},
+        "agent_streams": {},
     }
+    restore_runtime_state(app.state.workflow, repository.get_workflow("application"))
 
     @app.get("/health/live")
-    @app.get("/health/startup")
-    @app.get("/health/ready")
-    async def health_probe() -> dict[str, str]:
+    async def liveness_probe() -> dict[str, str]:
         return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
+
+    @app.get("/health/startup")
+    async def startup_probe():
+        if not app.state.startup_ready:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "starting", "service": SERVICE_NAME, "version": SERVICE_VERSION},
+            )
+        return {"status": "ok", "service": SERVICE_NAME, "version": SERVICE_VERSION}
+
+    @app.get("/health/ready")
+    async def readiness_probe():
+        try:
+            database_ready = repository.ping()
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            database_ready = False
+        tts_health = (
+            _fetch_tts_health(_state(app)["model_config"]["tts"]["base_url"])
+            if app.state.require_tts_ready
+            else {"ready": False}
+        )
+        tts_ready = bool(tts_health.get("ready"))
+        ready = database_ready and (tts_ready or not app.state.require_tts_ready)
+        payload = {
+            "status": "ok" if ready else "not_ready",
+            "service": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+            "database": "ready" if database_ready else "not_ready",
+            "tts": "ready" if tts_ready else "not_ready",
+        }
+        return payload if ready else JSONResponse(status_code=503, content=payload)
 
     def role_payload() -> dict[str, Any]:
         collection = _state(app)["roles"]
         return {
-            "roles": [role.to_dict() for role in collection.list()],
+            "roles": [_public_role_to_dict(role) for role in collection.list()],
             "role_options": collection.utterance_role_options(),
         }
 
-    @app.get("/api/v1/roles", dependencies=[Depends(require_bearer)])
-    async def list_v1_roles() -> dict[str, Any]:
-        return role_payload()
-
     @app.get("/api/v1/characters", dependencies=[Depends(require_bearer)])
     async def list_v1_characters() -> dict[str, Any]:
-        return {"characters": role_payload()["roles"]}
+        return role_payload()
 
     @app.get("/api/v1/model-config", dependencies=[Depends(require_bearer)])
     async def get_v1_model_config() -> dict[str, Any]:
         return {"config": _redacted_model_config(_state(app)["model_config"])}
 
-    @app.post("/api/novels/parse")
+    @app.get("/api/v1/downloads/{category}/{filename:path}", dependencies=[Depends(require_bearer)])
+    async def download_generated_file(category: str, filename: str):
+        directories = {
+            "audio": OUTPUT_AUDIO_DIR,
+            "voice-profiles": OUTPUT_VOICE_RESOURCE_DIR,
+            "exports": OUTPUT_EXPORT_DIR,
+        }
+        directory = directories.get(category)
+        if directory is None:
+            raise HTTPException(status_code=404, detail="下载资源不存在")
+        target = (directory / filename).resolve()
+        if not _is_inside(target, directory) or not target.is_file():
+            raise HTTPException(status_code=404, detail="下载资源不存在")
+        return FileResponse(target, filename=target.name)
+
+    @app.post("/api/v1/books/parse")
     async def parse_novel(payload: dict[str, Any]) -> dict[str, Any]:
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
-            raise HTTPException(status_code=400, detail="text is required")
+            raise HTTPException(status_code=400, detail="文本内容不能为空")
         chapters = parse_novel_text(text)
         state = _state(app)
         state["chapters"] = chapters
@@ -301,23 +444,20 @@ def create_app() -> FastAPI:
         }
         return {"chapters": [_chapter_to_dict(chapter) for chapter in chapters]}
 
-    @app.post("/api/novels/ai-chapter-split")
+    @app.post("/api/v1/books/agent-chapter-split")
     async def ai_chapter_split(payload: dict[str, Any]) -> dict[str, Any]:
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
-            raise HTTPException(status_code=400, detail="text is required")
+            raise HTTPException(status_code=400, detail="文本内容不能为空")
         return await _run_ai_chapter_split(app, text)
 
-    @app.post("/api/novels/ai-chapter-split-file")
-    async def ai_chapter_split_file(payload: dict[str, Any]) -> dict[str, Any]:
-        filename = str(payload.get("filename") or "").strip()
-        content_base64 = payload.get("content_base64")
+    @app.post("/api/v1/books/agent-chapter-split-file")
+    async def ai_chapter_split_file(file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
+        filename = str(file.filename or "").strip()
         if not filename:
-            raise HTTPException(status_code=400, detail="filename is required")
-        if not isinstance(content_base64, str) or not content_base64.strip():
-            raise HTTPException(status_code=400, detail="content_base64 is required")
+            raise HTTPException(status_code=400, detail="文件名不能为空")
         try:
-            data = base64.b64decode(content_base64, validate=True)
+            data = await _read_limited_upload(file, max_bytes=MAX_NOVEL_UPLOAD_BYTES)
             extracted = extract_novel_file(filename=filename, data=data)
         except (ValueError, NovelFileError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -325,31 +465,40 @@ def create_app() -> FastAPI:
         response["source"] = {"filename": filename, "kind": extracted.kind}
         return response
 
-    @app.get("/api/chapters")
+    @app.get("/api/v1/chapters")
     async def list_chapters() -> dict[str, Any]:
         return {"chapters": [_chapter_to_dict(chapter) for chapter in _state(app)["chapters"]]}
 
-    @app.get("/api/chapters/{chapter_id}")
+    @app.get("/api/v1/chapters/{chapter_id}")
     async def get_chapter(chapter_id: str) -> dict[str, Any]:
         state = _state(app)
         workbench = state["workbenches"].get(chapter_id)
         if workbench is None:
-            raise HTTPException(status_code=404, detail="chapter not found")
+            raise HTTPException(status_code=404, detail="章节不存在")
         return {
             "chapter": _chapter_to_dict(workbench.chapter),
-            "paragraphs": [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
+            "paragraphs": [
+                _paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs
+            ],
             "can_segment": workbench.can_segment,
         }
 
-    @app.put("/api/chapters/{chapter_id}/paragraphs")
+    @app.put("/api/v1/chapters/{chapter_id}/paragraphs")
     async def sync_chapter_paragraphs(chapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         raw_paragraphs = payload.get("paragraphs")
         if not isinstance(raw_paragraphs, list):
-            raise HTTPException(status_code=400, detail="paragraphs is required")
-        paragraphs = [_paragraph_from_payload(item, index) for index, item in enumerate(raw_paragraphs, start=1)]
-        visible = [paragraph for paragraph in paragraphs if not paragraph.deleted and paragraph.text.strip()]
+            raise HTTPException(status_code=400, detail="段落列表不能为空")
+        paragraphs = [
+            _paragraph_from_payload(item, index)
+            for index, item in enumerate(raw_paragraphs, start=1)
+        ]
+        visible = [
+            paragraph
+            for paragraph in paragraphs
+            if not paragraph.deleted and paragraph.text.strip()
+        ]
         if not visible:
-            raise HTTPException(status_code=400, detail="at least one visible paragraph is required")
+            raise HTTPException(status_code=400, detail="至少需要一段可见正文")
 
         state = _state(app)
         existing = state["workbenches"].get(chapter_id)
@@ -368,7 +517,9 @@ def create_app() -> FastAPI:
             state["chapters"].append(chapter)
         response = {
             "chapter": _chapter_to_dict(chapter),
-            "paragraphs": [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
+            "paragraphs": [
+                _paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs
+            ],
             "can_segment": workbench.can_segment,
         }
         if payload.get("confirm") is True:
@@ -377,18 +528,22 @@ def create_app() -> FastAPI:
             )
         return response
 
-    @app.post("/api/chapters/{chapter_id}/ai-one-click-analysis/start")
-    async def start_ai_one_click_analysis(chapter_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    @app.post("/api/v1/chapters/{chapter_id}/agent-runs")
+    async def start_agent_run(
+        chapter_id: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         state = _state(app)
         workbench = state["workbenches"].get(chapter_id)
         if workbench is None:
-            raise HTTPException(status_code=404, detail="chapter not found")
-        workflow = _create_ai_one_click_workflow(app)
+            raise HTTPException(status_code=404, detail="章节不存在")
+        workflow = _create_dubbing_workflow(app)
         try:
             result = workflow.start_role_analysis(
                 chapter_id=chapter_id,
                 chapter_title=workbench.chapter.title,
-                paragraphs=[_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
+                paragraphs=[
+                    _paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs
+                ],
                 existing_roles=[role.to_dict() for role in state["roles"].list()],
             )
         except MissingProviderCredential as exc:
@@ -396,19 +551,32 @@ def create_app() -> FastAPI:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"AI role analysis failed: {exc}") from exc
-        state["ai_one_click_workflows"][result.thread_id] = workflow
+            raise HTTPException(status_code=502, detail=f"角色分析 Agent 失败：{exc}") from exc
+        state["dubbing_workflows"][result.thread_id] = workflow
+        repository.save_agent_run(
+            run_id=result.thread_id,
+            agent_id="role_analyzer",
+            status=result.status,
+            checkpoint={
+                "chapter_id": chapter_id,
+                "role_candidate_count": len(result.role_candidates),
+            },
+        )
         return result.to_dict()
 
-    @app.post("/api/ai-one-click-analysis/{thread_id}/roles-completed")
-    async def complete_ai_one_click_roles(thread_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        workflow = _ai_one_click_workflow(app, thread_id)
-        roles = _roles_for_ai_one_click_payload(app, payload or {})
+    @app.post("/api/v1/agent-runs/{thread_id}/dubbing-arrangement")
+    async def complete_dubbing_arrangement(
+        thread_id: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        workflow = _dubbing_workflow(app, thread_id)
+        roles = _roles_for_dubbing_payload(app, payload or {})
         try:
             result = workflow.resume_after_roles(
                 thread_id=thread_id,
                 roles=roles,
-                existing_utterances_by_paragraph=_utterances_by_paragraph_from_payload(payload or {}),
+                existing_utterances_by_paragraph=_utterances_by_paragraph_from_payload(
+                    payload or {}
+                ),
             )
         except MissingProviderCredential as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -417,23 +585,69 @@ def create_app() -> FastAPI:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"AI one-click workflow failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=f"配音编排 Agent 失败：{exc}") from exc
         status_code = 422 if result.status == "failed" else 200
         if status_code != 200:
             raise HTTPException(status_code=status_code, detail=result.to_dict())
         return result.to_dict()
 
-    @app.post("/api/ai-one-click-analysis/{thread_id}/roles-completed-stream")
-    async def complete_ai_one_click_roles_stream(thread_id: str, payload: dict[str, Any] | None = None):
-        workflow = _ai_one_click_workflow(app, thread_id)
-        roles = _roles_for_ai_one_click_payload(app, payload or {})
+    @app.post("/api/v1/agent-runs/{thread_id}/events")
+    async def stream_agent_run_events(
+        thread_id: str,
+        request: Request,
+        payload: dict[str, Any] | None = None,
+    ):
+        roles = _roles_for_dubbing_payload(app, payload or {})
         utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+        streams = _state(app)["agent_streams"]
+        persisted_events = repository.list_events(thread_id)
+        persisted_terminal = any(
+            event["event"] in {"completed", "failed"} for event in persisted_events
+        )
+        stream_state = streams.setdefault(
+            thread_id,
+            {
+                "events": persisted_events,
+                "started": persisted_terminal,
+                "terminal": persisted_terminal,
+                "lock": threading.Lock(),
+            },
+        )
 
-        async def stream_events():
-            events: queue.Queue[dict[str, Any]] = queue.Queue()
+        def emit(event_name: str, data: dict[str, Any]) -> None:
+            with stream_state["lock"]:
+                sequence = max((event["id"] for event in stream_state["events"]), default=0) + 1
+                event = {"id": sequence, "event": event_name, "data": data}
+            try:
+                repository.append_event(
+                    run_id=thread_id,
+                    sequence=sequence,
+                    event_type=event_name,
+                    payload=data,
+                )
+            except Exception as exc:
+                with stream_state["lock"]:
+                    stream_state["events"].append(
+                        {
+                            "id": sequence,
+                            "event": "failed",
+                            "data": {"message": f"Agent 事件持久化失败：{exc}"},
+                        }
+                    )
+                    stream_state["terminal"] = True
+                raise RuntimeError("Agent 事件持久化失败") from exc
+            with stream_state["lock"]:
+                stream_state["events"].append(event)
+                if event_name in {"completed", "failed"}:
+                    stream_state["terminal"] = True
 
-            def emit_role_selected(event: dict[str, Any]) -> None:
-                events.put({"event": "role_selected", "data": event})
+        with stream_state["lock"]:
+            should_start = not stream_state["started"] and not stream_state["terminal"]
+            if should_start:
+                stream_state["started"] = True
+
+        if should_start:
+            workflow = _dubbing_workflow(app, thread_id)
 
             def run_workflow() -> None:
                 try:
@@ -441,23 +655,58 @@ def create_app() -> FastAPI:
                         thread_id=thread_id,
                         roles=roles,
                         existing_utterances_by_paragraph=utterances_by_paragraph,
-                        on_role_selected=emit_role_selected,
+                        on_role_selected=lambda event: emit("role_selected", event),
                     )
-                    event_name = "completed" if result.status == "completed" else "failed"
-                    events.put({"event": event_name, "data": result.to_dict()})
-                except (MissingProviderCredential, KeyError, TypeError, ValueError, RuntimeError) as exc:
-                    events.put({"event": "failed", "data": {"message": str(exc)}})
+                    event_name = "failed" if result.status == "failed" else "completed"
+                    emit(event_name, result.to_dict())
+                    repository.save_agent_run(
+                        run_id=thread_id,
+                        agent_id="dubbing_director",
+                        status=result.status,
+                        checkpoint={
+                            "chapter_id": repository.get_agent_run(thread_id)["checkpoint"][
+                                "chapter_id"
+                            ],
+                            "event_count": len(stream_state["events"]),
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 - 后台任务必须始终写入终止事件。
+                    with stream_state["lock"]:
+                        terminal = bool(stream_state["terminal"])
+                    if not terminal:
+                        emit("failed", {"message": str(exc)})
 
             threading.Thread(target=run_workflow, daemon=True).start()
+
+        try:
+            last_event_id = max(0, int(request.headers.get("Last-Event-ID", "0")))
+        except ValueError:
+            last_event_id = 0
+
+        async def stream_events():
+            cursor = last_event_id
             while True:
-                item = await asyncio.to_thread(events.get)
-                yield json.dumps(item, ensure_ascii=False) + "\n"
-                if item["event"] in {"completed", "failed"}:
+                pending = repository.list_events(thread_id, after_sequence=cursor)
+                with stream_state["lock"]:
+                    terminal = bool(stream_state["terminal"])
+                for item in pending:
+                    cursor = item["id"]
+                    data = json.dumps(item["data"], ensure_ascii=False, separators=(",", ":"))
+                    yield f"id: {item['id']}\nevent: {item['event']}\ndata: {data}\n\n"
+                terminal = terminal or any(
+                    item["event"] in {"completed", "failed"} for item in pending
+                )
+                if terminal and not pending:
                     break
+                await asyncio.sleep(0.05)
 
-        return StreamingResponse(stream_events(), media_type="application/x-ndjson")
+        return StreamingResponse(
+            stream_events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
-    @app.patch("/api/paragraphs/{paragraph_id}")
+    @app.patch("/api/v1/paragraphs/{paragraph_id}")
     async def update_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         workbench = _find_workbench_for_paragraph(app, paragraph_id)
         if "text" in payload:
@@ -469,15 +718,17 @@ def create_app() -> FastAPI:
         if payload.get("confirm_all") is True:
             workbench.confirm_paragraphs()
         return {
-            "paragraphs": [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
+            "paragraphs": [
+                _paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs
+            ],
             "can_segment": workbench.can_segment,
         }
 
-    @app.post("/api/paragraphs/{paragraph_id}/segment")
+    @app.post("/api/v1/paragraphs/{paragraph_id}/segment")
     async def segment_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         workbench = _find_workbench_for_paragraph(app, paragraph_id)
         if not workbench.can_segment:
-            raise HTTPException(status_code=409, detail="paragraphs must be confirmed before segmentation")
+            raise HTTPException(status_code=409, detail="开始配音片段划分前必须先确认段落")
         paragraph = workbench.get_paragraph(paragraph_id)
         roles = [role.to_dict() for role in _state(app)["roles"].list()]
         provider = _segmentation_provider_from_config(app)
@@ -496,7 +747,7 @@ def create_app() -> FastAPI:
         except MissingProviderCredential as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"LLM segmentation failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail="配音编排 Agent 的台词划分失败") from exc
         result = agent_result.validation
         return {
             "ok": result.ok,
@@ -517,7 +768,7 @@ def create_app() -> FastAPI:
         if payload:
             collection.upsert(_role_payload_with_resource(app, payload))
         return {
-            "roles": [role.to_dict() for role in collection.list()],
+            "roles": [_public_role_to_dict(role) for role in collection.list()],
             "role_options": collection.utterance_role_options(),
         }
 
@@ -528,7 +779,7 @@ def create_app() -> FastAPI:
         updated = current.with_updates(**updates)
         collection.upsert(updated)
         return {
-            "role": updated.to_dict(),
+            "role": _public_role_to_dict(updated),
             "role_options": collection.utterance_role_options(),
         }
 
@@ -544,7 +795,7 @@ def create_app() -> FastAPI:
         status_code = 409 if not result.deleted and result.referenced_count else 200
         response = {
             "delete_result": result.to_dict(),
-            "roles": [role.to_dict() for role in collection.list()],
+            "roles": [_public_role_to_dict(role) for role in collection.list()],
             "role_options": collection.utterance_role_options(),
             "utterances_by_paragraph": utterances_by_paragraph,
         }
@@ -552,17 +803,16 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status_code, detail=response)
         return response
 
-    if not api_token:
-        app.add_api_route("/api/roles", roles, methods=["GET", "POST"])
-        app.add_api_route("/api/roles/{role_id}", update_role, methods=["PATCH"])
-        app.add_api_route("/api/roles/{role_id}", delete_role, methods=["DELETE"])
+    app.add_api_route("/api/v1/characters", roles, methods=["POST"])
+    app.add_api_route("/api/v1/characters/{role_id}", update_role, methods=["PATCH"])
+    app.add_api_route("/api/v1/characters/{role_id}", delete_role, methods=["DELETE"])
 
-    @app.get("/api/voice-resources")
+    @app.get("/api/v1/voice-profiles")
     async def list_voice_resources() -> dict[str, Any]:
         voices = _state(app)["voices"]
-        return {"voices": [_voice_to_dict(voice) for voice in voices.list()]}
+        return {"voices": [_public_voice_to_dict(voice) for voice in voices.list()]}
 
-    @app.post("/api/voice-resources")
+    @app.post("/api/v1/voice-profiles")
     async def create_voice_resource(payload: dict[str, Any]) -> dict[str, Any]:
         voices = _state(app)["voices"]
         voice_id = str(payload.get("voice_id") or voices.next_id())
@@ -583,24 +833,34 @@ def create_app() -> FastAPI:
                 "playable_audio_path": payload.get("playable_audio_path") or reference_audio_path,
             }
         )
-        return {"voice": _voice_to_dict(resource), "voices": [_voice_to_dict(voice) for voice in voices.list()]}
+        return {
+            "voice": _public_voice_to_dict(resource),
+            "voices": [_public_voice_to_dict(voice) for voice in voices.list()],
+        }
 
-    @app.post("/api/voice-resources/reference-audio")
-    async def upload_reference_audio(payload: dict[str, Any]) -> dict[str, Any]:
-        filename = _safe_audio_filename(_required_text(payload, "filename"))
-        data_base64 = _required_text(payload, "data_base64")
+    @app.post("/api/v1/voice-profiles/reference-audio")
+    async def upload_reference_audio(file: UploadFile = File(...)) -> dict[str, Any]:  # noqa: B008
+        filename = _safe_audio_filename(str(file.filename or "参考音频.wav"))
         try:
-            audio_bytes = base64.b64decode(data_base64, validate=True)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail="data_base64 must be valid base64") from exc
+            audio_bytes = await _read_limited_upload(file, max_bytes=MAX_REFERENCE_AUDIO_BYTES)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="参考音频读取失败") from exc
+        if not audio_bytes:
+            raise HTTPException(status_code=400, detail="参考音频文件不能为空")
         target = OUTPUT_VOICE_RESOURCE_DIR / filename
         if target.exists():
-            target = OUTPUT_VOICE_RESOURCE_DIR / f"{target.stem}-{len(list(OUTPUT_VOICE_RESOURCE_DIR.glob(target.stem + '*')))+1}{target.suffix}"
+            target = (
+                OUTPUT_VOICE_RESOURCE_DIR
+                / f"{target.stem}-{len(list(OUTPUT_VOICE_RESOURCE_DIR.glob(target.stem + '*'))) + 1}{target.suffix}"
+            )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(audio_bytes)
-        return {"filename": filename, "reference_audio_path": str(target)}
+        return {
+            "filename": filename,
+            "reference_audio_path": f"/api/v1/downloads/voice-profiles/{target.name}",
+        }
 
-    @app.post("/api/voice-resources/generate")
+    @app.post("/api/v1/voice-profiles/generate")
     async def generate_voice_resource(payload: dict[str, Any]) -> dict[str, Any]:
         name = _required_text(payload, "name")
         description = _required_text(payload, "description")
@@ -645,15 +905,15 @@ def create_app() -> FastAPI:
         )
         _state(app)["voice_previews"][preview_id] = resource
         return {
-            "voice": _voice_to_dict(resource),
-            "audio_url": f"/outputs/voice-resources/{preview_id}.wav",
+            "voice": _public_voice_to_dict(resource),
+            "audio_url": f"/api/v1/downloads/voice-profiles/{preview_id}.wav",
             "duration_seconds": duration_seconds,
             "generation_status": generation_status,
             "generation_note": generation_note,
             "model_requirement": model_requirement,
         }
 
-    @app.patch("/api/voice-resources/{voice_id}")
+    @app.patch("/api/v1/voice-profiles/{voice_id}")
     async def update_voice_resource(voice_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         voices = _state(app)["voices"]
         current = voices.get(voice_id)
@@ -679,36 +939,45 @@ def create_app() -> FastAPI:
             )
         updated = current.with_updates(**allowed)
         voices.upsert(updated)
-        return {"voice": _voice_to_dict(updated), "voices": [_voice_to_dict(voice) for voice in voices.list()]}
+        return {
+            "voice": _public_voice_to_dict(updated),
+            "voices": [_public_voice_to_dict(voice) for voice in voices.list()],
+        }
 
-    @app.get("/api/voice-resources/{voice_id}/audio")
+    @app.get(
+        "/api/v1/voice-profiles/{voice_id}/audio",
+        dependencies=[Depends(require_bearer)],
+    )
     async def get_voice_resource_audio(voice_id: str):
-        voice = _state(app)["voices"].get(voice_id)
+        try:
+            voice = _state(app)["voices"].get(voice_id)
+        except KeyError:
+            voice = _state(app)["voice_previews"].get(voice_id)
+            if voice is None:
+                raise HTTPException(status_code=404, detail="参考音频不存在") from None
         audio_path = Path(voice.reference_audio_path)
         if not audio_path.is_absolute():
             audio_path = ROOT / audio_path
-        if not audio_path.exists():
-            raise HTTPException(status_code=404, detail="reference audio not found")
+        if not audio_path.is_file() or not _is_allowed_audio_path(audio_path):
+            raise HTTPException(status_code=404, detail="参考音频不存在")
         return FileResponse(audio_path)
 
-    @app.delete("/api/voice-resources/{voice_id}")
+    @app.delete("/api/v1/voice-profiles/{voice_id}")
     async def delete_voice_resource(voice_id: str) -> dict[str, Any]:
         voices = _state(app)["voices"]
         voices.remove(voice_id)
-        return {"voices": [_voice_to_dict(voice) for voice in voices.list()]}
+        return {"voices": [_public_voice_to_dict(voice) for voice in voices.list()]}
 
-    @app.get("/api/model-config")
+    @app.get("/api/v1/model-config")
     async def get_model_config() -> dict[str, Any]:
-        return {"config": _state(app)["model_config"]}
+        return {"config": _redacted_model_config(_state(app)["model_config"])}
 
-    @app.patch("/api/model-config")
+    @app.patch("/api/v1/model-config")
     async def update_model_config(payload: dict[str, Any]) -> dict[str, Any]:
         config = _state(app)["model_config"]
         if isinstance(payload.get("llm"), dict):
             llm_updates = {
-                key: value
-                for key, value in payload["llm"].items()
-                if key in {"base_url", "model", "api_key"}
+                key: value for key, value in payload["llm"].items() if key in {"base_url", "model"}
             }
             config["llm"] = {**config["llm"], **llm_updates}
         if isinstance(payload.get("tts"), dict):
@@ -722,14 +991,19 @@ def create_app() -> FastAPI:
             chapter_agent_updates = {
                 key: value
                 for key, value in payload["chapter_agent"].items()
-                if key in {"base_url", "model", "api_key"}
+                if key in {"base_url", "model"}
             }
             config["chapter_agent"] = {**config["chapter_agent"], **chapter_agent_updates}
-        return {"config": config}
+        return {"config": _redacted_model_config(config)}
 
-    @app.post("/api/model-config/llm/test")
+    @app.post("/api/v1/model-config/llm/test")
     async def test_remote_model_link(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        config = {**_state(app)["model_config"]["llm"], **((payload or {}).get("llm") or {})}
+        supplied = (payload or {}).get("llm") or {}
+        config = {
+            **_state(app)["model_config"]["llm"],
+            **{key: value for key, value in supplied.items() if key in {"base_url", "model"}},
+            "api_key": _api_key_lookup_from_config(app)("SILICONFLOW_API_KEY"),
+        }
         try:
             await _test_model_link(config)
         except HTTPException:
@@ -738,26 +1012,36 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail=f"远端模型连接失败：{exc}") from exc
         return {"ok": True, "message": "远端模型连接成功"}
 
-    @app.post("/api/model-config/chapter-agent/test")
-    async def test_chapter_agent_model_link(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    @app.post("/api/v1/model-config/chapter-agent/test")
+    async def test_chapter_agent_model_link(
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        supplied = (payload or {}).get("chapter_agent") or {}
         config = {
             **_state(app)["model_config"]["chapter_agent"],
-            **((payload or {}).get("chapter_agent") or {}),
+            **{key: value for key, value in supplied.items() if key in {"base_url", "model"}},
+            "api_key": _api_key_lookup_from_config(app)("DEEPSEEK_API_KEY"),
         }
         try:
             await _test_model_link(config, deepseek_compatible=True)
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"章节划分智能体连接失败：{exc}") from exc
-        return {"ok": True, "message": "章节划分智能体连接成功"}
+            raise HTTPException(status_code=502, detail=f"小说解析 Agent 连接失败：{exc}") from exc
+        return {"ok": True, "message": "小说解析 Agent 连接成功"}
 
-    @app.post("/api/model-config/tts/start")
+    @app.post("/api/v1/model-config/tts/start")
     async def start_local_tts_service(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        config = {**_state(app)["model_config"]["tts"], **((payload or {}).get("tts") or {})}
+        supplied_tts = (payload or {}).get("tts") or {}
+        tts_updates = {
+            key: value
+            for key, value in supplied_tts.items()
+            if key in {"base_url", "model_path", "voice_design_model_path"}
+        }
+        config = {**_state(app)["model_config"]["tts"], **tts_updates}
         model_path = str(config.get("model_path") or "").strip()
         if not model_path:
-            raise HTTPException(status_code=400, detail="model_path is required")
+            raise HTTPException(status_code=400, detail="必须配置 TTS 模型路径")
         voice_design_model_path = str(config.get("voice_design_model_path") or "").strip()
         base_url = str(config.get("base_url") or "http://127.0.0.1:7811")
         _state(app)["model_config"]["tts"] = config
@@ -827,11 +1111,11 @@ def create_app() -> FastAPI:
             "progress": 100,
         }
 
-    @app.post("/api/utterances/{utterance_id}/speech")
+    @app.post("/api/v1/dubbing-segments/{utterance_id}/dubbing-jobs")
     async def synthesize_speech(utterance_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         role_id = payload.get("role_id")
         if not role_id:
-            raise HTTPException(status_code=400, detail="role_id is required")
+            raise HTTPException(status_code=400, detail="角色编号不能为空")
         role = _speech_role_from_payload(app, _state(app)["roles"].get(str(role_id)), payload)
         utterance = {
             "utterance_id": utterance_id,
@@ -902,21 +1186,23 @@ def create_app() -> FastAPI:
             _state(app)["voice_jobs"][job_id] = substitute_job
             return {
                 "voice_job": substitute_job.to_dict(),
-                "audio_url": f"/outputs/audio/{job_id}.wav",
+                "audio_url": f"/api/v1/downloads/audio/{job_id}.wav",
                 "duration_seconds": duration_seconds,
-                "warning": "local TTS service unavailable; returned a deterministic substitute wav",
+                "warning": "本地 TTS 服务不可用，已返回可重复生成的占位 WAV。",
             }
 
         _state(app)["voice_jobs"][job_id] = job
         return {
             "voice_job": job.to_dict(),
-            "audio_url": f"/outputs/audio/{job_id}.wav",
+            "audio_url": f"/api/v1/downloads/audio/{job_id}.wav",
             "duration_seconds": duration_seconds,
         }
 
-    @app.post("/api/chapters/{chapter_id}/speech/batch")
-    async def synthesize_chapter_speech_batch(chapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        roles = _roles_for_ai_one_click_payload(app, payload or {})
+    @app.post("/api/v1/dubbing-jobs/{chapter_id}")
+    async def synthesize_chapter_speech_batch(
+        chapter_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        roles = _roles_for_dubbing_payload(app, payload or {})
         utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
 
         def synthesize_group(request: dict[str, Any], *, output_dir: Path) -> list[dict[str, Any]]:
@@ -953,16 +1239,29 @@ def create_app() -> FastAPI:
             output_dir=OUTPUT_AUDIO_DIR,
             synthesize_batch=synthesize_group,
         )
-        return report.to_dict()
+        payload = report.to_dict()
+        for utterances in payload["utterances_by_paragraph"].values():
+            for utterance in utterances:
+                audio_path = str(utterance.get("audio_path") or "")
+                if audio_path:
+                    filename = Path(audio_path).name
+                    utterance["audio_path"] = f"outputs/audio/{filename}"
+                    utterance["audio_url"] = f"/api/v1/downloads/audio/{filename}"
+        return payload
 
-    @app.post("/api/chapters/{chapter_id}/audio/export")
-    async def export_chapter_audio_endpoint(chapter_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        roles = _roles_for_ai_one_click_payload(app, payload or {})
+    @app.post("/api/v1/exports/{chapter_id}")
+    async def export_chapter_audio_endpoint(
+        chapter_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        roles = _roles_for_dubbing_payload(app, payload or {})
         utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
         chapter_title = str((payload or {}).get("chapter_title") or chapter_id)
         pause_ms = int((payload or {}).get("pause_ms") or 300)
         speed = float((payload or {}).get("speed") or 1.0)
-        export_dir = OUTPUT_EXPORT_DIR / f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
+        export_dir = (
+            OUTPUT_EXPORT_DIR
+            / f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
+        )
         report = await asyncio.to_thread(
             export_chapter_audio,
             chapter_id=chapter_id,
@@ -973,7 +1272,16 @@ def create_app() -> FastAPI:
             pause_ms=pause_ms,
             speed=speed,
         )
-        return report.to_dict()
+        archive_path = Path(
+            await asyncio.to_thread(shutil.make_archive, str(export_dir), "zip", export_dir)
+        )
+        return {
+            "status": report.status,
+            "item_count": report.item_count,
+            "missing_count": report.missing_count,
+            "message": report.message,
+            "download_url": f"/api/v1/downloads/exports/{archive_path.name}",
+        }
 
     return app
 
@@ -983,14 +1291,19 @@ async def _run_ai_chapter_split(app: FastAPI, text: str) -> dict[str, Any]:
     skill = ChapterSplitSkill(
         provider=provider,
         api_key_lookup=_chapter_agent_api_key_lookup_from_config(app),
+        system_prompt=app.state.agent_registry.get("novel_parser").prompt_text,
     )
-    agent = AiChapterSplitAgent(scripts_dir=CHAPTER_PARSER_SCRIPT_DIR, skill=skill)
+    agent = AiChapterSplitAgent(
+        rules_dir=app.state.chapter_rule_dir,
+        bundled_rules_dir=BUNDLED_CHAPTER_RULE_DIR,
+        skill=skill,
+    )
     try:
         result = await asyncio.to_thread(agent.split, text)
     except MissingProviderCredential as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"AI chapter split failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail="小说解析 Agent 执行失败") from exc
     if not result.validation.ok:
         raise HTTPException(
             status_code=422,
@@ -1010,20 +1323,22 @@ async def _run_ai_chapter_split(app: FastAPI, text: str) -> dict[str, Any]:
         "chapters": [_chapter_to_dict(chapter) for chapter in result.chapters],
         "agent": {
             "status": result.status,
-            "script_path": str(result.script_path) if result.script_path else None,
+            "rule_path": str(result.rule_path) if result.rule_path else None,
             "trace": result.trace,
             "validation_errors": result.validation.errors,
         },
     }
 
 
-def _create_ai_one_click_workflow(app: FastAPI) -> AiOneClickWorkflow:
+def _create_dubbing_workflow(app: FastAPI) -> DubbingWorkflow:
     role_provider = _chapter_agent_provider_from_config(app)
     segmentation_provider = _segmentation_provider_from_config(app)
-    return AiOneClickWorkflow(
+    return DubbingWorkflow(
         role_skill=LangChainRoleAnalysisSkill(
             provider=role_provider,
             api_key_lookup=_chapter_agent_api_key_lookup_from_config(app),
+            role_analysis_system_prompt=app.state.agent_registry.get("role_analyzer").prompt_text,
+            dubbing_system_prompt=app.state.agent_registry.get("dubbing_director").prompt_text,
         ),
         segmentation_service=AiSegmentationService(
             provider=segmentation_provider,
@@ -1069,14 +1384,30 @@ def _generate_auto_voice_resource(app: FastAPI, candidate: RoleAnalysisCandidate
     )
 
 
-def _ai_one_click_workflow(app: FastAPI, thread_id: str) -> AiOneClickWorkflow:
-    workflow = _state(app)["ai_one_click_workflows"].get(thread_id)
-    if workflow is None:
-        raise HTTPException(status_code=404, detail="AI one-click workflow thread not found")
+def _dubbing_workflow(app: FastAPI, thread_id: str) -> DubbingWorkflow:
+    workflow = _state(app)["dubbing_workflows"].get(thread_id)
+    if workflow is not None:
+        return workflow
+    run = app.state.repository.get_agent_run(thread_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent 运行记录不存在")
+    chapter_id = str(run["checkpoint"].get("chapter_id") or "")
+    workbench = _state(app)["workbenches"].get(chapter_id)
+    if workbench is None:
+        raise HTTPException(status_code=409, detail="Agent 运行对应的章节资源无法恢复")
+    workflow = _create_dubbing_workflow(app)
+    workflow.restore_waiting_session(
+        thread_id=thread_id,
+        chapter_id=chapter_id,
+        chapter_title=workbench.chapter.title,
+        paragraphs=[_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs],
+        existing_roles=[role.to_dict() for role in _state(app)["roles"].list()],
+    )
+    _state(app)["dubbing_workflows"][thread_id] = workflow
     return workflow
 
 
-def _roles_for_ai_one_click_payload(app: FastAPI, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _roles_for_dubbing_payload(app: FastAPI, payload: dict[str, Any]) -> list[dict[str, Any]]:
     raw_roles = payload.get("roles")
     collection = _state(app)["roles"]
     if isinstance(raw_roles, list):
@@ -1086,7 +1417,9 @@ def _roles_for_ai_one_click_payload(app: FastAPI, payload: dict[str, Any]) -> li
     return [role.to_dict() for role in collection.list()]
 
 
-def _utterances_by_paragraph_from_payload(payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _utterances_by_paragraph_from_payload(
+    payload: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
     raw = payload.get("utterances_by_paragraph")
     if not isinstance(raw, dict):
         return {}
@@ -1094,11 +1427,15 @@ def _utterances_by_paragraph_from_payload(payload: dict[str, Any]) -> dict[str, 
     for paragraph_id, utterances in raw.items():
         if not isinstance(utterances, list):
             continue
-        normalized[str(paragraph_id)] = [dict(item) for item in utterances if isinstance(item, dict)]
+        normalized[str(paragraph_id)] = [
+            dict(item) for item in utterances if isinstance(item, dict)
+        ]
     return normalized
 
 
-def _write_substitute_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> float:
+def _write_substitute_wav(
+    path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000
+) -> float:
     frame_count = int(duration_seconds * sample_rate)
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wav_file:
@@ -1116,19 +1453,19 @@ def _find_workbench_for_paragraph(app: FastAPI, paragraph_id: str) -> ChapterWor
         except KeyError:
             continue
         return workbench
-    raise HTTPException(status_code=404, detail="paragraph not found")
+    raise HTTPException(status_code=404, detail="段落不存在")
 
 
 def _required_text(payload: dict[str, Any], field: str) -> str:
     value = payload.get(field)
     if not isinstance(value, str) or not value.strip():
-        raise HTTPException(status_code=400, detail=f"{field} is required")
+        raise HTTPException(status_code=400, detail=f"{field} 不能为空")
     return value.strip()
 
 
 def _paragraph_from_payload(payload: Any, index: int) -> ParagraphModule:
     if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="paragraph item must be an object")
+        raise HTTPException(status_code=400, detail="段落条目必须是对象")
     text = str(payload.get("text") or "").strip()
     return ParagraphModule(
         paragraph_id=str(payload.get("paragraph_id") or f"p-{index:04d}"),
@@ -1149,8 +1486,8 @@ def _segmentation_provider_from_config(app: FastAPI) -> dict[str, Any]:
 
 def _api_key_lookup_from_config(app: FastAPI):
     def lookup(name: str) -> str | None:
-        configured = str(_state(app)["model_config"]["llm"].get("api_key") or "").strip()
-        return configured or os.environ.get(name)
+        dotenv_value = LOCAL_DOTENV.get(name)
+        return os.environ.get(name) or (str(dotenv_value).strip() if dotenv_value else None)
 
     return lookup
 
@@ -1165,9 +1502,8 @@ def _chapter_agent_provider_from_config(app: FastAPI) -> dict[str, Any]:
 
 def _chapter_agent_api_key_lookup_from_config(app: FastAPI):
     def lookup(name: str) -> str | None:
-        configured = str(_state(app)["model_config"]["chapter_agent"].get("api_key") or "").strip()
         dotenv_value = LOCAL_DOTENV.get(name)
-        return configured or os.environ.get(name) or (str(dotenv_value).strip() if dotenv_value else None)
+        return os.environ.get(name) or (str(dotenv_value).strip() if dotenv_value else None)
 
     return lookup
 
@@ -1198,7 +1534,7 @@ def _deepseek_base_url(base_url: str) -> str:
 async def _test_model_link(config: dict[str, Any], *, deepseek_compatible: bool = False) -> None:
     base_url = str(config.get("base_url") or "").rstrip("/")
     if not base_url:
-        raise HTTPException(status_code=400, detail="base_url is required")
+        raise HTTPException(status_code=400, detail="服务地址不能为空")
     models_base_url = _deepseek_base_url(base_url) if deepseek_compatible else base_url
     headers = {"Content-Type": "application/json"}
     api_key = str(config.get("api_key") or "").strip()
@@ -1213,7 +1549,7 @@ def _start_tts_process(command: list[str]) -> subprocess.Popen:
 
 
 def _tts_startup_timeout_seconds() -> float:
-    raw_value = os.environ.get("NOVELVOICE_TTS_STARTUP_TIMEOUT_SECONDS", "")
+    raw_value = os.environ.get("SHUYI_TTS_STARTUP_TIMEOUT_SECONDS", "")
     if not raw_value:
         return DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS
     try:
@@ -1267,7 +1603,7 @@ def _format_tts_not_ready_message(health: dict[str, Any]) -> str:
         )
     return (
         "本地 TTS 服务尚未完成启动：模型加载仍在进行或服务端口暂未响应；"
-        f"最近一次健康检查错误：{health.get('error', 'unknown')}"
+        f"最近一次健康检查错误：{health.get('error', '未知错误')}"
     )
 
 
@@ -1278,7 +1614,7 @@ def _wait_for_tts_ready(
 ) -> dict[str, Any]:
     timeout = _tts_startup_timeout_seconds() if timeout_seconds is None else timeout_seconds
     deadline = time.monotonic() + timeout
-    last_health: dict[str, Any] = {"reachable": False, "error": "health check has not run"}
+    last_health: dict[str, Any] = {"reachable": False, "error": "尚未执行健康检查"}
     while True:
         if process is not None and process.poll() is not None:
             raise RuntimeError(f"本地 TTS 服务启动失败：进程已退出，退出码 {process.poll()}")
@@ -1309,5 +1645,8 @@ def _speech_role_from_payload(app: FastAPI, role: RoleCard, payload: dict[str, A
     try:
         voice = _state(app)["voices"].get(str(voice_resource_id))
     except KeyError as exc:
-        raise HTTPException(status_code=400, detail="voice resource not found") from exc
+        raise HTTPException(status_code=400, detail="音色档案不存在") from exc
     return _role_with_voice(role, voice)
+
+
+app = create_app()

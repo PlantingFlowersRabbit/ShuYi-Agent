@@ -11,12 +11,15 @@ describe("v0.4 runtime configuration", () => {
   it("keeps the Pages base separate from the versioned API base", async () => {
     const { resolveRuntimeConfig } = await import("./runtimeConfig");
     const config = resolveRuntimeConfig({
-      BASE_URL: "/NovelVoice-Agent/",
+      BASE_URL: "/ShuYi-Agent/",
       VITE_API_BASE_URL: "https://api.example.test/api/v1/",
     });
 
-    expect(config.pagesBase).toBe("/NovelVoice-Agent/");
+    expect(config.pagesBase).toBe("/ShuYi-Agent/");
     expect(config.apiBase).toBe("https://api.example.test/api/v1");
     expect(config.apiUrl("/characters")).toBe("https://api.example.test/api/v1/characters");
+    expect(config.mediaUrl("/outputs/audio/example.wav")).toBe(
+      "https://api.example.test/outputs/audio/example.wav",
+    );
   });
 });

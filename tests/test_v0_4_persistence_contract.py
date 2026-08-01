@@ -18,6 +18,18 @@ def test_v0_4_sqlite_uses_wal_and_survives_repository_restart(tmp_path):
             "active_agent": "role_analyzer",
         },
     )
+    first.save_agent_run(
+        run_id="agent-run-001",
+        agent_id="role_analyzer",
+        status="waiting_for_roles",
+        checkpoint={"chapter_id": "chapter-0001"},
+    )
+    first.append_event(
+        run_id="agent-run-001",
+        sequence=1,
+        event_type="role_selected",
+        payload={"dubbing_segment_id": "segment-001"},
+    )
     first.close()
 
     with sqlite3.connect(db_path) as connection:
@@ -31,4 +43,12 @@ def test_v0_4_sqlite_uses_wal_and_survives_repository_restart(tmp_path):
         "status": "awaiting_confirmation",
         "active_agent": "role_analyzer",
     }
+    assert restarted.get_agent_run("agent-run-001")["checkpoint"] == {"chapter_id": "chapter-0001"}
+    assert restarted.list_events("agent-run-001") == [
+        {
+            "id": 1,
+            "event": "role_selected",
+            "data": {"dubbing_segment_id": "segment-001"},
+        }
+    ]
     restarted.close()

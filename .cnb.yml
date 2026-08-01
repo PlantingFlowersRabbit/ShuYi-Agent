@@ -1,24 +1,71 @@
-# CNB pipeline template. Configure the registry variables in the repository secrets before use.
+# CNB 流水线模板。GPU 执行器必须支持 Docker --gpus 和 NVIDIA Container Toolkit。
 pipeline:
   cpu-test:
     image: python:3.11-slim
     commands:
       - python -m pip install uv
-      - uv run pytest -q tests/test_v0_4_deployment_contract.py tests/test_model_downloader.py
-  image-publish:
+      - uv run pytest -q tests/test_v0_4_deployment_contract.py tests/test_model_downloader.py tests/test_container_supervisor.py
+
+  gpu-real-inference:
+    needs: [cpu-test]
     image: docker:27-cli
     services:
       - docker:27-dind
+    resources:
+      gpu: 1
     environment:
       DOCKER_HOST: tcp://docker:2375
       DOCKER_TLS_CERTDIR: ""
     commands:
-      - test -n "$CNB_DOCKER_REGISTRY"
-      - test -n "$CNB_DOCKER_REPOSITORY"
-      - test -n "$CNB_DOCKER_USERNAME"
-      - test -n "$CNB_DOCKER_PASSWORD"
-      - echo "$CNB_DOCKER_PASSWORD" | docker login "$CNB_DOCKER_REGISTRY" --username "$CNB_DOCKER_USERNAME" --password-stdin
-      - docker build --target cpu-runtime --tag "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cpu" .
-      - docker build --target cuda-runtime --tag "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cuda" .
-      - docker push "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cpu"
-      - docker push "$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY:0.4.0-cuda"
+      - |
+        set -eu
+        test -n "$CNB_DOCKER_REGISTRY"
+        test -n "$CNB_DOCKER_REPOSITORY"
+        test -n "$CNB_DOCKER_USERNAME"
+        test -n "$CNB_DOCKER_PASSWORD"
+        test -n "$CNB_COMMIT_SHA"
+
+        image_root="$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY"
+        cpu_version="$image_root:v0.4.0-cpu"
+        cuda_version="$image_root:v0.4.0-cuda"
+        cpu_commit="$image_root:${CNB_COMMIT_SHA}-cpu"
+        cuda_commit="$image_root:${CNB_COMMIT_SHA}-cuda"
+        test_container="shuyi-v040-gpu-test"
+
+        echo "$CNB_DOCKER_PASSWORD" | docker login "$CNB_DOCKER_REGISTRY" --username "$CNB_DOCKER_USERNAME" --password-stdin
+        docker build --target cpu-runtime --tag "$cpu_version" --tag "$cpu_commit" .
+        docker build --target cuda-runtime --tag "$cuda_version" --tag "$cuda_commit" .
+
+        cleanup() {
+          docker rm -f "$test_container" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+        docker run --name "$test_container" --gpus all --detach \
+          --env SHUYI_MODEL_AUTO_DOWNLOAD=1 \
+          --env QWEN3_TTS_DEVICE=auto \
+          --env MODELSCOPE_API_TOKEN="${MODELSCOPE_API_TOKEN:-}" \
+          --env HF_TOKEN="${HF_TOKEN:-}" \
+          "$cuda_commit"
+        docker cp assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav "$test_container:/tmp/reference.wav"
+
+        attempts=0
+        until docker exec "$test_container" python /app/scripts/container/healthcheck.py; do
+          attempts=$((attempts + 1))
+          if [ "$attempts" -ge 90 ]; then
+            docker logs "$test_container"
+            exit 1
+          fi
+          sleep 10
+        done
+
+        docker exec "$test_container" python -c "import httpx,pathlib; audio=open('/tmp/reference.wav','rb'); response=httpx.post('http://127.0.0.1:7811/v1/audio/speech/upload', files={'voice_file':('reference.wav',audio,'audio/wav')}, data={'input':'Shuyi Agent GPU inference test.','ref_text':'','language':'Auto','response_format':'wav','x_vector_only':'true'}, timeout=600); response.raise_for_status(); pathlib.Path('/tmp/inference.wav').write_bytes(response.content)"
+        docker exec "$test_container" python -c "import pathlib; assert pathlib.Path('/tmp/inference.wav').stat().st_size > 44"
+
+        docker push "$cpu_commit"
+        docker push "$cuda_commit"
+        if [ "${CNB_TAG:-}" = "v0.4.0" ]; then
+          docker push "$cpu_version"
+          docker push "$cuda_version"
+        else
+          echo "当前不是 v0.4.0 标签流水线，跳过固定版本标签推送"
+        fi

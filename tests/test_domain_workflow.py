@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import os
 import sys
 import time
 import types
@@ -33,13 +34,13 @@ from backend.app.domain.voices import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_NOVEL = ROOT / "assets/samples/novels/hongloumeng_pg24264_excerpt.txt"
-REAL_SAMPLE_ROOT = Path("/Users/gaojing/Downloads/真实测试样本")
+REAL_SAMPLE_ROOT = Path(os.environ.get("SHUYI_REAL_SAMPLE_ROOT", ROOT / "assets/samples/real"))
 REAL_NOVEL = REAL_SAMPLE_ROOT / "小说/这个地下城长蘑菇了.txt"
 REAL_VOICE_ROOT = REAL_SAMPLE_ROOT / "音频"
 
 
 def test_parse_sample_novel_into_chapters_and_paragraph_workbench_gate():
-    """Covers AC-FLOW-02, AC-FLOW-03, AC-FLOW-04, AC-FLOW-05, AC-FLOW-06."""
+    """覆盖小说解析与段落工作台人工确认门禁。"""
     chapters = parse_novel_text(SAMPLE_NOVEL.read_text(encoding="utf-8"))
 
     assert len(chapters) >= 1
@@ -64,7 +65,9 @@ def test_parse_sample_novel_into_chapters_and_paragraph_workbench_gate():
     assert workbench.get_paragraph(first_paragraph.paragraph_id).text.endswith("人工校正。")
 
     workbench.delete_paragraph(first_paragraph.paragraph_id)
-    assert first_paragraph.paragraph_id not in [p.paragraph_id for p in workbench.visible_paragraphs]
+    assert first_paragraph.paragraph_id not in [
+        p.paragraph_id for p in workbench.visible_paragraphs
+    ]
     assert workbench.can_segment is False
 
     workbench.confirm_paragraphs()
@@ -72,7 +75,7 @@ def test_parse_sample_novel_into_chapters_and_paragraph_workbench_gate():
 
 
 def test_default_roles_and_role_options_sync_to_utterance_selectors():
-    """Covers AC-FLOW-08, AC-ROLE-01, AC-ROLE-02, and v0.11 voice resources."""
+    """覆盖默认角色与台词角色选项同步。"""
     roles = default_role_cards()
     assert [role.name for role in roles] == ["旁白", "年轻男", "御姐音"]
     assert {role.voice_mode for role in roles} <= {"voice_cloning", "voice_design"}
@@ -102,12 +105,17 @@ def test_default_roles_and_role_options_sync_to_utterance_selectors():
     )
 
     options = collection.utterance_role_options()
-    assert {option["value"] for option in options} >= {"narrator", "male_lead", "female_lead", "villain"}
+    assert {option["value"] for option in options} >= {
+        "narrator",
+        "male_lead",
+        "female_lead",
+        "villain",
+    }
     assert next(option for option in options if option["value"] == "villain")["label"] == "反派"
 
 
 def test_v0_11_numeric_heading_real_sample_splits_into_chapters():
-    """Covers v0.11 real novel parsing for numeric headings such as `1.标题`."""
+    """覆盖数字标题真实样本分章。"""
     if not REAL_NOVEL.exists():
         pytest.skip(f"real sample novel not found: {REAL_NOVEL}")
 
@@ -122,7 +130,7 @@ def test_v0_11_numeric_heading_real_sample_splits_into_chapters():
 
 
 def test_v0_11_voice_resources_load_real_samples_and_support_crud():
-    """Covers v0.11 voice resource library data behavior."""
+    """覆盖音色档案库真实样本加载与增删改查。"""
     resources = default_voice_resources(REAL_VOICE_ROOT if REAL_VOICE_ROOT.exists() else None)
     collection = VoiceResourceCollection(resources)
     names = {resource.name for resource in collection.list()}
@@ -155,7 +163,7 @@ def test_v0_11_voice_resources_load_real_samples_and_support_crud():
 
 
 def test_v0_11_generated_voice_content_is_deterministic_substitute():
-    """Covers v0.11 generated voice resource boundary without claiming real TTS quality."""
+    """覆盖生成音色内容的确定性替身边界。"""
     content = generated_voice_content("冷静旁白", "沉稳、克制、叙事感强")
 
     assert "冷静旁白" in content
@@ -164,7 +172,7 @@ def test_v0_11_generated_voice_content_is_deterministic_substitute():
 
 
 def test_provider_registry_preserves_default_llm_boundaries():
-    """Covers AC-LLM-01 and provider boundary from architecture contract."""
+    """覆盖默认大模型供应商边界。"""
     registry = default_provider_registry()
 
     siliconflow = registry["siliconflow-qwen3-8b"]
@@ -470,7 +478,9 @@ def test_segmentation_schema_text_conservation_and_unknown_role_review():
     assert utterance["text"] == paragraph
 
     utterance["text"] = "他说你好。"
-    broken_raw = json.dumps({"paragraph_id": "p-0001", "utterances": [utterance]}, ensure_ascii=False)
+    broken_raw = json.dumps(
+        {"paragraph_id": "p-0001", "utterances": [utterance]}, ensure_ascii=False
+    )
     broken = validate_segmentation_result(
         paragraph_id="p-0001",
         paragraph_text=paragraph,
@@ -534,7 +544,7 @@ def test_segmentation_allows_one_json_repair_attempt_only():
 
 def test_v0_25_whole_paragraph_drafts_are_backend_reusable():
     """v0.25 requires confirm flow and LangGraph workflow to share backend draft creation."""
-    from backend.app.domain.ai_one_click_workflow import create_whole_paragraph_utterance_drafts
+    from backend.app.domain.dubbing_workflow import create_whole_paragraph_utterance_drafts
     from backend.app.domain.novel import ParagraphModule
 
     paragraphs = [
@@ -553,7 +563,7 @@ def test_v0_25_whole_paragraph_drafts_are_backend_reusable():
 
 def test_v0_25_role_analysis_workflow_pauses_with_human_editable_candidates():
     """The LangGraph workflow first returns role suggestions and waits for role-list edits."""
-    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow, RoleAnalysisCandidate
+    from backend.app.domain.dubbing_workflow import DubbingWorkflow, RoleAnalysisCandidate
 
     class FakeSkill:
         def analyze_roles(self, **kwargs):
@@ -571,7 +581,7 @@ def test_v0_25_role_analysis_workflow_pauses_with_human_editable_candidates():
                 )
             ]
 
-    workflow = AiOneClickWorkflow(role_skill=FakeSkill(), segmentation_service=None)
+    workflow = DubbingWorkflow(role_skill=FakeSkill(), segmentation_service=None)
     result = workflow.start_role_analysis(
         chapter_id="chapter-0001",
         chapter_title="1.变成蘑菇的公爵千金",
@@ -587,8 +597,8 @@ def test_v0_25_role_analysis_workflow_pauses_with_human_editable_candidates():
 
 
 def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_paragraphs_and_streams_updates():
-    """Resume creates drafts and lets AI角色匹配 split/select in one Agent response."""
-    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow
+    """Resume creates drafts and lets 配音编排 Agent split/select in one Agent response."""
+    from backend.app.domain.dubbing_workflow import DubbingWorkflow
 
     class FakeRoleSkill:
         def __init__(self):
@@ -625,11 +635,13 @@ def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_parag
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
 
     events = []
     role_skill = FakeRoleSkill()
-    workflow = AiOneClickWorkflow(role_skill=role_skill, segmentation_service=ForbiddenSegmentationService())
+    workflow = DubbingWorkflow(
+        role_skill=role_skill, segmentation_service=ForbiddenSegmentationService()
+    )
     start = workflow.start_role_analysis(
         chapter_id="chapter-0001",
         chapter_title="第一章",
@@ -637,7 +649,10 @@ def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_parag
             {"paragraph_id": "p-0001", "text": "旁白第一段。"},
             {"paragraph_id": "p-0002", "text": "“你好。”她挥手。"},
         ],
-        existing_roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "hero", "name": "伊南娜"}],
+        existing_roles=[
+            {"role_id": "narrator", "name": "旁白"},
+            {"role_id": "hero", "name": "伊南娜"},
+        ],
     )
 
     result = workflow.resume_after_roles(
@@ -658,7 +673,9 @@ def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_parag
     )
 
     assert result.status == "completed"
-    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [["“你好。”她挥手。"]]
+    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [
+        ["“你好。”她挥手。"]
+    ]
     assert result.utterances_by_paragraph["p-0001"][0]["speaker_role_id"] == "narrator"
     assert result.utterances_by_paragraph["p-0002"][0]["speaker_role_id"] == "hero"
     assert result.utterances_by_paragraph["p-0002"][1]["speaker_role_id"] == "narrator"
@@ -668,7 +685,7 @@ def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_parag
 
 def test_v0_25_workflow_returns_readable_failure_when_split_and_select_text_conservation_fails():
     """Invalid model output must not be silently rewritten or accepted."""
-    from backend.app.domain.ai_one_click_workflow import AiOneClickWorkflow
+    from backend.app.domain.dubbing_workflow import DubbingWorkflow
 
     class FakeRoleSkill:
         def analyze_roles(self, **kwargs):
@@ -695,9 +712,11 @@ def test_v0_25_workflow_returns_readable_failure_when_split_and_select_text_cons
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
 
-    workflow = AiOneClickWorkflow(role_skill=FakeRoleSkill(), segmentation_service=ForbiddenSegmentationService())
+    workflow = DubbingWorkflow(
+        role_skill=FakeRoleSkill(), segmentation_service=ForbiddenSegmentationService()
+    )
     start = workflow.start_role_analysis(
         chapter_id="chapter-0001",
         chapter_title="第一章",
@@ -715,7 +734,7 @@ def test_v0_25_workflow_returns_readable_failure_when_split_and_select_text_cons
     assert result.failure is not None
     assert result.failure["paragraph_id"] == "p-0001"
     assert result.failure["error_code"] == "invalid_split_and_select"
-    assert "preserve the original statement text" in result.failure["message"]
+    assert "完整保留原台词文本" in result.failure["message"]
     assert result.utterances_by_paragraph == {}
 
 
@@ -753,7 +772,7 @@ def test_tts_request_validation_and_voice_job_traceability():
     assert "中文自然语言" in model_control_note("voice_design")
 
     missing_reference = narrator.with_updates(reference_audio_path=None)
-    with pytest.raises(ValueError, match="reference audio"):
+    with pytest.raises(ValueError, match="声音克隆需要参考音频"):
         build_tts_request(utterance, missing_reference)
 
     design_role = roles.get("female_lead").with_updates(
@@ -762,7 +781,7 @@ def test_tts_request_validation_and_voice_job_traceability():
         reference_audio_path=None,
         reference_text=None,
     )
-    with pytest.raises(ValueError, match="design prompt"):
+    with pytest.raises(ValueError, match="声音设计需要音色描述"):
         build_tts_request(
             {
                 "utterance_id": "p-0001-u-001",
@@ -803,9 +822,13 @@ def test_v0_12_voice_clone_request_keeps_controls_out_of_qwen_payload(tmp_path):
     write_valid_wav(reference_audio)
     write_valid_wav(service_audio)
 
-    role = RoleCollection(default_role_cards()).get("narrator").with_updates(
-        reference_audio_path=str(reference_audio),
-        reference_text="这是一段短参考音频。",
+    role = (
+        RoleCollection(default_role_cards())
+        .get("narrator")
+        .with_updates(
+            reference_audio_path=str(reference_audio),
+            reference_text="这是一段短参考音频。",
+        )
     )
     request = build_tts_request(
         {
@@ -896,8 +919,8 @@ def test_synthesize_local_qwen3_preserves_reference_audio_suffix_for_json_clone(
     assert captured["payload"]["audio_sample_suffix"] == ".mp3"
 
 
-def test_fastapi_app_exposes_v0_11_resource_boundaries():
-    """Covers architecture API boundary for the v0.11 manual workbench."""
+def test_fastapi_app_exposes_v0_4_resource_boundaries():
+    """验证 v0.4 多人有声书工作台的资源边界。"""
     pytest.importorskip("fastapi")
     from backend.app.api.app import create_app
 
@@ -908,32 +931,34 @@ def test_fastapi_app_exposes_v0_11_resource_boundaries():
             routes.setdefault(route.path, set()).update(route.methods)
 
     expected = [
-        ("/api/novels/parse", "POST"),
-        ("/api/novels/ai-chapter-split", "POST"),
-        ("/api/chapters", "GET"),
-        ("/api/chapters/{chapter_id}", "GET"),
-        ("/api/chapters/{chapter_id}/paragraphs", "PUT"),
-        ("/api/chapters/{chapter_id}/ai-one-click-analysis/start", "POST"),
-        ("/api/paragraphs/{paragraph_id}", "PATCH"),
-        ("/api/paragraphs/{paragraph_id}/segment", "POST"),
-        ("/api/ai-one-click-analysis/{thread_id}/roles-completed", "POST"),
-        ("/api/ai-one-click-analysis/{thread_id}/roles-completed-stream", "POST"),
-        ("/api/roles", "GET"),
-        ("/api/roles", "POST"),
-        ("/api/roles/{role_id}", "PATCH"),
-        ("/api/voice-resources", "GET"),
-        ("/api/voice-resources", "POST"),
-        ("/api/voice-resources/generate", "POST"),
-        ("/api/voice-resources/reference-audio", "POST"),
-        ("/api/voice-resources/{voice_id}", "PATCH"),
-        ("/api/voice-resources/{voice_id}", "DELETE"),
-        ("/api/voice-resources/{voice_id}/audio", "GET"),
-        ("/api/model-config", "GET"),
-        ("/api/model-config", "PATCH"),
-        ("/api/model-config/llm/test", "POST"),
-        ("/api/model-config/chapter-agent/test", "POST"),
-        ("/api/model-config/tts/start", "POST"),
-        ("/api/utterances/{utterance_id}/speech", "POST"),
+        ("/api/v1/books/parse", "POST"),
+        ("/api/v1/books/agent-chapter-split", "POST"),
+        ("/api/v1/chapters", "GET"),
+        ("/api/v1/chapters/{chapter_id}", "GET"),
+        ("/api/v1/chapters/{chapter_id}/paragraphs", "PUT"),
+        ("/api/v1/chapters/{chapter_id}/agent-runs", "POST"),
+        ("/api/v1/paragraphs/{paragraph_id}", "PATCH"),
+        ("/api/v1/paragraphs/{paragraph_id}/segment", "POST"),
+        ("/api/v1/agent-runs/{thread_id}/dubbing-arrangement", "POST"),
+        ("/api/v1/agent-runs/{thread_id}/events", "POST"),
+        ("/api/v1/characters", "GET"),
+        ("/api/v1/characters", "POST"),
+        ("/api/v1/characters/{role_id}", "PATCH"),
+        ("/api/v1/voice-profiles", "GET"),
+        ("/api/v1/voice-profiles", "POST"),
+        ("/api/v1/voice-profiles/generate", "POST"),
+        ("/api/v1/voice-profiles/reference-audio", "POST"),
+        ("/api/v1/voice-profiles/{voice_id}", "PATCH"),
+        ("/api/v1/voice-profiles/{voice_id}", "DELETE"),
+        ("/api/v1/voice-profiles/{voice_id}/audio", "GET"),
+        ("/api/v1/model-config", "GET"),
+        ("/api/v1/model-config", "PATCH"),
+        ("/api/v1/model-config/llm/test", "POST"),
+        ("/api/v1/model-config/chapter-agent/test", "POST"),
+        ("/api/v1/model-config/tts/start", "POST"),
+        ("/api/v1/dubbing-segments/{utterance_id}/dubbing-jobs", "POST"),
+        ("/api/v1/dubbing-jobs/{chapter_id}", "POST"),
+        ("/api/v1/exports/{chapter_id}", "POST"),
     ]
     for path, method in expected:
         assert method in routes[path]
@@ -952,13 +977,13 @@ def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync(tmp_path):
     voice_store = tmp_path / "voice-store"
 
     with patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", voice_store):
-        client = TestClient(create_app())
-        list_response = client.get("/api/voice-resources")
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+        list_response = client.get("/api/v1/voice-profiles")
         assert list_response.status_code == 200
         assert list_response.json()["voices"]
 
         create_response = client.post(
-            "/api/voice-resources",
+            "/api/v1/voice-profiles",
             json={
                 "name": "接口测试音色",
                 "description": "明亮、自然、适合少年角色",
@@ -970,12 +995,14 @@ def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync(tmp_path):
         created = create_response.json()["voice"]
         assert created["voice_id"].startswith("voice-")
         assert created["name"] == "接口测试音色"
-        created_audio_path = Path(created["reference_audio_path"])
-        assert created_audio_path.parent == voice_store
+        assert created["reference_audio_path"] == (
+            f"/api/v1/voice-profiles/{created['voice_id']}/audio"
+        )
+        created_audio_path = next(voice_store.glob(f"{created['voice_id']}.*"))
         assert created_audio_path.exists()
 
         role_response = client.patch(
-            "/api/roles/narrator",
+            "/api/v1/characters/narrator",
             json={
                 "name": "旁白",
                 "voice_resource_id": created["voice_id"],
@@ -984,17 +1011,17 @@ def test_fastapi_v0_11_voice_resource_crud_and_role_voice_sync(tmp_path):
         assert role_response.status_code == 200
         role = role_response.json()["role"]
         assert role["voice_resource_id"] == created["voice_id"]
-        assert role["reference_audio_path"] == str(created_audio_path)
+        assert role["reference_audio_path"] == created["reference_audio_path"]
         assert role["reference_text"] == "接口测试语音内容。"
 
         update_response = client.patch(
-            f"/api/voice-resources/{created['voice_id']}",
+            f"/api/v1/voice-profiles/{created['voice_id']}",
             json={"description": "已通过接口修改"},
         )
         assert update_response.status_code == 200
         assert update_response.json()["voice"]["description"] == "已通过接口修改"
 
-        delete_response = client.delete(f"/api/voice-resources/{created['voice_id']}")
+        delete_response = client.delete(f"/api/v1/voice-profiles/{created['voice_id']}")
     assert delete_response.status_code == 200
     remaining_ids = {voice["voice_id"] for voice in delete_response.json()["voices"]}
     assert created["voice_id"] not in remaining_ids
@@ -1011,7 +1038,9 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
     calls = []
 
     def fake_voice_design(request, *, output_path, service_base_url=None):
-        calls.append({"request": request, "output_path": output_path, "service_base_url": service_base_url})
+        calls.append(
+            {"request": request, "output_path": output_path, "service_base_url": service_base_url}
+        )
         write_valid_wav(output_path)
         return 0.75
 
@@ -1019,17 +1048,17 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
         patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path),
         patch.object(app_module, "synthesize_voice_design_qwen3", fake_voice_design),
     ):
-        client = TestClient(create_app())
-        before_count = len(client.get("/api/voice-resources").json()["voices"])
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+        before_count = len(client.get("/api/v1/voice-profiles").json()["voices"])
         generated = client.post(
-            "/api/voice-resources/generate",
+            "/api/v1/voice-profiles/generate",
             json={
                 "name": "生成旁白",
                 "description": "沉稳、叙事、颗粒感轻",
                 "reference_text": "这是一段用于试听新音色的语音。",
             },
         )
-        after_generate_count = len(client.get("/api/voice-resources").json()["voices"])
+        after_generate_count = len(client.get("/api/v1/voice-profiles").json()["voices"])
 
         assert generated.status_code == 200
         data = generated.json()
@@ -1037,8 +1066,8 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
         assert voice["generated"] is True
         assert voice["voice_id"].startswith("preview-")
         assert voice["reference_text"] == "这是一段用于试听新音色的语音。"
-        assert voice["reference_audio_path"].endswith(".wav")
-        assert data["audio_url"].startswith("/outputs/voice-resources/")
+        assert voice["reference_audio_path"] == f"/api/v1/voice-profiles/{voice['voice_id']}/audio"
+        assert data["audio_url"].startswith("/api/v1/downloads/voice-profiles/")
         assert data["generation_status"] == "succeeded"
         assert "VoiceDesign" in data["generation_note"]
         assert calls[0]["request"]["input"] == "这是一段用于试听新音色的语音。"
@@ -1047,7 +1076,7 @@ def test_fastapi_v0_141_generated_voice_attempts_voicedesign_model_before_substi
         assert before_count == after_generate_count
 
         saved = client.post(
-            "/api/voice-resources",
+            "/api/v1/voice-profiles",
             json={
                 "name": voice["name"],
                 "description": voice["description"],
@@ -1075,9 +1104,9 @@ def test_fastapi_v0_141_generated_voice_substitute_explains_required_model(tmp_p
         patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path),
         patch.object(app_module, "synthesize_voice_design_qwen3", unavailable_voice_design),
     ):
-        client = TestClient(create_app())
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
         generated = client.post(
-            "/api/voice-resources/generate",
+            "/api/v1/voice-profiles/generate",
             json={
                 "name": "生成旁白",
                 "description": "沉稳、叙事、颗粒感轻",
@@ -1090,7 +1119,7 @@ def test_fastapi_v0_141_generated_voice_substitute_explains_required_model(tmp_p
     assert data["generation_status"] == "substitute"
     assert "没有成功调用 VoiceDesign 模型" in data["generation_note"]
     assert "Qwen3-TTS-12Hz-1.7B-VoiceDesign" in data["model_requirement"]
-    assert validate_wav_duration(Path(data["voice"]["reference_audio_path"])) == 0.75
+    assert validate_wav_duration(tmp_path / "preview-0001.wav") == 0.75
 
 
 def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
@@ -1117,9 +1146,9 @@ def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
         patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", voice_store),
         patch.object(app_module, "synthesize_local_qwen3", fake_synthesize),
     ):
-        client = TestClient(create_app())
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
         voice_response = client.post(
-            "/api/voice-resources",
+            "/api/v1/voice-profiles",
             json={
                 "voice_id": "voice-male-2",
                 "name": "男2",
@@ -1130,12 +1159,11 @@ def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
             },
         )
         assert voice_response.status_code == 200
-        copied_audio_path = Path(voice_response.json()["voice"]["reference_audio_path"])
-        assert copied_audio_path.parent == voice_store
+        copied_audio_path = voice_store / "voice-male-2.wav"
         assert copied_audio_path.exists()
 
         stale_role = client.post(
-            "/api/roles",
+            "/api/v1/characters",
             json={
                 "role_id": "narrator_2",
                 "name": "旁白2",
@@ -1150,7 +1178,7 @@ def test_fastapi_v0_24_speech_uses_selected_voice_resource_override(tmp_path):
         assert stale_role.status_code == 200
 
         speech = client.post(
-            "/api/utterances/p-0001-u-001/speech",
+            "/api/v1/dubbing-segments/p-0001-u-001/dubbing-jobs",
             json={
                 "role_id": "narrator_2",
                 "voice_resource_id": "voice-male-2",
@@ -1219,20 +1247,17 @@ def test_fastapi_v0_14_reference_audio_upload_saves_local_file(tmp_path):
     from backend.app.api.app import create_app
 
     with patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path):
-        client = TestClient(create_app())
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
         response = client.post(
-            "/api/voice-resources/reference-audio",
-            json={
-                "filename": "角色 试听.wav",
-                "data_base64": "UklGRgAAAAA=",
-            },
+            "/api/v1/voice-profiles/reference-audio",
+            files={"file": ("角色 试听.wav", b"RIFF$\x00\x00\x00WAVE", "audio/wav")},
         )
 
     assert response.status_code == 200
     data = response.json()
-    assert data["reference_audio_path"].startswith(str(tmp_path))
+    assert data["reference_audio_path"].startswith("/api/v1/downloads/voice-profiles/")
     assert data["filename"].endswith(".wav")
-    assert Path(data["reference_audio_path"]).exists()
+    assert (tmp_path / data["filename"]).exists()
 
 
 def test_fastapi_v0_21_voice_resources_are_materialized_into_one_directory(tmp_path):
@@ -1255,13 +1280,13 @@ def test_fastapi_v0_21_voice_resources_are_materialized_into_one_directory(tmp_p
         patch.object(app_module, "REAL_VOICE_ROOT", sample_root),
         patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", voice_store),
     ):
-        client = TestClient(create_app())
-        listed = client.get("/api/voice-resources")
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+        listed = client.get("/api/v1/voice-profiles")
 
         new_source = tmp_path / "external-new.wav"
         write_valid_wav(new_source)
         created = client.post(
-            "/api/voice-resources",
+            "/api/v1/voice-profiles",
             json={
                 "voice_id": "voice-external",
                 "name": "外部音色",
@@ -1273,14 +1298,12 @@ def test_fastapi_v0_21_voice_resources_are_materialized_into_one_directory(tmp_p
 
     assert listed.status_code == 200
     listed_voice = listed.json()["voices"][0]
-    listed_path = Path(listed_voice["reference_audio_path"])
-    assert listed_path.parent == voice_store
+    listed_path = next(voice_store.glob(f"{listed_voice['voice_id']}.*"))
     assert listed_path.exists()
     assert listed_path != external_audio
 
     assert created.status_code == 200
-    created_path = Path(created.json()["voice"]["reference_audio_path"])
-    assert created_path.parent == voice_store
+    created_path = next(voice_store.glob("voice-external.*"))
     assert created_path.exists()
     assert created_path != new_source
 
@@ -1293,20 +1316,20 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
     from backend.app.api import app as app_module
     from backend.app.api.app import create_app
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
 
-    config_response = client.get("/api/model-config")
+    config_response = client.get("/api/v1/model-config")
     assert config_response.status_code == 200
     config = config_response.json()["config"]
     assert config["llm"]["base_url"] == "https://api.siliconflow.cn/v1"
     assert config["llm"]["model"] == "Qwen/Qwen3-8B"
-    assert config["llm"]["api_key"] == ""
+    assert config["llm"]["has_api_key"] is False
     assert config["tts"]["base_url"] == "http://127.0.0.1:7811"
     assert config["tts"]["model_path"] == app_module.DEFAULT_BASE_MODEL_PATH
     assert config["tts"]["voice_design_model_path"] == app_module.DEFAULT_VOICE_DESIGN_MODEL_PATH
 
     remote_save = client.patch(
-        "/api/model-config",
+        "/api/v1/model-config",
         json={
             "llm": {
                 "base_url": "https://api.example.test/v1",
@@ -1319,10 +1342,11 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
     updated = remote_save.json()["config"]
     assert updated["llm"]["base_url"] == "https://api.example.test/v1"
     assert updated["llm"]["model"] == "remote-test-model"
-    assert updated["llm"]["api_key"] == "test-placeholder-key"
+    assert updated["llm"]["has_api_key"] is False
+    assert "test-placeholder-key" not in remote_save.text
 
     local_save = client.patch(
-        "/api/model-config",
+        "/api/v1/model-config",
         json={
             "tts": {
                 "base_url": "http://127.0.0.1:7811",
@@ -1346,8 +1370,10 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
         def read(self):
             return b'{"data":[]}'
 
-    monkeypatch.setattr(app_module.urllib.request, "urlopen", lambda request, timeout=10: FakeResponse())
-    test_link = client.post("/api/model-config/llm/test", json={})
+    monkeypatch.setattr(
+        app_module.urllib.request, "urlopen", lambda request, timeout=10: FakeResponse()
+    )
+    test_link = client.post("/api/v1/model-config/llm/test", json={})
     assert test_link.status_code == 200
     assert test_link.json()["ok"] is True
     assert "远端模型连接成功" in test_link.json()["message"]
@@ -1360,7 +1386,7 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
 
     monkeypatch.setattr(app_module.urllib.request, "urlopen", capture_model_urlopen)
     chapter_link = client.post(
-        "/api/model-config/chapter-agent/test",
+        "/api/v1/model-config/chapter-agent/test",
         json={
             "chapter_agent": {
                 "base_url": "https://api.deepseek.com/v1",
@@ -1371,7 +1397,7 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
     )
     assert chapter_link.status_code == 200
     assert chapter_link.json()["ok"] is True
-    assert "章节划分智能体连接成功" in chapter_link.json()["message"]
+    assert "小说解析 Agent 连接成功" in chapter_link.json()["message"]
     assert captured_model_urls[-1] == "https://api.deepseek.com/models"
 
     calls = []
@@ -1401,8 +1427,10 @@ def test_fastapi_v0_14_model_config_boundaries_and_feedback_endpoints(monkeypatc
         return FakeHealthResponse()
 
     monkeypatch.setattr(app_module.urllib.request, "urlopen", fake_health_urlopen)
-    monkeypatch.setattr(app_module.subprocess, "Popen", lambda *args, **kwargs: calls.append(args) or FakeProcess())
-    start = client.post("/api/model-config/tts/start", json={})
+    monkeypatch.setattr(
+        app_module.subprocess, "Popen", lambda *args, **kwargs: calls.append(args) or FakeProcess()
+    )
+    start = client.post("/api/v1/model-config/tts/start", json={})
     assert start.status_code == 200
     assert start.json()["ok"] is True
     assert "模型加载完成" in start.json()["message"]
@@ -1428,7 +1456,7 @@ def test_fastapi_v0_23_tts_start_waits_for_health_before_reporting_success(monke
         def poll(self):
             return None
 
-    monkeypatch.setenv("NOVELVOICE_TTS_STARTUP_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setenv("SHUYI_TTS_STARTUP_TIMEOUT_SECONDS", "0.01")
     monkeypatch.setattr(app_module.subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
     monkeypatch.setattr(
         app_module.urllib.request,
@@ -1436,9 +1464,9 @@ def test_fastapi_v0_23_tts_start_waits_for_health_before_reporting_success(monke
         lambda request, timeout=10: (_ for _ in ()).throw(OSError("connection refused")),
     )
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     response = client.post(
-        "/api/model-config/tts/start",
+        "/api/v1/model-config/tts/start",
         json={
             "tts": {
                 "base_url": "http://127.0.0.1:7811",
@@ -1478,9 +1506,9 @@ def test_fastapi_v0_21_long_tts_text_returns_user_actionable_error(tmp_path):
         patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
         patch.object(app_module, "synthesize_local_qwen3", text_limit),
     ):
-        client = TestClient(create_app())
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
         response = client.post(
-            "/api/utterances/p-0001-u-001/speech",
+            "/api/v1/dubbing-segments/p-0001-u-001/dubbing-jobs",
             json={
                 "role_id": "narrator",
                 "text": long_text,
@@ -1499,7 +1527,7 @@ def test_synthesize_local_qwen3_preflights_configurable_text_limit(tmp_path, mon
     """Covers v0.21 local request guard before long text reaches the model server."""
     reference_audio = tmp_path / "reference.wav"
     write_valid_wav(reference_audio)
-    monkeypatch.setenv("NOVELVOICE_TTS_MAX_INPUT_CHARS", "12")
+    monkeypatch.setenv("SHUYI_TTS_MAX_INPUT_CHARS", "12")
 
     with pytest.raises(TTSTextLimitError) as exc_info:
         synthesize_local_qwen3(
@@ -1527,9 +1555,9 @@ def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
 
     from backend.app.api.app import create_app
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     response = client.put(
-        "/api/chapters/chapter-0001/paragraphs",
+        "/api/v1/chapters/chapter-0001/paragraphs",
         json={
             "title": "1.变成蘑菇的公爵千金",
             "paragraphs": [
@@ -1551,18 +1579,18 @@ def test_fastapi_v0_14_syncs_current_local_paragraphs_before_confirmation():
     assert data["utterance_drafts"][0]["utterance_id"] == "p-0002-u-001"
     assert data["utterance_drafts"][0]["text"] == "一醒来就发现自己被装麻袋了的伊南娜竭力扭动身体。"
     assert data["utterance_drafts"][0]["speaker_role_id"] is None
-    missing_key = client.post("/api/paragraphs/p-0002/segment", json={})
+    missing_key = client.post("/api/v1/paragraphs/p-0002/segment", json={})
     assert missing_key.status_code == 503
-    assert "paragraph not found" not in missing_key.text
+    assert "段落不存在" not in missing_key.text
 
 
-def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role_events(monkeypatch):
+def test_fastapi_v0_25_dubbing_workflow_returns_candidates_and_streams_role_events(monkeypatch):
     """Covers v0.25 API wiring for role analysis pause and streamed role-selection updates."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
-    from backend.app.api.app import _create_ai_one_click_workflow, create_app
-    from backend.app.domain.ai_one_click_workflow import (
+    from backend.app.api.app import _create_dubbing_workflow, create_app
+    from backend.app.domain.dubbing_workflow import (
         LangChainRoleAnalysisSkill,
         RoleAnalysisCandidate,
         RoleSelectionResult,
@@ -1617,9 +1645,9 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
     monkeypatch.setattr(LangChainRoleAnalysisSkill, "choose_role", fake_choose_role)
     monkeypatch.setattr(LangChainRoleAnalysisSkill, "choose_roles_batch", fake_choose_roles_batch)
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     config_response = client.patch(
-        "/api/model-config",
+        "/api/v1/model-config",
         json={
             "llm": {
                 "base_url": "https://api.siliconflow.cn/v1",
@@ -1634,11 +1662,11 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
         },
     )
     assert config_response.status_code == 200
-    workflow = _create_ai_one_click_workflow(client.app)
+    workflow = _create_dubbing_workflow(client.app)
     assert workflow.role_skill.provider["base_url"] == "https://api.deepseek.com"
     assert workflow.segmentation_service.provider["base_url"] == "https://api.siliconflow.cn/v1"
     sync = client.put(
-        "/api/chapters/chapter-0001/paragraphs",
+        "/api/v1/chapters/chapter-0001/paragraphs",
         json={
             "title": "第一章",
             "paragraphs": [{"paragraph_id": "p-0001", "text": "旁白第一段。"}],
@@ -1647,7 +1675,7 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
     )
     assert sync.status_code == 200
 
-    started = client.post("/api/chapters/chapter-0001/ai-one-click-analysis/start", json={})
+    started = client.post("/api/v1/chapters/chapter-0001/agent-runs", json={})
     assert started.status_code == 200
     start_data = started.json()
     assert start_data["status"] == "waiting_for_roles"
@@ -1655,16 +1683,34 @@ def test_fastapi_v0_25_ai_one_click_workflow_returns_candidates_and_streams_role
     assert "自动添加/更新角色" in start_data["message"]
 
     streamed = client.post(
-        f"/api/ai-one-click-analysis/{start_data['thread_id']}/roles-completed-stream",
+        f"/api/v1/agent-runs/{start_data['thread_id']}/events",
         json={"utterances_by_paragraph": {}},
     )
     assert streamed.status_code == 200
-    lines = [json.loads(line) for line in streamed.text.splitlines() if line.strip()]
-    assert lines[0]["event"] == "role_selected"
-    assert lines[0]["data"]["utterance_id"] == "p-0001-u-001"
-    assert lines[0]["data"]["speaker_role_id"] == "narrator"
-    assert lines[-1]["event"] == "completed"
-    assert lines[-1]["data"]["utterances_by_paragraph"]["p-0001"][0]["speaker_role_id"] == "narrator"
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    frames = [frame for frame in streamed.text.split("\n\n") if frame.strip()]
+    events = []
+    for frame in frames:
+        fields = dict(line.split(": ", 1) for line in frame.splitlines())
+        events.append(
+            {"id": int(fields["id"]), "event": fields["event"], "data": json.loads(fields["data"])}
+        )
+    assert events[0]["id"] == 1
+    assert events[0]["event"] == "role_selected"
+    assert events[0]["data"]["utterance_id"] == "p-0001-u-001"
+    assert events[0]["data"]["speaker_role_id"] == "narrator"
+    assert events[-1]["event"] == "completed"
+    assert (
+        events[-1]["data"]["utterances_by_paragraph"]["p-0001"][0]["speaker_role_id"] == "narrator"
+    )
+
+    resumed = client.post(
+        f"/api/v1/agent-runs/{start_data['thread_id']}/events",
+        headers={"Last-Event-ID": "1"},
+        json={"utterances_by_paragraph": {}},
+    )
+    assert "id: 1\n" not in resumed.text
+    assert f"id: {events[-1]['id']}\n" in resumed.text
 
 
 def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkeypatch):
@@ -1675,22 +1721,22 @@ def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkey
     from backend.app.api.app import create_app
 
     monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     parse_response = client.post(
-        "/api/novels/parse",
+        "/api/v1/books/parse",
         json={"text": "第一章 初遇\n他说：“你好。”"},
     )
     assert parse_response.status_code == 200
 
-    blocked = client.post("/api/paragraphs/p-0001/segment", json={})
+    blocked = client.post("/api/v1/paragraphs/p-0001/segment", json={})
     assert blocked.status_code == 409
-    assert "confirmed" in blocked.json()["detail"]
+    assert "确认段落" in blocked.json()["detail"]
 
-    confirm_response = client.patch("/api/paragraphs/p-0001", json={"confirm_all": True})
+    confirm_response = client.patch("/api/v1/paragraphs/p-0001", json={"confirm_all": True})
     assert confirm_response.status_code == 200
     assert confirm_response.json()["can_segment"] is True
 
-    missing_key = client.post("/api/paragraphs/p-0001/segment", json={})
+    missing_key = client.post("/api/v1/paragraphs/p-0001/segment", json={})
     assert missing_key.status_code == 503
     assert "SILICONFLOW_API_KEY" in missing_key.json()["detail"]
 
@@ -1702,9 +1748,9 @@ def test_fastapi_role_patch_persists_for_later_reads():
 
     from backend.app.api.app import create_app
 
-    client = TestClient(create_app())
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     response = client.patch(
-        "/api/roles/narrator",
+        "/api/v1/characters/narrator",
         json={
             "name": "旁白改",
             "reference_audio_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
@@ -1714,11 +1760,13 @@ def test_fastapi_role_patch_persists_for_later_reads():
     assert response.status_code == 200
     assert {"value": "narrator", "label": "旁白改"} in response.json()["role_options"]
 
-    roles_response = client.get("/api/roles")
+    roles_response = client.get("/api/v1/characters")
     assert roles_response.status_code == 200
-    narrator = next(role for role in roles_response.json()["roles"] if role["role_id"] == "narrator")
+    narrator = next(
+        role for role in roles_response.json()["roles"] if role["role_id"] == "narrator"
+    )
     assert narrator["name"] == "旁白改"
-    assert narrator["reference_audio_path"].endswith("cmn_qixinxieli_canonni_cc0.wav")
+    assert narrator["reference_audio_path"] == "/api/v1/voice-profiles/voice-male-narrator/audio"
     assert narrator["reference_text"] == "齐心协力"
 
 
@@ -1756,10 +1804,17 @@ def test_fastapi_segmentation_uses_provider_and_repairs_once(monkeypatch):
 ```"""
 
     with patch.object(LangChainSegmentationSkill, "segment", fake_segment):
-        client = TestClient(create_app())
-        assert client.post("/api/novels/parse", json={"text": "第一章 初遇\n他说：“你好。”"}).status_code == 200
-        assert client.patch("/api/paragraphs/p-0001", json={"confirm_all": True}).status_code == 200
-        response = client.post("/api/paragraphs/p-0001/segment", json={})
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+        assert (
+            client.post(
+                "/api/v1/books/parse", json={"text": "第一章 初遇\n他说：“你好。”"}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.patch("/api/v1/paragraphs/p-0001", json={"confirm_all": True}).status_code == 200
+        )
+        response = client.post("/api/v1/paragraphs/p-0001/segment", json={})
 
     assert response.status_code == 200
     data = response.json()
@@ -1769,7 +1824,9 @@ def test_fastapi_segmentation_uses_provider_and_repairs_once(monkeypatch):
     assert data["utterances"][0]["text"] == "他说：“你好。”"
 
 
-def write_valid_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> None:
+def write_valid_wav(
+    path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000
+) -> None:
     frame_count = int(duration_seconds * sample_rate)
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wav_file:
@@ -1797,12 +1854,12 @@ def test_wav_duration_validation_rejects_invalid_and_short_audio(tmp_path):
 
     short = tmp_path / "short.wav"
     write_valid_wav(short, duration_seconds=0.25)
-    with pytest.raises(TTSServiceError, match="duration"):
+    with pytest.raises(TTSServiceError, match="时长"):
         validate_wav_duration(short)
 
     invalid = tmp_path / "invalid.wav"
     invalid.write_bytes(b"not-a-wave")
-    with pytest.raises(TTSServiceError, match="decodable wav"):
+    with pytest.raises(TTSServiceError, match="可解码的 WAV"):
         validate_wav_duration(invalid)
 
 
@@ -1825,9 +1882,9 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
         patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
         patch.object(app_module, "synthesize_local_qwen3", fake_synthesize),
     ):
-        client = TestClient(create_app())
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
         response = client.post(
-            "/api/utterances/p-0001-u-001/speech",
+            "/api/v1/dubbing-segments/p-0001-u-001/dubbing-jobs",
             json={
                 "role_id": "narrator",
                 "text": "待合成文本",
@@ -1840,7 +1897,7 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
     assert data["voice_job"]["status"] == "succeeded"
     assert data["voice_job"]["utterance_id"] == "p-0001-u-001"
     assert data["voice_job"]["provider"] == "local-qwen3-tts"
-    assert data["audio_url"] == "/outputs/audio/vj-0001.wav"
+    assert data["audio_url"] == "/api/v1/downloads/audio/vj-0001.wav"
     assert data["duration_seconds"] == 0.75
     assert calls[0]["request"]["input"] == "待合成文本"
 
@@ -1869,9 +1926,13 @@ def test_fastapi_v0_21_speech_synthesis_does_not_block_voice_resource_reads(tmp_
         ):
             app = create_app()
             transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+                headers={"Authorization": "Bearer test-v0-4-token"},
+            ) as client:
                 create_voice = await client.post(
-                    "/api/voice-resources",
+                    "/api/v1/voice-profiles",
                     json={
                         "voice_id": "voice-concurrent",
                         "name": "并发测试音色",
@@ -1885,7 +1946,7 @@ def test_fastapi_v0_21_speech_synthesis_does_not_block_voice_resource_reads(tmp_
                 started_at = time.perf_counter()
                 speech_task = asyncio.create_task(
                     client.post(
-                        "/api/utterances/p-0001-u-001/speech",
+                        "/api/v1/dubbing-segments/p-0001-u-001/dubbing-jobs",
                         json={
                             "role_id": "narrator",
                             "voice_resource_id": "voice-concurrent",
@@ -1896,7 +1957,7 @@ def test_fastapi_v0_21_speech_synthesis_does_not_block_voice_resource_reads(tmp_
                 )
                 await asyncio.sleep(0.02)
                 elapsed_before_read = time.perf_counter() - started_at
-                voices_response = await client.get("/api/voice-resources")
+                voices_response = await client.get("/api/v1/voice-profiles")
                 speech_response = await speech_task
                 return elapsed_before_read, voices_response, speech_response
 
@@ -2022,7 +2083,9 @@ def test_qwen3_tts_server_json_voice_clone_uses_reference_audio_suffix(monkeypat
     def fake_encode_audio_response(wav, sr, response_format):
         return {"wav": wav, "sr": sr, "response_format": response_format}
 
-    monkeypatch.setattr(server, "generate_voice_clone_with_reusable_prompt", fake_generate_voice_clone)
+    monkeypatch.setattr(
+        server, "generate_voice_clone_with_reusable_prompt", fake_generate_voice_clone
+    )
     monkeypatch.setattr(server, "encode_audio_response", fake_encode_audio_response)
 
     response = asyncio.run(
@@ -2052,15 +2115,17 @@ def test_fastapi_tts_endpoint_returns_substitute_audio_when_local_service_is_dow
     from backend.app.api.app import create_app
 
     def unavailable_service(request, *, output_path, service_base_url=None):
-        raise TTSServiceError("local Qwen3-TTS request failed: <urlopen error [Errno 61] Connection refused>")
+        raise TTSServiceError(
+            "本地 Qwen3-TTS 请求失败：<urlopen error [Errno 61] Connection refused>"
+        )
 
     with (
         patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
         patch.object(app_module, "synthesize_local_qwen3", unavailable_service),
     ):
-        client = TestClient(create_app())
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
         response = client.post(
-            "/api/utterances/p-0001-u-001/speech",
+            "/api/v1/dubbing-segments/p-0001-u-001/dubbing-jobs",
             json={
                 "role_id": "narrator",
                 "text": "待合成文本",
@@ -2072,5 +2137,5 @@ def test_fastapi_tts_endpoint_returns_substitute_audio_when_local_service_is_dow
     data = response.json()
     assert data["voice_job"]["status"] == "substitute"
     assert "Qwen3-TTS" in data["voice_job"]["error"]
-    assert data["audio_url"] == "/outputs/audio/vj-0001.wav"
+    assert data["audio_url"] == "/api/v1/downloads/audio/vj-0001.wav"
     assert validate_wav_duration(tmp_path / "vj-0001.wav") == 0.75

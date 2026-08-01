@@ -1,1 +1,1 @@
-"""Persistence adapters for Shuyi Agent."""
+"""书弈 Agent 的持久化适配器。"""

@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import base64
+import binascii
 import hashlib
 import os
 import tempfile
@@ -14,20 +15,20 @@ from fastapi.responses import Response
 
 try:
     import soundfile as sf
-except ImportError:  # pragma: no cover - runtime dependency for the local TTS service.
+except ImportError:  # pragma: no cover - 本地 TTS 服务的运行时依赖。
     sf = None
 
 try:
     import torch
-except ImportError:  # pragma: no cover - runtime dependency for the local TTS service.
+except ImportError:  # pragma: no cover - 本地 TTS 服务的运行时依赖。
     torch = None
 
 try:
     from qwen_tts import Qwen3TTSModel
-except ImportError:  # pragma: no cover - runtime dependency for the local TTS service.
+except ImportError:  # pragma: no cover - 本地 TTS 服务的运行时依赖。
     Qwen3TTSModel = None
 
-app = FastAPI(title="NovelVoice Qwen3-TTS Server")
+app = FastAPI(title="书弈 Agent Qwen3-TTS 服务")
 voice_clone_model = None
 voice_design_model = None
 voice_clone_prompt_cache: dict[str, Any] = {}
@@ -50,7 +51,7 @@ def positive_int_from_env(*names: str, default: int) -> int:
 
 def tts_max_input_chars() -> int:
     return positive_int_from_env(
-        "NOVELVOICE_TTS_MAX_INPUT_CHARS",
+        "SHUYI_TTS_MAX_INPUT_CHARS",
         "QWEN3_TTS_MAX_INPUT_CHARS",
         default=DEFAULT_TTS_MAX_INPUT_CHARS,
     )
@@ -63,7 +64,7 @@ def tts_max_new_tokens(value: Any = None) -> int:
     except (TypeError, ValueError):
         pass
     return positive_int_from_env(
-        "NOVELVOICE_TTS_MAX_NEW_TOKENS",
+        "SHUYI_TTS_MAX_NEW_TOKENS",
         "QWEN3_TTS_MAX_NEW_TOKENS",
         default=DEFAULT_TTS_MAX_NEW_TOKENS,
     )
@@ -86,21 +87,37 @@ def exception_detail(exc: Exception) -> str:
     return str(exc) or exc.__class__.__name__
 
 
+def decode_reference_audio(audio_sample: str) -> bytes:
+    try:
+        return base64.b64decode(audio_sample, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(status_code=400, detail="参考音频的 Base64 数据无效") from exc
+
+
 def load_model(model_path: str):
     if torch is None or Qwen3TTSModel is None:
-        raise RuntimeError("qwen_tts and torch are required to start the local Qwen3-TTS service")
-    device_map = os.environ.get("QWEN3_TTS_DEVICE", "cpu").strip().lower() or "cpu"
-    if device_map not in {"cpu", "mps", "cuda"}:
+        raise RuntimeError("启动本地 Qwen3-TTS 服务需要 qwen_tts 与 torch")
+    requested_device = os.environ.get("QWEN3_TTS_DEVICE", "auto").strip().lower() or "auto"
+    cuda_available = bool(getattr(getattr(torch, "cuda", None), "is_available", lambda: False)())
+    if requested_device == "auto":
+        device_map = "cuda:0" if cuda_available else "cpu"
+    elif requested_device == "cuda":
+        if not cuda_available:
+            raise RuntimeError("已指定 CUDA，但当前环境未检测到可用的 CUDA 设备")
+        device_map = "cuda:0"
+    elif requested_device in {"cpu", "mps"}:
+        device_map = requested_device
+    else:
         device_map = "cpu"
 
     dtype = torch.float32
     if device_map == "mps":
         dtype = torch.float16
-    elif device_map == "cuda":
+    elif device_map == "cuda:0":
         dtype = torch.bfloat16
 
-    print(f"Loading Qwen3-TTS from {model_path}", flush=True)
-    print(f"Using device={device_map}, dtype={dtype}", flush=True)
+    print(f"正在加载 Qwen3-TTS：{model_path}", flush=True)
+    print(f"正在使用设备：{device_map}，数据类型：{dtype}", flush=True)
     return Qwen3TTSModel.from_pretrained(
         model_path,
         device_map=device_map,
@@ -108,7 +125,9 @@ def load_model(model_path: str):
     )
 
 
-def _voice_clone_prompt_cache_key(reference_audio: bytes, reusable_prompt: str, x_vector_only: bool) -> str:
+def _voice_clone_prompt_cache_key(
+    reference_audio: bytes, reusable_prompt: str, x_vector_only: bool
+) -> str:
     digest = hashlib.sha256()
     digest.update(reference_audio)
     digest.update(b"\0")
@@ -139,7 +158,9 @@ def get_or_create_voice_clone_prompt(
     return voice_clone_prompt_cache[cache_key]
 
 
-def create_voice_clone_prompt(model, *, reference_path: str, reusable_prompt: str, x_vector_only: bool):
+def create_voice_clone_prompt(
+    model, *, reference_path: str, reusable_prompt: str, x_vector_only: bool
+):
     try:
         return model.create_voice_clone_prompt(
             ref_audio=reference_path,
@@ -204,7 +225,9 @@ async def startup():
 async def health():
     voice_clone_ready = voice_clone_model is not None
     voice_design_loaded = voice_design_model is not None
-    voice_design_capable = voice_design_loaded and hasattr(voice_design_model, "generate_voice_design")
+    voice_design_capable = voice_design_loaded and hasattr(
+        voice_design_model, "generate_voice_design"
+    )
     return {
         "ok": voice_clone_ready and voice_design_capable,
         "voice_clone": voice_clone_ready,
@@ -262,11 +285,13 @@ async def speech_json(payload: dict):
     max_new_tokens = tts_max_new_tokens(payload.get("max_new_tokens"))
     audio_sample = payload.get("audio_sample") or payload.get("voice_file")
     if not text or not audio_sample:
-        raise HTTPException(status_code=400, detail="input and audio_sample are required")
+        raise HTTPException(status_code=400, detail="输入文本与参考音频不能为空")
     validate_request_text(text)
 
-    reference_audio = base64.b64decode(audio_sample)
-    suffix = safe_reference_audio_suffix(payload.get("audio_sample_suffix") or payload.get("audio_sample_format"))
+    reference_audio = decode_reference_audio(audio_sample)
+    suffix = safe_reference_audio_suffix(
+        payload.get("audio_sample_suffix") or payload.get("audio_sample_format")
+    )
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as reference:
         reference.write(reference_audio)
         reference_path = reference.name
@@ -307,14 +332,16 @@ async def speech_batch_json(payload: dict):
     max_new_tokens = tts_max_new_tokens(payload.get("max_new_tokens"))
     audio_sample = payload.get("audio_sample") or payload.get("voice_file")
     if not texts or not audio_sample:
-        raise HTTPException(status_code=400, detail="input and audio_sample are required")
+        raise HTTPException(status_code=400, detail="输入文本与参考音频不能为空")
     if len(languages) != len(texts):
-        raise HTTPException(status_code=400, detail="language count must match input count")
+        raise HTTPException(status_code=400, detail="语言列表数量必须与输入文本数量一致")
     for text in texts:
         validate_request_text(str(text))
 
-    reference_audio = base64.b64decode(audio_sample)
-    suffix = safe_reference_audio_suffix(payload.get("audio_sample_suffix") or payload.get("audio_sample_format"))
+    reference_audio = decode_reference_audio(audio_sample)
+    suffix = safe_reference_audio_suffix(
+        payload.get("audio_sample_suffix") or payload.get("audio_sample_format")
+    )
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as reference:
         reference.write(reference_audio)
         reference_path = reference.name
@@ -368,7 +395,7 @@ async def voice_design_json(payload: dict):
     response_format = payload.get("response_format", "wav")
     max_new_tokens = tts_max_new_tokens(payload.get("max_new_tokens"))
     if not text or not instruct:
-        raise HTTPException(status_code=400, detail="input and instruct are required")
+        raise HTTPException(status_code=400, detail="输入文本与音色描述不能为空")
     validate_request_text(text)
 
     try:
@@ -383,7 +410,7 @@ async def voice_design_json(payload: dict):
     except AttributeError as exc:
         raise HTTPException(
             status_code=501,
-            detail="loaded Qwen3-TTS model does not provide generate_voice_design; use Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+            detail="已加载的 Qwen3-TTS 模型不支持 generate_voice_design，请使用 Qwen3-TTS-12Hz-1.7B-VoiceDesign",
         ) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=exception_detail(exc)) from exc
@@ -391,7 +418,7 @@ async def voice_design_json(payload: dict):
 
 def encode_audio_bytes(wav, sr, response_format: str) -> tuple[bytes, str]:
     if sf is None:
-        raise HTTPException(status_code=500, detail="soundfile is required to encode Qwen3-TTS audio")
+        raise HTTPException(status_code=500, detail="编码 Qwen3-TTS 音频需要 soundfile")
     fmt = response_format.lower()
     if fmt not in {"wav", "flac", "ogg"}:
         fmt = "wav"
@@ -423,13 +450,15 @@ def encode_audio_response(wav, sr, response_format: str) -> Response:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True)
-    parser.add_argument("--voice-design-model-path", default=os.environ.get("QWEN3_TTS_VOICE_DESIGN_MODEL_PATH", ""))
+    parser.add_argument(
+        "--voice-design-model-path", default=os.environ.get("QWEN3_TTS_VOICE_DESIGN_MODEL_PATH", "")
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7811)
     parser.add_argument(
         "--device",
-        default=os.environ.get("QWEN3_TTS_DEVICE", "cpu"),
-        choices=["cpu", "mps", "cuda"],
+        default=os.environ.get("QWEN3_TTS_DEVICE", "auto"),
+        choices=["auto", "cpu", "mps", "cuda"],
     )
     args = parser.parse_args()
 

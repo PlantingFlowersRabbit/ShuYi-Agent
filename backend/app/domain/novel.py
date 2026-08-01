@@ -27,7 +27,11 @@ def parse_novel_text(text: str) -> list[Chapter]:
     matches = list(CHAPTER_HEADING_RE.finditer(text))
     if not matches:
         stripped = text.strip()
-        return [Chapter(chapter_id="chapter-0001", title="未分章正文", body=stripped)] if stripped else []
+        return (
+            [Chapter(chapter_id="chapter-0001", title="未分章正文", body=stripped)]
+            if stripped
+            else []
+        )
 
     chapters: list[Chapter] = []
     for index, match in enumerate(matches, start=1):
@@ -93,7 +97,7 @@ class ChapterWorkbench:
         for paragraph in self._paragraphs:
             if paragraph.paragraph_id == paragraph_id:
                 return paragraph
-        raise KeyError(f"Unknown paragraph_id: {paragraph_id}")
+        raise KeyError(f"段落不存在：{paragraph_id}")
 
     def edit_paragraph(self, paragraph_id: str, text: str) -> None:
         paragraph = self.get_paragraph(paragraph_id)
@@ -114,7 +118,7 @@ class ChapterWorkbench:
 
     def confirm_paragraphs(self) -> None:
         if not self.visible_paragraphs:
-            raise ValueError("Cannot confirm an empty chapter")
+            raise ValueError("不能确认空章节")
         for paragraph in self.visible_paragraphs:
             paragraph.confirmed = True
         self._confirmed = True

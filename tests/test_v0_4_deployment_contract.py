@@ -49,9 +49,9 @@ def test_v0_4_compose_selects_runtime_and_persists_first_start_models(
 
     assert service["build"]["target"] == target
     environment = service["environment"]
-    assert environment["NOVELVOICE_DEVICE"] == device
-    assert environment["NOVELVOICE_MODEL_AUTO_DOWNLOAD"] == "1"
-    assert environment["NOVELVOICE_MODEL_DIR"] == "/models"
+    assert environment["SHUYI_DEVICE"] == device
+    assert environment["SHUYI_MODEL_AUTO_DOWNLOAD"] == "1"
+    assert environment["SHUYI_MODEL_DIR"] == "/models"
     assert any(volume.get("target") == "/models" for volume in service["volumes"])
     assert _duration_seconds(service["healthcheck"]["start_period"]) >= 300
 
@@ -65,3 +65,20 @@ def test_v0_4_dockerfile_defines_cpu_and_cuda_runtime_targets():
         )
     )
     assert {"cpu-runtime", "cuda-runtime"}.issubset(targets)
+
+
+def test_v0_4_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
+    pipeline = (ROOT / ".cnb.yml").read_text(encoding="utf-8")
+
+    for required in [
+        "cpu-test",
+        "gpu-real-inference",
+        "--gpus all",
+        "--target cpu-runtime",
+        "--target cuda-runtime",
+        "v0.4.0-cpu",
+        "CNB_TAG:-}",
+        "v0.4.0-cuda",
+        "CNB_COMMIT_SHA",
+    ]:
+        assert required in pipeline

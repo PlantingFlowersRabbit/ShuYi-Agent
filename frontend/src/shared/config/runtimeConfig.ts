@@ -10,6 +10,7 @@ export type RuntimeConfig = {
   pagesBase: string;
   apiBase: string;
   apiUrl: (path: string) => string;
+  mediaUrl: (path: string) => string;
 };
 
 function normalizePagesBase(value: string | undefined): string {
@@ -18,7 +19,7 @@ function normalizePagesBase(value: string | undefined): string {
 }
 
 function normalizeApiBase(value: string | undefined): string {
-  const base = value?.trim() || "/api";
+  const base = value?.trim() || "/api/v1";
   return base === "/" ? "" : base.replace(/\/+$/, "");
 }
 
@@ -33,6 +34,12 @@ export function resolveRuntimeConfig(env: RuntimeEnv): RuntimeConfig {
       if (/^https?:\/\//i.test(path)) return path;
       const endpoint = path.replace(/^\/+/, "");
       return apiBase ? `${apiBase}/${endpoint}` : `/${endpoint}`;
+    },
+    mediaUrl(path: string) {
+      if (/^https?:\/\//i.test(path)) return path;
+      const endpoint = path.startsWith("/") ? path : `/${path}`;
+      if (!/^https?:\/\//i.test(apiBase)) return endpoint;
+      return `${new URL(apiBase).origin}${endpoint}`;
     },
   };
 }

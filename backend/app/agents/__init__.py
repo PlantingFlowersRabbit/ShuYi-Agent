@@ -1,1 +1,1 @@
-"""Runtime agent contracts for Shuyi Agent."""
+"""书弈 Agent 的运行时智能体契约。"""

@@ -1,1 +1,1 @@
-"""NovelVoice backend package."""
+"""书弈 Agent 后端程序包。"""

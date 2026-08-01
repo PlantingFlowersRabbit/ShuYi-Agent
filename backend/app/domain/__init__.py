@@ -1,1 +1,1 @@
-"""Domain services for the v0.11 manual collaboration workflow."""
+"""书弈 Agent 的领域服务。"""

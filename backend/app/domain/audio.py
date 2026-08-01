@@ -25,7 +25,18 @@ class TTSTextLimitError(TTSServiceError):
     pass
 
 
-DEFAULT_EMOTION_OPTIONS = ["", "中性", "开心", "悲伤", "愤怒", "害怕", "惊讶", "温柔", "紧张", "严肃"]
+DEFAULT_EMOTION_OPTIONS = [
+    "",
+    "中性",
+    "开心",
+    "悲伤",
+    "愤怒",
+    "害怕",
+    "惊讶",
+    "温柔",
+    "紧张",
+    "严肃",
+]
 DEFAULT_LANGUAGE_OPTIONS = [
     "Auto",
     "Chinese",
@@ -126,7 +137,7 @@ def _positive_int_from_env(*names: str, default: int) -> int:
 
 def tts_max_input_chars() -> int:
     return _positive_int_from_env(
-        "NOVELVOICE_TTS_MAX_INPUT_CHARS",
+        "SHUYI_TTS_MAX_INPUT_CHARS",
         "QWEN3_TTS_MAX_INPUT_CHARS",
         default=DEFAULT_TTS_MAX_INPUT_CHARS,
     )
@@ -134,14 +145,14 @@ def tts_max_input_chars() -> int:
 
 def tts_max_new_tokens() -> int:
     return _positive_int_from_env(
-        "NOVELVOICE_TTS_MAX_NEW_TOKENS",
+        "SHUYI_TTS_MAX_NEW_TOKENS",
         "QWEN3_TTS_MAX_NEW_TOKENS",
         default=DEFAULT_TTS_MAX_NEW_TOKENS,
     )
 
 
 def _tts_request_timeout_seconds(text: str) -> float:
-    raw_value = os.environ.get("NOVELVOICE_TTS_REQUEST_TIMEOUT_SECONDS", "").strip()
+    raw_value = os.environ.get("SHUYI_TTS_REQUEST_TIMEOUT_SECONDS", "").strip()
     if raw_value:
         try:
             return max(1.0, float(raw_value))
@@ -217,7 +228,9 @@ def _volume_instruction(volume: float) -> str:
     return ""
 
 
-def build_control_instruct(*, emotion: str, other_control_text: str, speed: float, volume: float) -> str:
+def build_control_instruct(
+    *, emotion: str, other_control_text: str, speed: float, volume: float
+) -> str:
     emotion_map = {
         "中性": "自然地说",
         "开心": "开心地说",
@@ -247,7 +260,7 @@ def build_control_instruct(*, emotion: str, other_control_text: str, speed: floa
 def model_control_note(voice_mode: str) -> str:
     if voice_mode == "voice_design":
         return "Qwen3-TTS VoiceDesign / Instruct 路径支持中文自然语言控制文本。"
-    return "本地 Qwen3-TTS-12Hz-1.7B-Base voice cloning 路径只向模型发送参考音频、reusable prompt、language 和 x_vector_only；情绪、语速、音量控制提示暂不发送给 Base 模型。"
+    return "本地 Qwen3-TTS-12Hz-1.7B-Base 声音克隆路径只向模型发送参考音频，以及 reusable_prompt、language 和 x_vector_only 字段；情绪、语速、音量控制提示暂不发送给 Base 模型。"
 
 
 def build_tts_request(
@@ -259,7 +272,7 @@ def build_tts_request(
 ) -> dict[str, Any]:
     text = (utterance.get("text") or "").strip()
     if not text:
-        raise ValueError("utterance text is required")
+        raise ValueError("配音片段文本不能为空")
 
     voice_mode = utterance.get("voice_mode") or role.voice_mode
     emotion = str(utterance.get("emotion") or "").strip()
@@ -283,9 +296,9 @@ def build_tts_request(
 
     if voice_mode == "voice_cloning":
         if not role.reference_audio_path:
-            raise ValueError("voice cloning requires reference audio")
+            raise ValueError("声音克隆需要参考音频")
         if not role.reference_text:
-            raise ValueError("voice cloning requires reference text")
+            raise ValueError("声音克隆需要参考文本")
         payload = {
             "input": text,
             "audio_sample_path": role.reference_audio_path,
@@ -305,7 +318,7 @@ def build_tts_request(
     if voice_mode == "voice_design":
         design_prompt = other_control_text or utterance.get("design_prompt") or role.design_prompt
         if not design_prompt:
-            raise ValueError("voice design requires design prompt")
+            raise ValueError("声音设计需要音色描述")
         return {
             "input": text,
             "design_prompt": design_prompt,
@@ -318,7 +331,7 @@ def build_tts_request(
             "volume": volume,
         }
 
-    raise ValueError(f"Unsupported voice mode: {voice_mode}")
+    raise ValueError(f"不支持的音色模式：{voice_mode}")
 
 
 def synthesize_local_qwen3(
@@ -328,14 +341,14 @@ def synthesize_local_qwen3(
     service_base_url: str | None = None,
 ) -> float:
     if "audio_sample_path" not in request_payload:
-        raise TTSServiceError("local Qwen3-TTS currently requires voice cloning reference audio")
+        raise TTSServiceError("本地 Qwen3-TTS 当前需要声音克隆参考音频")
 
     text = str(request_payload["input"])
     validate_tts_text_length(text)
 
     reference_audio = Path(request_payload["audio_sample_path"])
     if not reference_audio.exists():
-        raise TTSServiceError(f"reference audio does not exist: {reference_audio}")
+        raise TTSServiceError(f"参考音频不存在：{reference_audio}")
 
     payload = {
         "input": text,
@@ -347,9 +360,9 @@ def synthesize_local_qwen3(
         "x_vector_only": bool(request_payload.get("x_vector_only", False)),
         "max_new_tokens": int(request_payload.get("max_new_tokens") or tts_max_new_tokens()),
     }
-    base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
-        "/"
-    )
+    base_url = (
+        service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811"
+    ).rstrip("/")
     http_request = urllib.request.Request(
         f"{base_url}/v1/audio/speech",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -369,14 +382,14 @@ def synthesize_local_qwen3(
                 f"{detail}；当前语句文本长度 {len(text)} 字，"
                 f"max_new_tokens={tts_max_new_tokens()}，可尝试缩短文本或拆成多条音频生成。"
             )
-        raise TTSServiceError(f"local Qwen3-TTS request failed: HTTP {exc.code}: {detail}") from exc
+        raise TTSServiceError(f"本地 Qwen3-TTS 请求失败：HTTP {exc.code}：{detail}") from exc
     except TimeoutError as exc:
         raise TTSTextLimitError(_timeout_text_limit_message(text, timeout_seconds)) from exc
     except Exception as exc:
-        raise TTSServiceError(f"local Qwen3-TTS request failed: {exc}") from exc
+        raise TTSServiceError(f"本地 Qwen3-TTS 请求失败：{exc}") from exc
 
     if not audio_bytes:
-        raise TTSServiceError("local Qwen3-TTS returned empty audio")
+        raise TTSServiceError("本地 Qwen3-TTS 未返回音频")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(audio_bytes)
     return validate_wav_duration(output_path)
@@ -389,11 +402,13 @@ def synthesize_voice_design_qwen3(
     service_base_url: str | None = None,
 ) -> float:
     text = str(request_payload.get("input") or "").strip()
-    instruct = str(request_payload.get("instruct") or request_payload.get("design_prompt") or "").strip()
+    instruct = str(
+        request_payload.get("instruct") or request_payload.get("design_prompt") or ""
+    ).strip()
     if not text:
-        raise TTSServiceError("voice design requires input text")
+        raise TTSServiceError("声音设计需要输入文本")
     if not instruct:
-        raise TTSServiceError("voice design requires instruct description")
+        raise TTSServiceError("声音设计需要音色描述")
 
     payload = {
         "input": text,
@@ -401,9 +416,9 @@ def synthesize_voice_design_qwen3(
         "language": request_payload.get("language", "Auto"),
         "response_format": request_payload.get("response_format", "wav"),
     }
-    base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
-        "/"
-    )
+    base_url = (
+        service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811"
+    ).rstrip("/")
     http_request = urllib.request.Request(
         f"{base_url}/v1/audio/voice-design",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -414,10 +429,10 @@ def synthesize_voice_design_qwen3(
         with urllib.request.urlopen(http_request, timeout=120) as response:
             audio_bytes = response.read()
     except Exception as exc:
-        raise TTSServiceError(f"local Qwen3-TTS VoiceDesign request failed: {exc}") from exc
+        raise TTSServiceError(f"本地 Qwen3-TTS VoiceDesign 请求失败：{exc}") from exc
 
     if not audio_bytes:
-        raise TTSServiceError("local Qwen3-TTS VoiceDesign returned empty audio")
+        raise TTSServiceError("本地 Qwen3-TTS VoiceDesign 未返回音频")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(audio_bytes)
     return validate_wav_duration(output_path)
@@ -430,16 +445,18 @@ def validate_wav_duration(output_path: Path, *, min_duration_seconds: float = 0.
             frame_rate = wav_file.getframerate()
             duration = frames / float(frame_rate)
     except Exception as exc:
-        raise TTSServiceError(f"generated audio is not a decodable wav: {exc}") from exc
+        raise TTSServiceError(f"生成的音频不是可解码的 WAV：{exc}") from exc
 
     if duration <= min_duration_seconds:
         raise TTSServiceError(
-            f"generated audio duration must be > {min_duration_seconds}s, got {duration:.3f}s"
+            f"生成音频时长必须大于 {min_duration_seconds} 秒，实际为 {duration:.3f} 秒"
         )
     return duration
 
 
-def write_silent_wav(path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000) -> float:
+def write_silent_wav(
+    path: Path, *, duration_seconds: float = 0.75, sample_rate: int = 16000
+) -> float:
     frame_count = int(duration_seconds * sample_rate)
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as wav_file:
@@ -470,13 +487,19 @@ def generate_chapter_audio_batch(
         role_id = _utterance_role_id(utterance)
         if not text or not role_id:
             continue
-        if skip_success and utterance.get("audio_status") == "success" and utterance.get("audio_path"):
+        if (
+            skip_success
+            and utterance.get("audio_status") == "success"
+            and utterance.get("audio_path")
+        ):
             skipped_count += 1
             continue
         role = role_by_id.get(role_id)
         if role is None:
-            utterance.update(audio_status="failed", audio_error=f"role not found: {role_id}")
-            errors.append({"statement_id": _statement_id(utterance), "message": f"role not found: {role_id}"})
+            utterance.update(audio_status="failed", audio_error=f"角色不存在：{role_id}")
+            errors.append(
+                {"statement_id": _statement_id(utterance), "message": f"角色不存在：{role_id}"}
+            )
             continue
         voice_resource_id = _role_field(role, "voice_resource_id") or role_id
         pending.append(
@@ -524,11 +547,17 @@ def generate_chapter_audio_batch(
             failed_count += len(group_items)
             for item in group_items:
                 utterance = item["utterance"]
-                utterance.update(audio_status="failed", audio_error=str(exc), audio_generated_at=now)
+                utterance.update(
+                    audio_status="failed", audio_error=str(exc), audio_generated_at=now
+                )
                 errors.append({"statement_id": _statement_id(utterance), "message": str(exc)})
             continue
 
-        result_by_id = {str(result.get("statement_id")): result for result in results if result.get("statement_id")}
+        result_by_id = {
+            str(result.get("statement_id")): result
+            for result in results
+            if result.get("statement_id")
+        }
         for item in group_items:
             utterance = item["utterance"]
             statement_id = _statement_id(utterance)
@@ -542,7 +571,9 @@ def generate_chapter_audio_batch(
             utterance.update(
                 audio_status="success",
                 audio_path=str(result.get("audio_path") or ""),
-                audio_duration=float(result.get("audio_duration") or result.get("duration_seconds") or 0.0),
+                audio_duration=float(
+                    result.get("audio_duration") or result.get("duration_seconds") or 0.0
+                ),
                 audio_error=None,
                 audio_generated_at=now,
                 audio_provider=str(result.get("provider") or "local-qwen3-tts"),
@@ -605,8 +636,10 @@ def export_chapter_audio(
                     "text": text,
                     "role_id": role_id,
                     "role_name": role_name,
-                    "voice_resource_id": utterance.get("voice_resource_id") or _role_field(role, "voice_resource_id"),
-                    "voice_name": _role_field(role, "voice_description") or _role_field(role, "description"),
+                    "voice_resource_id": utterance.get("voice_resource_id")
+                    or _role_field(role, "voice_resource_id"),
+                    "voice_name": _role_field(role, "voice_description")
+                    or _role_field(role, "description"),
                     "filename": filename,
                     "duration": utterance.get("audio_duration"),
                     "generated_at": utterance.get("audio_generated_at"),
@@ -663,7 +696,10 @@ def _safe_reference_audio_suffix(suffix: str) -> str:
 
 
 def _default_synthesize_batch(request: dict[str, Any], *, output_dir: Path) -> list[dict[str, Any]]:
-    output_paths = [output_dir / f"{_safe_file_stem(statement_id)}.wav" for statement_id in request["statement_ids"]]
+    output_paths = [
+        output_dir / f"{_safe_file_stem(statement_id)}.wav"
+        for statement_id in request["statement_ids"]
+    ]
     return synthesize_local_qwen3_batch(request, output_paths=output_paths)
 
 
@@ -675,7 +711,7 @@ def synthesize_local_qwen3_batch(
 ) -> list[dict[str, Any]]:
     texts = [str(item) for item in request_payload.get("texts") or []]
     if len(texts) != len(output_paths):
-        raise TTSServiceError("batch text count must match output path count")
+        raise TTSServiceError("批量文本数量必须与输出路径数量一致")
     if not texts:
         return []
     for text in texts:
@@ -683,7 +719,7 @@ def synthesize_local_qwen3_batch(
     reference_audio_path = str(request_payload.get("reference_audio_path") or "")
     reference_audio = Path(reference_audio_path)
     if not reference_audio.exists():
-        raise TTSServiceError(f"reference audio does not exist: {reference_audio}")
+        raise TTSServiceError(f"参考音频不存在：{reference_audio}")
     payload = {
         "input": texts,
         "audio_sample": base64.b64encode(reference_audio.read_bytes()).decode("ascii"),
@@ -694,9 +730,9 @@ def synthesize_local_qwen3_batch(
         "x_vector_only": bool(request_payload.get("x_vector_only", False)),
         "max_new_tokens": int(request_payload.get("max_new_tokens") or tts_max_new_tokens()),
     }
-    base_url = (service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811").rstrip(
-        "/"
-    )
+    base_url = (
+        service_base_url or os.environ.get("QWEN3_TTS_BASE_URL") or "http://127.0.0.1:7811"
+    ).rstrip("/")
     http_request = urllib.request.Request(
         f"{base_url}/v1/audio/speech-batch",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -708,12 +744,14 @@ def synthesize_local_qwen3_batch(
         with urllib.request.urlopen(http_request, timeout=timeout_seconds) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
-        raise TTSServiceError(f"local Qwen3-TTS batch request failed: {exc}") from exc
+        raise TTSServiceError(f"本地 Qwen3-TTS 批量请求失败：{exc}") from exc
     audios = response_payload.get("audios") if isinstance(response_payload, dict) else None
     if not isinstance(audios, list) or len(audios) != len(output_paths):
-        raise TTSServiceError("local Qwen3-TTS batch response did not include all audios")
+        raise TTSServiceError("本地 Qwen3-TTS 批量响应缺少部分音频")
     results: list[dict[str, Any]] = []
-    for statement_id, audio_item, output_path in zip(request_payload["statement_ids"], audios, output_paths):
+    for statement_id, audio_item, output_path in zip(
+        request_payload["statement_ids"], audios, output_paths
+    ):
         audio_base64 = audio_item.get("audio_base64") if isinstance(audio_item, dict) else None
         if not audio_base64:
             results.append({"statement_id": statement_id, "error": "empty batch audio"})
@@ -765,7 +803,9 @@ def _statement_id(utterance: dict[str, Any]) -> str:
     return str(utterance.get("utterance_id") or utterance.get("statement_id") or "")
 
 
-def _export_audio_filename(chapter_id: str, paragraph_id: str, statement_id: str, role_name: str) -> str:
+def _export_audio_filename(
+    chapter_id: str, paragraph_id: str, statement_id: str, role_name: str
+) -> str:
     chapter_no = _first_number(chapter_id)
     paragraph_no = _first_number(paragraph_id)
     statement_no = _last_number(statement_id)
@@ -800,7 +840,9 @@ def _concatenate_wavs(paths: list[Path], output_path: Path, *, pause_ms: int) ->
                 or params.sampwidth != first_params.sampwidth
                 or params.framerate != first_params.framerate
             ):
-                raise TTSServiceError("export requires matching wav channel count, sample width, and sample rate")
+                raise TTSServiceError(
+                    "export requires matching wav channel count, sample width, and sample rate"
+                )
             frames.append(wav_file.readframes(wav_file.getnframes()))
     if first_params is None:
         return

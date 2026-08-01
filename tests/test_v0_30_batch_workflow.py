@@ -36,7 +36,7 @@ def _utterance(utterance_id: str, paragraph_id: str, text: str, role_id: str | N
 
 def test_v0_30_batch_role_selection_preserves_existing_roles_and_uses_one_llm_call():
     """Covers v0.3.0 batch role selection and non-overwrite constraints."""
-    from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
+    from backend.app.domain.dubbing_workflow import BatchRoleSelectionService
 
     class FakeBatchSkill:
         def __init__(self):
@@ -95,7 +95,7 @@ def test_v0_30_batch_role_selection_preserves_existing_roles_and_uses_one_llm_ca
 
 def test_v0_33_batch_role_selection_splits_and_selects_roles_in_one_agent_response():
     """Covers v0.3.3: role matching Agent splits mixed text and assigns roles in one response."""
-    from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
+    from backend.app.domain.dubbing_workflow import BatchRoleSelectionService
 
     class SplitAndSelectBatchSkill:
         def __init__(self):
@@ -129,11 +129,13 @@ def test_v0_33_batch_role_selection_splits_and_selects_roles_in_one_agent_respon
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
 
     utterances_by_paragraph = {"p-0002": [_utterance("p-0002-u-001", "p-0002", "“走。”他说。")]}
     role_skill = SplitAndSelectBatchSkill()
-    service = BatchRoleSelectionService(role_skill, segmentation_service=ForbiddenSegmentationService())
+    service = BatchRoleSelectionService(
+        role_skill, segmentation_service=ForbiddenSegmentationService()
+    )
 
     report = service.select_roles_for_statements_batch(
         chapter_id="chapter-0001",
@@ -144,15 +146,21 @@ def test_v0_33_batch_role_selection_splits_and_selects_roles_in_one_agent_respon
     )
 
     assert report.status == "completed"
-    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [["“走。”他说。"]]
+    assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [
+        ["“走。”他说。"]
+    ]
     assert [item["text"] for item in utterances_by_paragraph["p-0002"]] == ["“走。”", "他说。"]
-    assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0002"]] == ["hero", "narrator"]
+    assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0002"]] == [
+        "hero",
+        "narrator",
+    ]
     assert report.success_count == 2
     assert report.split_count == 1
 
+
 def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after_split():
     """Covers v0.3.3: split-and-select still protects speech-tag narration from speaker overmatch."""
-    from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
+    from backend.app.domain.dubbing_workflow import BatchRoleSelectionService
 
     class OvereagerPeruoBatchSkill:
         def __init__(self):
@@ -186,7 +194,7 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("AI角色匹配 must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
 
     utterances_by_paragraph = {
         "p-0003": [_utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”佩罗恼火道。")]
@@ -213,14 +221,17 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
     assert [[item["text"] for item in call["statements"]] for call in role_skill.calls] == [
         ["“都怪你多嘴，她认出我们了。”佩罗恼火道。"]
     ]
-    assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0003"]] == ["peruo", "narrator"]
+    assert [item["speaker_role_id"] for item in utterances_by_paragraph["p-0003"]] == [
+        "peruo",
+        "narrator",
+    ]
     assert report.success_count == 2
     assert report.split_count == 1
 
 
 def test_v0_30_batch_role_selection_invalid_json_writes_nothing():
     """Covers v0.3.0 JSON failure safety for batch role selection."""
-    from backend.app.domain.ai_one_click_workflow import BatchRoleSelectionService
+    from backend.app.domain.dubbing_workflow import BatchRoleSelectionService
 
     class BrokenBatchSkill:
         def choose_roles_batch(self, **kwargs):
@@ -245,7 +256,7 @@ def test_v0_30_batch_role_selection_invalid_json_writes_nothing():
 
 def test_v0_30_auto_role_creation_dedupes_narrator_binds_or_generates_voice():
     """Covers v0.3.0 automatic role creation and voice matching/generation."""
-    from backend.app.domain.ai_one_click_workflow import (
+    from backend.app.domain.dubbing_workflow import (
         RoleAnalysisCandidate,
         auto_apply_role_candidates,
     )
@@ -284,8 +295,12 @@ def test_v0_30_auto_role_creation_dedupes_narrator_binds_or_generates_voice():
     result = auto_apply_role_candidates(
         candidates=[
             RoleAnalysisCandidate(name="旁白", profile="叙述者", voice_direction="沉稳旁白"),
-            RoleAnalysisCandidate(name="林清", aliases=["大小姐"], gender="女", profile="冷静女性主角"),
-            RoleAnalysisCandidate(name="佩罗", gender="男", profile="懒散佣兵", voice_direction="懒散男声"),
+            RoleAnalysisCandidate(
+                name="林清", aliases=["大小姐"], gender="女", profile="冷静女性主角"
+            ),
+            RoleAnalysisCandidate(
+                name="佩罗", gender="男", profile="懒散佣兵", voice_direction="懒散男声"
+            ),
         ],
         roles=roles,
         voices=voices,

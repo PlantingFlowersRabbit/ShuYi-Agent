@@ -813,53 +813,6 @@ wheels = [
 ]
 
 [[package]]
-name = "shuyi-agent"
-version = "0.4.0"
-source = { virtual = "." }
-
-[package.dev-dependencies]
-backend = [
-    { name = "fastapi" },
-    { name = "httpx" },
-    { name = "langchain" },
-    { name = "langchain-openai" },
-    { name = "langgraph" },
-    { name = "python-dotenv" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-tts = [
-    { name = "python-multipart" },
-    { name = "soundfile" },
-    { name = "torch" },
-]
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-backend = [
-    { name = "fastapi", specifier = ">=0.115" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "langchain", specifier = ">=0.3" },
-    { name = "langchain-openai", specifier = ">=0.3" },
-    { name = "langgraph", specifier = ">=0.2" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
-]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff", specifier = ">=0.8" },
-]
-tts = [
-    { name = "python-multipart", specifier = ">=0.0.20" },
-    { name = "soundfile", specifier = ">=0.12" },
-    { name = "torch", specifier = ">=2.0" },
-]
-
-[[package]]
 name = "numpy"
 version = "2.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -1687,6 +1640,55 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/34/26/f5d29e25ffdb535afef2d35cdb55b325298f96debd670da4c325e08d70f4/setuptools-83.0.0.tar.gz", hash = "sha256:025bccbbf0fa05b6192bc64ae1e7b16e001fd6d6d4d5de03c97b1c1ade523bef", size = 1154254, upload-time = "2026-07-04T15:31:22.699Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl", hash = "sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3", size = 1008090, upload-time = "2026-07-04T15:31:20.885Z" },
+]
+
+[[package]]
+name = "shuyi-agent"
+version = "0.4.0"
+source = { virtual = "." }
+
+[package.dev-dependencies]
+backend = [
+    { name = "fastapi" },
+    { name = "httpx" },
+    { name = "langchain" },
+    { name = "langchain-openai" },
+    { name = "langgraph" },
+    { name = "python-dotenv" },
+    { name = "regex" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+tts = [
+    { name = "python-multipart" },
+    { name = "soundfile" },
+    { name = "torch" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+backend = [
+    { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "langchain", specifier = ">=0.3" },
+    { name = "langchain-openai", specifier = ">=0.3" },
+    { name = "langgraph", specifier = ">=0.2" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "regex", specifier = ">=2024.11" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
+]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+tts = [
+    { name = "python-multipart", specifier = ">=0.0.20" },
+    { name = "soundfile", specifier = ">=0.12" },
+    { name = "torch", specifier = ">=2.0" },
 ]
 
 [[package]]

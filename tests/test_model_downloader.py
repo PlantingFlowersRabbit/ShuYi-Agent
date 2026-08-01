@@ -1,92 +1,157 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import textwrap
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from scripts.container.download_models import ModelSpec, ensure_model
-
-ROOT = Path(__file__).resolve().parents[1]
-DOWNLOADER = ROOT / "scripts/container/download_models.py"
+from scripts.container.download_models import ModelSpec, configured_models, ensure_model
 
 
-def _run_downloader(tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
-    fake_package = tmp_path / "fake_packages" / "huggingface_hub"
-    fake_package.mkdir(parents=True)
-    (fake_package / "__init__.py").write_text(
-        textwrap.dedent(
-            """
-            import json
-            import os
-            from pathlib import Path
-
-            def snapshot_download(repo_id, local_dir, revision=None, **kwargs):
-                log = Path(os.environ["FAKE_HF_LOG"])
-                with log.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps({"repo_id": repo_id, "revision": revision}) + "\\n")
-                target = Path(local_dir)
-                target.mkdir(parents=True, exist_ok=True)
-                (target / "config.json").write_text("{}", encoding="utf-8")
-                return str(target)
-            """
-        ),
-        encoding="utf-8",
+def _spec(tmp_path: Path) -> ModelSpec:
+    return ModelSpec(
+        modelscope_id="test/base",
+        huggingface_id="test/base",
+        modelscope_revision="master",
+        huggingface_revision="main",
+        target=tmp_path / "models" / "base",
     )
-    model_dir = tmp_path / "models"
-    log_path = tmp_path / "downloads.log"
-    env = os.environ | {
-        "PYTHONPATH": str(fake_package.parent),
-        "FAKE_HF_LOG": str(log_path),
-        "NOVELVOICE_MODEL_DIR": str(model_dir),
-        "NOVELVOICE_TTS_MODEL_ID": "test/base",
-        "NOVELVOICE_TTS_VOICE_DESIGN_MODEL_ID": "test/design",
-        "NOVELVOICE_MODEL_AUTO_DOWNLOAD": "1",
+
+
+def _write_model(local_dir: str, source: str) -> None:
+    target = Path(local_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "config.json").write_text(json.dumps({"source": source}), encoding="utf-8")
+
+
+def test_model_downloader_prefers_modelscope_and_reuses_verified_cache(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    calls: list[tuple[str, str, str]] = []
+
+    def modelscope_download(model_id, revision, local_dir):
+        calls.append(("modelscope", model_id, revision))
+        assert not spec.target.exists()
+        assert ".partial-" in Path(local_dir).name
+        _write_model(local_dir, "modelscope")
+
+    def forbidden_huggingface(**_kwargs):
+        raise AssertionError("Hugging Face fallback should not run")
+
+    monkeypatch.setitem(
+        sys.modules, "modelscope", SimpleNamespace(snapshot_download=modelscope_download)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=forbidden_huggingface),
+    )
+
+    assert ensure_model(spec) == "downloaded"
+    assert ensure_model(spec) == "cached"
+    assert calls == [("modelscope", "test/base", "master")]
+    marker = json.loads((spec.target / ".shuyi-model.json").read_text(encoding="utf-8"))
+    assert marker["source"] == "modelscope"
+    assert marker["revision"] == "master"
+    assert marker["checksum"]
+    assert (spec.target.parent / ".base.lock").is_file()
+    assert not list(spec.target.parent.glob(".base.partial-*"))
+
+
+def test_model_downloader_falls_back_to_huggingface_after_modelscope_failure(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    calls: list[str] = []
+
+    def failed_modelscope(model_id, revision, local_dir):
+        calls.append("modelscope")
+        _write_model(local_dir, "incomplete")
+        raise RuntimeError("modelscope unavailable")
+
+    def huggingface_download(repo_id, revision, local_dir):
+        calls.append("huggingface")
+        _write_model(local_dir, "huggingface")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "modelscope",
+        SimpleNamespace(snapshot_download=failed_modelscope),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=huggingface_download),
+    )
+
+    assert ensure_model(spec) == "downloaded"
+    assert calls == ["modelscope", "huggingface"]
+    marker = json.loads((spec.target / ".shuyi-model.json").read_text(encoding="utf-8"))
+    assert marker["source"] == "huggingface"
+    assert marker["revision"] == "main"
+    assert json.loads((spec.target / "config.json").read_text(encoding="utf-8")) == {
+        "source": "huggingface"
     }
-    first = subprocess.run(
-        ["python3", str(DOWNLOADER)],
-        cwd=ROOT,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
+
+
+def test_model_downloader_supports_modelscope_cache_dir_api(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+
+    def modelscope_download(model_id, revision, cache_dir):
+        downloaded = Path(cache_dir) / model_id
+        _write_model(str(downloaded), "modelscope-cache-dir")
+        return str(downloaded)
+
+    def forbidden_huggingface(**_kwargs):
+        raise AssertionError("compatible ModelScope SDK should not use fallback")
+
+    monkeypatch.setitem(
+        sys.modules, "modelscope", SimpleNamespace(snapshot_download=modelscope_download)
     )
-    second = subprocess.run(
-        ["python3", str(DOWNLOADER)],
-        cwd=ROOT,
-        env=env,
-        check=False,
-        capture_output=True,
-        text=True,
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=forbidden_huggingface),
     )
-    assert first.returncode == 0, first.stderr
-    assert second.returncode == 0, second.stderr
-    return second, log_path
+
+    assert ensure_model(spec) == "downloaded"
+    assert json.loads((spec.target / "config.json").read_text(encoding="utf-8")) == {
+        "source": "modelscope-cache-dir"
+    }
 
 
-def test_model_downloader_reuses_completed_cache_without_second_download(tmp_path: Path):
-    _run_downloader(tmp_path)
+def test_model_downloader_rejects_corrupted_cache_without_overwriting(tmp_path, monkeypatch):
+    spec = _spec(tmp_path)
+    calls = 0
 
-    log_lines = (tmp_path / "downloads.log").read_text(encoding="utf-8").splitlines()
-    assert len(log_lines) == 2
-    assert {json.loads(line)["repo_id"] for line in log_lines} == {"test/base", "test/design"}
-    for model_name in ("base", "design"):
-        marker = tmp_path / "models" / model_name / ".novelvoice-model.json"
-        assert json.loads(marker.read_text(encoding="utf-8"))["status"] == "downloaded"
+    def modelscope_download(model_id, revision, local_dir):
+        nonlocal calls
+        calls += 1
+        _write_model(local_dir, "modelscope")
+
+    monkeypatch.setitem(
+        sys.modules, "modelscope", SimpleNamespace(snapshot_download=modelscope_download)
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace())
+    ensure_model(spec)
+    config = spec.target / "config.json"
+    config.write_text('{"source":"corrupted"}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="校验和"):
+        ensure_model(spec)
+
+    assert calls == 1
+    assert config.read_text(encoding="utf-8") == '{"source":"corrupted"}'
 
 
-def test_model_downloader_preserves_cache_when_metadata_conflicts(tmp_path: Path):
-    target = tmp_path / "models" / "base"
-    target.mkdir(parents=True)
-    (target / "config.json").write_text("{}", encoding="utf-8")
-    marker = target / ".novelvoice-model.json"
-    original_marker = '{"repo_id":"old/base","revision":null,"status":"downloaded"}'
-    marker.write_text(original_marker, encoding="utf-8")
+def test_configured_models_have_fixed_nonempty_provider_revisions(tmp_path, monkeypatch):
+    for kind in ("TTS", "VOICE_DESIGN"):
+        monkeypatch.delenv(f"SHUYI_MODELSCOPE_{kind}_REVISION", raising=False)
+        monkeypatch.delenv(f"SHUYI_HUGGINGFACE_{kind}_REVISION", raising=False)
 
-    with pytest.raises(RuntimeError, match="metadata does not match"):
-        ensure_model(ModelSpec("new/base", None, target))
+    models = configured_models(tmp_path)
 
-    assert marker.read_text(encoding="utf-8") == original_marker
+    assert models
+    assert all(len(model.modelscope_revision) == 40 for model in models)
+    assert all(len(model.huggingface_revision) == 40 for model in models)
+    assert all(model.modelscope_revision not in {"main", "master"} for model in models)
+    assert all(model.huggingface_revision not in {"main", "master"} for model in models)

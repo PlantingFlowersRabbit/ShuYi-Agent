@@ -1,4 +1,4 @@
-export const WORKFLOW_AGENTS = ["novel_parser", "role_analyzer", "role_matcher", "dubbing"] as const;
+export const WORKFLOW_AGENTS = ["novel_parser", "role_analyzer", "dubbing_director"] as const;
 
 export type WorkflowAgent = (typeof WORKFLOW_AGENTS)[number];
 export type WorkflowMode = "automatic" | "step";
@@ -15,6 +15,7 @@ export type WorkflowEvent =
   | { type: "SET_MODE"; mode: WorkflowMode }
   | { type: "START" }
   | { type: "AGENT_COMPLETED" }
+  | { type: "PAUSE" }
   | { type: "CONTINUE" };
 
 export function createWorkflowState(mode: WorkflowMode): WorkflowState {
@@ -28,7 +29,14 @@ export function createWorkflowState(mode: WorkflowMode): WorkflowState {
 
 export function transitionWorkflow(state: WorkflowState, event: WorkflowEvent): WorkflowState {
   if (event.type === "SET_MODE") {
-    return { ...state, mode: event.mode };
+    return {
+      ...state,
+      mode: event.mode,
+      status:
+        event.mode === "automatic" && state.status === "awaiting_confirmation"
+          ? "running"
+          : state.status,
+    };
   }
 
   if (event.type === "START") {
@@ -42,6 +50,10 @@ export function transitionWorkflow(state: WorkflowState, event: WorkflowEvent): 
 
   if (event.type === "CONTINUE") {
     return state.status === "awaiting_confirmation" ? { ...state, status: "running" } : state;
+  }
+
+  if (event.type === "PAUSE") {
+    return state.activeAgent === null ? state : { ...state, status: "awaiting_confirmation" };
   }
 
   if (state.status !== "running" || state.activeAgent === null) return state;

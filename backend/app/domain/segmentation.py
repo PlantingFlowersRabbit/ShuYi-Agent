@@ -75,7 +75,11 @@ def repair_json_output_once(raw_output: str) -> str:
 
 def _known_role_maps(known_roles: list[dict[str, Any]]) -> tuple[set[str], dict[str, str]]:
     ids = {role["role_id"] for role in known_roles if role.get("role_id")}
-    names = {role["name"]: role["role_id"] for role in known_roles if role.get("name") and role.get("role_id")}
+    names = {
+        role["name"]: role["role_id"]
+        for role in known_roles
+        if role.get("name") and role.get("role_id")
+    }
     return ids, names
 
 
@@ -183,7 +187,9 @@ def validate_segmentation_result(
         normalized_utterances.append(item)
 
     original = normalize_text_for_conservation(paragraph_text)
-    generated = normalize_text_for_conservation("".join(item["text"] for item in normalized_utterances))
+    generated = normalize_text_for_conservation(
+        "".join(item["text"] for item in normalized_utterances)
+    )
     if original != generated:
         return SegmentationValidationResult(
             ok=False,

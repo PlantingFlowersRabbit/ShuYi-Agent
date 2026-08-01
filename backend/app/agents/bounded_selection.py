@@ -24,9 +24,9 @@ def run_bounded_selection(
     max_rounds: int,
 ) -> BoundedSelectionResult:
     if batch_size < 1:
-        raise ValueError("batch_size must be at least 1")
+        raise ValueError("批量大小至少为 1")
     if max_rounds < 0:
-        raise ValueError("max_rounds cannot be negative")
+        raise ValueError("最大轮次不能为负数")
 
     unresolved = list(items)
     resolved: list[SelectionItem] = []

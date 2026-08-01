@@ -116,7 +116,7 @@ class RoleCollection:
         try:
             return self._roles[role_id]
         except KeyError as exc:
-            raise KeyError(f"Unknown role_id: {role_id}") from exc
+            raise KeyError(f"角色不存在：{role_id}") from exc
 
     def upsert(self, role: RoleCard | dict[str, Any]) -> RoleCard:
         card = _role_from_mapping(role)

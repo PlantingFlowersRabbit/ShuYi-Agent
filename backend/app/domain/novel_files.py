@@ -32,7 +32,7 @@ def extract_novel_file(*, filename: str, data: bytes) -> NovelFileExtraction:
         return NovelFileExtraction("epub", _extract_epub_text(data))
     if suffix == ".txt" or not suffix:
         return NovelFileExtraction("txt", decode_novel_text_bytes(data))
-    raise NovelFileError(f"unsupported novel file type: {suffix}")
+    raise NovelFileError(f"不支持的小说文件类型：{suffix}")
 
 
 def decode_novel_text_bytes(data: bytes) -> str:
@@ -53,10 +53,10 @@ def _extract_epub_text(data: bytes) -> str:
                 chapter_paths = _fallback_epub_html_paths(archive)
             sections = [_extract_xhtml_text(archive.read(path)) for path in chapter_paths]
     except (KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
-        raise NovelFileError(f"invalid epub file: {exc}") from exc
+        raise NovelFileError(f"EPUB 文件无效：{exc}") from exc
     text = "\n\n".join(section for section in sections if section.strip()).strip()
     if not text:
-        raise NovelFileError("epub contains no readable chapter text")
+        raise NovelFileError("EPUB 中没有可读取的章节正文")
     return text
 
 
@@ -67,7 +67,7 @@ def _epub_opf_path(archive: zipfile.ZipFile) -> str:
             path = item.attrib.get("full-path")
             if path:
                 return path
-    raise NovelFileError("epub container has no rootfile")
+    raise NovelFileError("EPUB 容器缺少根文件")
 
 
 def _epub_spine_paths(archive: zipfile.ZipFile, opf_path: str) -> list[str]:
@@ -87,7 +87,11 @@ def _epub_spine_paths(archive: zipfile.ZipFile, opf_path: str) -> list[str]:
             if href:
                 paths.append(posixpath.normpath(posixpath.join(opf_dir, href)))
     names = set(archive.namelist())
-    return [path for path in paths if path in names and path.lower().endswith((".xhtml", ".html", ".htm"))]
+    return [
+        path
+        for path in paths
+        if path in names and path.lower().endswith((".xhtml", ".html", ".htm"))
+    ]
 
 
 def _fallback_epub_html_paths(archive: zipfile.ZipFile) -> list[str]:
@@ -95,8 +99,7 @@ def _fallback_epub_html_paths(archive: zipfile.ZipFile) -> list[str]:
     return [
         name
         for name in archive.namelist()
-        if name.lower().endswith((".xhtml", ".html", ".htm"))
-        and not name.lower().endswith(ignored)
+        if name.lower().endswith((".xhtml", ".html", ".htm")) and not name.lower().endswith(ignored)
     ]
 
 
