@@ -82,3 +82,14 @@ def test_v0_4_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
         "CNB_COMMIT_SHA",
     ]:
         assert required in pipeline
+
+
+def test_v0_4_cnb_workspace_launch_button_starts_shuyi_agent():
+    settings = (ROOT / ".cnb/settings.yml").read_text(encoding="utf-8")
+    cnb_config = (ROOT / ".cnb.yml").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts/cnb/start-shuyi-agent.sh").read_text(encoding="utf-8")
+
+    assert "启动 ShuYi-Agent" in settings
+    assert "CNB_WELCOME_CMD" in cnb_config
+    assert "bash scripts/cnb/start-shuyi-agent.sh" in cnb_config
+    assert "docker compose -f compose.cuda.yaml up --build" in launcher

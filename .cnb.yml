@@ -1,4 +1,20 @@
-# CNB 流水线模板。GPU 执行器必须支持 Docker --gpus 和 NVIDIA Container Toolkit。
+# CNB 云原生开发与流水线模板。GPU 执行器必须支持 Docker --gpus 和 NVIDIA Container Toolkit。
+$:
+  vscode:
+    - docker:
+        image: cnbcool/default-dev-env:latest
+      runner:
+        tags: cnb:arch:amd64:gpu
+      services:
+        - docker
+        - vscode
+      env:
+        CNB_WELCOME_CMD: |
+          bash scripts/cnb/start-shuyi-agent.sh
+      stages:
+        - name: start
+          script: echo 'ShuYi-Agent workspace ready'
+
 pipeline:
   cpu-test:
     image: python:3.11-slim

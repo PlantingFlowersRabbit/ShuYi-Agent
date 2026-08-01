@@ -1,0 +1,7 @@
+workspace:
+  launch:
+    button:
+      name: 启动 ShuYi-Agent
+      description: 一键启动书弈 Agent 后端
+    disabled: false
+    autoOpenWebIDE: true
