@@ -116,7 +116,7 @@ docker compose -f compose.cuda.yaml up --build
 
 ## GitHub Pages
 
-`.github/workflows/pages.yml` 在 `main` 分支前端文件变化时构建静态站点并发布到 `gh-pages` 分支。先在仓库 Settings > Pages 中选择从 `gh-pages` 分支发布，再按需配置仓库变量 `VITE_API_BASE_URL`。Pages 只托管前端，不提供 FastAPI 或模型服务；生产 API 必须启用 HTTPS、Bearer token 和准确的 CORS 来源。
+`.github/workflows/pages.yml` 在 `main` 分支每次更新时构建静态站点并发布到 `gh-pages` 分支。先在仓库 Settings > Pages 中选择从 `gh-pages` 分支发布，再按需配置仓库变量 `VITE_API_BASE_URL`。Pages 只托管前端，不提供 FastAPI 或模型服务；生产 API 必须启用 HTTPS、Bearer token 和准确的 CORS 来源。
 
 ## CNB 镜像发布模板
 

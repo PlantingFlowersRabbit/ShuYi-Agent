@@ -3,9 +3,6 @@ name: Build and publish frontend to gh-pages
 on:
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -37,8 +34,14 @@ jobs:
           set -euo pipefail
 
           publish_dir="$(mktemp -d)"
-          worktree_dir="$(mktemp -d)"
-          rm -rf "$worktree_dir"
+          worktree_parent="$(mktemp -d)"
+          worktree_dir="$worktree_parent/gh-pages"
+
+          cleanup() {
+            git worktree remove "$worktree_dir" --force >/dev/null 2>&1 || true
+            rm -rf "$publish_dir" "$worktree_parent"
+          }
+          trap cleanup EXIT
 
           cp -R frontend/dist/. "$publish_dir/"
           touch "$publish_dir/.nojekyll"
@@ -64,5 +67,3 @@ jobs:
             git -C "$worktree_dir" commit -m "deploy: frontend"
             git -C "$worktree_dir" push origin gh-pages
           fi
-
-          git worktree remove "$worktree_dir" --force
