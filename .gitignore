@@ -44,3 +44,6 @@ outputs/**/*
 .DS_Store
 .idea/
 .vscode/
+
+# Local Codex agent operating notes; do not publish.
+AGENT_REMOTE_SYNC.md

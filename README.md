@@ -31,7 +31,7 @@ src="https://img.shields.io/badge/Code_License-MIT-f5de53?&color=f5de53"/></a>
 
 ## 简介
 
-书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.4.1 将文本模型统一为 OpenAI SDK 兼容配置，并保证模型结果可以人工修改；运行时不会生成或执行模型返回的 Python 代码。
+书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.4.2 将文本模型统一为 OpenAI SDK 兼容配置，并保证模型结果可以人工修改；运行时不会生成或执行模型返回的 Python 代码。
 
 ## 项目结构
 
@@ -120,7 +120,7 @@ docker compose -f compose.cuda.yaml up --build
 
 ## CNB 镜像发布模板
 
-`.cnb.yml` 是可移植模板：先运行 CPU 契约测试，再在支持 NVIDIA Container Toolkit 的 GPU runner 上构建 CPU/CUDA 镜像并调用本地 TTS 完成真实音频推理。推理成功后始终推送 `${CNB_COMMIT_SHA}-cpu` 和 `${CNB_COMMIT_SHA}-cuda`；仅在 `CNB_TAG=v0.4.1` 时额外推送不可由普通分支流水线覆盖的 `v0.4.1-cpu` 与 `v0.4.1-cuda`。使用前在 CNB 仓库密钥中配置 registry 凭据和必要的模型 token，并根据实际执行器调整 Docker/GPU 服务声明。该模板不代表项目承诺长期托管任何公共镜像。
+`.cnb.yml` 是可移植模板：先运行 CPU 契约测试，再在支持 NVIDIA Container Toolkit 的 GPU runner 上构建 CPU/CUDA 镜像并调用本地 TTS 完成真实音频推理。推理成功后始终推送 `${CNB_COMMIT_SHA}-cpu` 和 `${CNB_COMMIT_SHA}-cuda`；仅在 `CNB_TAG=v0.4.2` 时额外推送不可由普通分支流水线覆盖的 `v0.4.2-cpu` 与 `v0.4.2-cuda`。使用前在 CNB 仓库密钥中配置 registry 凭据和必要的模型 token，并根据实际执行器调整 Docker/GPU 服务声明。该模板不代表项目承诺长期托管任何公共镜像。
 
 ## 验证
 

@@ -76,9 +76,9 @@ def test_v0_4_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
         "--gpus all",
         "--target cpu-runtime",
         "--target cuda-runtime",
-        "v0.4.1-cpu",
+        "v0.4.2-cpu",
         "CNB_TAG:-}",
-        "v0.4.1-cuda",
+        "v0.4.2-cuda",
         "CNB_COMMIT_SHA",
     ]:
         assert required in pipeline

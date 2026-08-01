@@ -332,7 +332,7 @@ async function readNovelFileUpload(file: File): Promise<NovelFileUpload> {
   if (isEpub) {
     return {
       text: "",
-      preview: `已上传 EPUB：${file.name}\n\n点击“文本模型”后将由后端解析 EPUB 目录和正文。`,
+      preview: `已上传 EPUB：${file.name}\n\n点击“文档解析”后将由后端解析 EPUB 目录和正文。`,
       uploadedFile: {
         filename: file.name,
         contentBase64: arrayBufferToBase64(buffer),
@@ -873,7 +873,6 @@ function App() {
   const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
   const [generatingUtteranceIds, setGeneratingUtteranceIds] = useState<Record<string, boolean>>({});
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
-  const [localTtsStartProgress, setLocalTtsStartProgress] = useState(0);
   const [localTtsStarting, setLocalTtsStarting] = useState(false);
   const [aiRoleCandidates, setAiRoleCandidates] = useState<AiRoleCandidate[]>([]);
   const [agentRunThreadId, setAgentRunThreadId] = useState("");
@@ -999,13 +998,13 @@ function App() {
     setGeneratingUtteranceIds({});
     resetAgentRunState();
     setUploadProgress(62);
-    setApiStatus("小说已上传，仅展示开头预览；点击“文本模型”生成章节目录");
+    setApiStatus("小说已上传，仅展示开头预览；点击“文档解析”生成章节目录");
     setUploadProgress(100);
   }
 
   async function runAiChapterSplit() {
     setChapterSplitProgress(12);
-    setApiStatus("文本模型正在检查可复用规则");
+    setApiStatus("文档解析正在检查可复用规则");
     try {
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
@@ -1030,13 +1029,13 @@ function App() {
       const ruleName = data.agent.rule_path?.split(/[\\/]/).pop() ?? "未记录规则";
       const agentStatus =
         data.agent.status === "rule_reused"
-          ? `文本模型完成：已复用 ${ruleName}`
-          : `文本模型完成：已生成并保存 ${ruleName}`;
+          ? `文档解析完成：已复用 ${ruleName}`
+          : `文档解析完成：已生成并保存 ${ruleName}`;
       applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
     } catch (error) {
       setChapterSplitProgress(76);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
-      applyChapters(parsed, `文本模型失败，已使用本地章节索引兜底：${String(error)}`);
+      applyChapters(parsed, `文档解析失败，已使用本地章节索引兜底：${String(error)}`);
     } finally {
       setChapterSplitProgress(100);
     }
@@ -1799,25 +1798,16 @@ function App() {
   async function testTtsModelConnection() {
     if (localTtsStarting) return;
     setLocalTtsStarting(true);
-    setLocalTtsStartProgress(8);
     setApiStatus("正在测试 TTS 模型连接");
-    let currentProgress = 8;
-    const progressTimer = window.setInterval(() => {
-      currentProgress = Math.min(95, currentProgress + (currentProgress < 60 ? 7 : 3));
-      setLocalTtsStartProgress(currentProgress);
-    }, 1000);
     try {
       const data = await requestJson<ConnectionTestResponse>("/model-config/tts/test", {
         method: "POST",
         body: JSON.stringify({ tts: modelConfig.tts }),
       });
-      setLocalTtsStartProgress(data.progress ?? 100);
       setApiStatus(data.message || "TTS模型连接成功");
     } catch (error) {
-      setLocalTtsStartProgress(100);
       setApiStatus(`TTS模型测试连接失败：${String(error)}`);
     } finally {
-      window.clearInterval(progressTimer);
       setLocalTtsStarting(false);
     }
   }
@@ -1849,7 +1839,7 @@ function App() {
                     上传小说
                   </button>
                   <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
-                    文本模型
+                    文档解析
                   </button>
                 </div>
                 <input
@@ -1996,7 +1986,7 @@ function App() {
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>尚未划分章节</h2>
-              <p>上传小说后点击左侧“文本模型”，当前章节区暂不渲染具体正文。</p>
+              <p>上传小说后点击左侧“文档解析”，当前章节区暂不渲染具体正文。</p>
             </div>
           ) : !activeChapter ? (
             <div className="empty-state">
@@ -2061,22 +2051,33 @@ function App() {
                 <article className="panel statement-panel" aria-label="划分语句与角色匹配">
                   <div className="section-heading">
                     <div className="section-title">划分语句与角色匹配</div>
-                    {primaryStatementParagraphId && (
-                      <button className="tool-button amber" type="button" onClick={() => addUtteranceAfter(primaryStatementParagraphId)}>
-                        添加语句
-                      </button>
-                    )}
                   </div>
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
-                      当前章节可手动添加语句、选择角色并生成音频；也可以稍后使用配音编排 Agent 自动辅助。
+                      <span>当前章节可手动添加语句、选择角色并生成音频；也可以稍后使用配音编排 Agent 自动辅助。</span>
+                      {primaryStatementParagraphId && (
+                        <button
+                          className="tool-button amber"
+                          type="button"
+                          onClick={() => addUtteranceAfter(primaryStatementParagraphId)}
+                        >
+                          添加第一条语句
+                        </button>
+                      )}
                     </div>
-	                  ) : (
-	                    <div className="statement-list">
-	                      {flattenedUtterances.map((utterance) => (
+                  ) : (
+                    <div className="statement-list">
+                      {flattenedUtterances.map((utterance) => (
                         <article className="utterance-card" key={utterance.utteranceId}>
                           <div className="utterance-toolbar">
                             <strong>{utterance.utteranceId}</strong>
+                            <button
+                              className="tool-button amber"
+                              type="button"
+                              onClick={() => addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)}
+                            >
+                              在此后添加语句
+                            </button>
                             <button type="button" onClick={() => deleteUtterance(utterance.paragraphId, utterance.utteranceId)}>
                               删除音频生成
                             </button>
@@ -2144,8 +2145,8 @@ function App() {
                           )}
                         </article>
                       ))}
-	                    </div>
-	                  )}
+                    </div>
+                  )}
                 </article>
               </section>
             </>
@@ -2375,7 +2376,7 @@ function App() {
           <label>
             Base URL
             <input
-              placeholder="https://your-openai-compatible-endpoint/v1"
+              placeholder="eg: https://api.deepseek.com"
               value={modelConfig.text_model.base_url}
               onChange={(event) =>
                 setModelConfig((current) => ({
@@ -2388,7 +2389,7 @@ function App() {
           <label>
             模型名称
             <input
-              placeholder="输入任意 OpenAI SDK 兼容模型名"
+              placeholder="eg: deepseek-v4-flash"
               value={modelConfig.text_model.model}
               onChange={(event) =>
                 setModelConfig((current) => ({
@@ -2403,7 +2404,7 @@ function App() {
             <input
               aria-label="文本模型 API Key"
               autoComplete="off"
-              placeholder="输入后会加扰发送，后端只保存在内存"
+              placeholder="sk-xxx..."
               type="password"
               value={textModelApiKey}
               onChange={(event) => setTextModelApiKey(event.target.value)}
@@ -2460,7 +2461,6 @@ function App() {
               {localTtsStarting ? "测试中" : "测试连接"}
             </button>
           </div>
-          <ProgressBar label="测试连接进度" value={localTtsStartProgress} />
         </section>
       </main>
     );

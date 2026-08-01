@@ -41,11 +41,11 @@ def test_v0_4_health_probes_are_public_and_report_release(monkeypatch):
             payload = response.json()
             assert payload["status"] == "ok"
             assert payload["service"] == "shuyi-agent"
-            assert payload["version"] == "0.4.1"
+            assert payload["version"] == "0.4.2"
 
 
 def test_v0_4_1_defaults_have_no_bundled_roles_or_voice_resources(monkeypatch):
-    """v0.4.1 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
+    """v0.4.2 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
     with _client(monkeypatch) as client:
         characters = client.get("/api/v1/characters", headers=_auth())
         voices = client.get("/api/v1/voice-profiles", headers=_auth())

@@ -248,8 +248,9 @@ small {
 }
 
 .chapter-sidebar:not(.collapsed) .sidebar-toggle {
-  position: sticky;
-  top: 0;
+  position: absolute;
+  top: 14px;
+  right: 14px;
   z-index: 2;
 }
 
@@ -366,6 +367,21 @@ small {
 .voice-grid {
   display: grid;
   gap: 10px;
+}
+
+.role-stack {
+  min-height: clamp(240px, 42vh, 520px);
+  align-content: start;
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.72);
+  padding: 8px;
+}
+
+.role-stack:not(:empty) {
+  border-color: transparent;
+  background: transparent;
+  padding: 0;
 }
 
 .progress-block {
@@ -552,6 +568,9 @@ small {
 }
 
 .statement-empty {
+  display: grid;
+  gap: 12px;
+  align-content: start;
   border: 1px dashed #cbd5e1;
   border-radius: 8px;
   background: #f8fafc;
@@ -567,7 +586,8 @@ small {
 .empty-state {
   display: flex;
   min-width: 0;
-  min-height: 320px;
+  min-height: 100%;
+  flex: 1;
   flex-direction: column;
   align-items: center;
   justify-content: center;

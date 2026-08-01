@@ -147,7 +147,7 @@ def test_parse_sample_novel_into_chapters_and_paragraph_workbench_gate():
 
 
 def test_default_roles_and_role_options_sync_to_utterance_selectors():
-    """v0.4.1 默认不再预设角色，但角色选项仍随人工新增同步。"""
+    """v0.4.2 默认不再预设角色，但角色选项仍随人工新增同步。"""
     roles = default_role_cards()
     assert roles == []
 
@@ -186,7 +186,7 @@ def test_v0_11_numeric_heading_real_sample_splits_into_chapters():
 
 
 def test_v0_11_voice_resources_load_real_samples_and_support_crud():
-    """v0.4.1 默认音色库为空，但仍支持人工增删改查。"""
+    """v0.4.2 默认音色库为空，但仍支持人工增删改查。"""
     resources = default_voice_resources(REAL_VOICE_ROOT if REAL_VOICE_ROOT.exists() else None)
     collection = VoiceResourceCollection(resources)
     assert collection.list() == []
@@ -1303,7 +1303,7 @@ def test_fastapi_v0_14_reference_audio_upload_saves_local_file(tmp_path):
 
 
 def test_fastapi_v0_21_voice_resources_are_materialized_into_one_directory(tmp_path):
-    """Covers v0.21 unified storage while v0.4.1 avoids auto-loading bundled voices."""
+    """Covers v0.21 unified storage while v0.4.2 avoids auto-loading bundled voices."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
