@@ -19,7 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -58,6 +58,7 @@ from backend.app.domain.voices import (
     generated_voice_content,
 )
 from backend.app.repositories.sqlite import SQLiteRepository
+from scripts.container.download_models import ModelSpec, configured_models, ensure_model
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -75,13 +76,27 @@ CHAPTER_RULE_DIR = DEFAULT_DATA_ROOT / "cache/chapter-rules"
 BUNDLED_CHAPTER_RULE_DIR = ROOT / "scripts/chapter_rules"
 REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/samples/voices")))
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
-DEFAULT_BASE_MODEL_PATH = str(ROOT / "models/Qwen3-TTS-12Hz-1.7B-Base")
-DEFAULT_VOICE_DESIGN_MODEL_PATH = str(ROOT / "models/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.4.2"
+SERVICE_VERSION = "0.5.0"
 MAX_NOVEL_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+def _default_model_dir() -> Path:
+    return Path(_service_env("SHUYI_MODEL_DIR", str(ROOT / "models"))).expanduser()
+
+
+def _default_base_model_path() -> str:
+    return str(_default_model_dir() / "Qwen3-TTS-12Hz-1.7B-Base")
+
+
+def _default_voice_design_model_path() -> str:
+    return str(_default_model_dir() / "Qwen3-TTS-12Hz-1.7B-VoiceDesign")
+
+
+DEFAULT_BASE_MODEL_PATH = _default_base_model_path()
+DEFAULT_VOICE_DESIGN_MODEL_PATH = _default_voice_design_model_path()
 
 
 def _chapter_to_dict(chapter: Chapter) -> dict[str, Any]:
@@ -204,10 +219,10 @@ def _default_model_config() -> dict[str, Any]:
         },
         "tts": {
             "base_url": os.environ.get("QWEN3_TTS_BASE_URL", "http://127.0.0.1:7811"),
-            "model_path": os.environ.get("QWEN3_TTS_MODEL_PATH", DEFAULT_BASE_MODEL_PATH),
+            "model_path": os.environ.get("QWEN3_TTS_MODEL_PATH", _default_base_model_path()),
             "voice_design_model_path": os.environ.get(
                 "QWEN3_TTS_VOICE_DESIGN_MODEL_PATH",
-                DEFAULT_VOICE_DESIGN_MODEL_PATH,
+                _default_voice_design_model_path(),
             ),
         },
     }
@@ -265,6 +280,224 @@ def _redacted_model_config(
         "tts": dict(normalized["tts"]),
     }
 
+
+
+def _idle_tts_deployment_status(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    tts = dict(config or _default_model_config()["tts"])
+    return {
+        "status": "idle",
+        "stage": "idle",
+        "progress": 0,
+        "message": "尚未下载并部署 TTS 模型。",
+        "can_retry": False,
+        "error": None,
+        "pid": None,
+        "health": None,
+        "model_path": tts.get("model_path"),
+        "voice_design_model_path": tts.get("voice_design_model_path"),
+        "attempt": 0,
+        "updated_at": time.time(),
+    }
+
+
+def _get_tts_deployment_status(app: FastAPI) -> dict[str, Any]:
+    with app.state.tts_deployment_lock:
+        return dict(app.state.tts_deployment)
+
+
+def _set_tts_deployment_status(app: FastAPI, **updates: Any) -> dict[str, Any]:
+    with app.state.tts_deployment_lock:
+        current = dict(app.state.tts_deployment)
+        current.update(updates)
+        current["updated_at"] = time.time()
+        app.state.tts_deployment = current
+        return dict(current)
+
+
+def _normalize_tts_payload_config(app: FastAPI, payload: dict[str, Any] | None) -> dict[str, Any]:
+    supplied_tts = (payload or {}).get("tts") or {}
+    updates = {
+        key: value
+        for key, value in supplied_tts.items()
+        if key in {"base_url", "model_path", "voice_design_model_path"}
+    }
+    return {**_state(app)["model_config"]["tts"], **updates}
+
+
+def _absolute_model_target(path_text: str) -> Path:
+    path = Path(path_text).expanduser()
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def _tts_model_specs_for_config(config: dict[str, Any]) -> tuple[list[ModelSpec], dict[str, Any]]:
+    base_target = _absolute_model_target(str(config.get("model_path") or _default_base_model_path()))
+    voice_design_target = _absolute_model_target(
+        str(config.get("voice_design_model_path") or _default_voice_design_model_path())
+    )
+    model_root = Path(_service_env("SHUYI_MODEL_DIR", str(base_target.parent))).expanduser()
+    configured = configured_models(model_root)
+    if len(configured) < 2:
+        raise RuntimeError("TTS 模型配置不完整，至少需要 Base 与 VoiceDesign 两个模型。")
+    base_spec, voice_design_spec = configured[:2]
+    specs = [
+        ModelSpec(
+            modelscope_id=base_spec.modelscope_id,
+            huggingface_id=base_spec.huggingface_id,
+            modelscope_revision=base_spec.modelscope_revision,
+            huggingface_revision=base_spec.huggingface_revision,
+            target=base_target,
+        ),
+        ModelSpec(
+            modelscope_id=voice_design_spec.modelscope_id,
+            huggingface_id=voice_design_spec.huggingface_id,
+            modelscope_revision=voice_design_spec.modelscope_revision,
+            huggingface_revision=voice_design_spec.huggingface_revision,
+            target=voice_design_target,
+        ),
+    ]
+    normalized = {
+        **config,
+        "model_path": str(base_target),
+        "voice_design_model_path": str(voice_design_target),
+    }
+    return specs, normalized
+
+
+def _tts_command(config: dict[str, Any]) -> list[str]:
+    base_url = str(config.get("base_url") or "http://127.0.0.1:7811")
+    command = [
+        os.environ.get("QWEN3_TTS_PYTHON", sys.executable),
+        str(DEFAULT_TTS_SCRIPT),
+        "--model-path",
+        str(config.get("model_path") or _default_base_model_path()),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(_port_from_base_url(base_url)),
+        "--device",
+        os.environ.get("QWEN3_TTS_DEVICE", os.environ.get("SHUYI_DEVICE", "cpu")),
+    ]
+    voice_design_model_path = str(config.get("voice_design_model_path") or "").strip()
+    if voice_design_model_path:
+        command.extend(["--voice-design-model-path", voice_design_model_path])
+    return command
+
+
+def _start_or_wait_tts_service(app: FastAPI, config: dict[str, Any]) -> tuple[int | None, dict[str, Any], str]:
+    base_url = str(config.get("base_url") or "http://127.0.0.1:7811")
+    current = _state(app).get("tts_process")
+    if current is not None and current.poll() is None:
+        health = _wait_for_tts_ready(current, base_url)
+        return current.pid, health, "本地 TTS 服务已在运行，模型加载完成，VoiceDesign 已就绪"
+
+    current_health = _fetch_tts_health(base_url)
+    if _is_tts_ready(current_health):
+        return None, current_health, "本地 TTS 服务已在运行，模型加载完成，VoiceDesign 已就绪"
+    if current_health.get("reachable"):
+        health = _wait_for_tts_ready(None, base_url)
+        return None, health, "本地 TTS 服务模型加载完成，VoiceDesign 已就绪"
+
+    process = _start_tts_process(_tts_command(config))
+    _state(app)["tts_process"] = process
+    health = _wait_for_tts_ready(process, base_url)
+    return process.pid, health, "本地 TTS 服务启动成功，模型加载完成，VoiceDesign 已就绪"
+
+
+def _run_tts_download_and_deploy(app: FastAPI, config: dict[str, Any], attempt: int) -> None:
+    specs: list[ModelSpec] = []
+    try:
+        _set_tts_deployment_status(
+            app,
+            status="running",
+            stage="checking",
+            progress=5,
+            message="正在检查 TTS 模型缓存与服务状态。",
+            can_retry=False,
+            error=None,
+            attempt=attempt,
+        )
+        current_health = _fetch_tts_health(str(config.get("base_url") or "http://127.0.0.1:7811"))
+        if _is_tts_ready(current_health):
+            _set_tts_deployment_status(
+                app,
+                status="succeeded",
+                stage="ready",
+                progress=100,
+                message="TTS 模型已经下载并部署完成。",
+                health=current_health,
+                pid=None,
+                can_retry=False,
+                model_path=config.get("model_path"),
+                voice_design_model_path=config.get("voice_design_model_path"),
+            )
+            return
+
+        specs, config = _tts_model_specs_for_config(config)
+        _state(app)["model_config"]["tts"] = config
+        for index, spec in enumerate(specs):
+            _set_tts_deployment_status(
+                app,
+                status="running",
+                stage="downloading",
+                progress=10 + index * 25,
+                message=f"正在下载或校验模型：{spec.target.name}",
+                model_path=config.get("model_path"),
+                voice_design_model_path=config.get("voice_design_model_path"),
+            )
+            result = ensure_model(spec)
+            _set_tts_deployment_status(
+                app,
+                status="running",
+                stage="downloading",
+                progress=35 + index * 25,
+                message=f"模型 {spec.target.name} 已就绪：{result}",
+            )
+
+        _set_tts_deployment_status(
+            app,
+            status="running",
+            stage="deploying",
+            progress=76,
+            message="模型下载已完成，正在启动并部署本地 TTS 服务。",
+        )
+        try:
+            pid, health, message = _start_or_wait_tts_service(app, config)
+        except Exception as exc:  # noqa: BLE001 - 后台部署需要把失败反馈给前端轮询。
+            _set_tts_deployment_status(
+                app,
+                status="failed",
+                stage="deploying",
+                progress=82,
+                message=f"模型下载已完成，但部署失败：{exc}",
+                error=str(exc),
+                can_retry=True,
+                pid=None,
+            )
+            return
+
+        _set_tts_deployment_status(
+            app,
+            status="succeeded",
+            stage="ready",
+            progress=100,
+            message=message,
+            health=health,
+            pid=pid,
+            can_retry=False,
+            error=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 下载/校验失败同样通过状态反馈给前端。
+        stage = "downloading" if specs else "checking"
+        _set_tts_deployment_status(
+            app,
+            status="failed",
+            stage=stage,
+            progress=20,
+            message=f"模型下载或校验失败：{exc}",
+            error=str(exc),
+            can_retry=True,
+            pid=None,
+        )
 
 def _prune_expired_secret_exchanges(app: FastAPI) -> None:
     now = time.monotonic()
@@ -355,7 +588,6 @@ def create_app() -> FastAPI:
         description="基于 Agent 的多人有声书自动配音工作台后端接口",
         version=SERVICE_VERSION,
     )
-    api_token = _service_env("SHUYI_API_TOKEN").strip()
     allowed_origins = [
         origin.strip() for origin in _service_env("SHUYI_CORS_ORIGINS").split(",") if origin.strip()
     ]
@@ -372,6 +604,8 @@ def create_app() -> FastAPI:
     app.state.require_tts_ready = _service_env("SHUYI_REQUIRE_TTS_READY", "0") == "1"
     app.state.secret_exchanges = {}
     app.state.text_model_api_key = ""
+    app.state.tts_deployment_lock = threading.Lock()
+    app.state.tts_deployment = _idle_tts_deployment_status(_default_model_config()["tts"])
 
     @app.middleware("http")
     async def versioned_api_boundary(request: Request, call_next):
@@ -380,21 +614,6 @@ def create_app() -> FastAPI:
             return await call_next(request)
         if path.startswith("/api/") and not path.startswith("/api/v1/"):
             return JSONResponse(status_code=404, content={"detail": "接口不存在"})
-        if path.startswith("/api/v1/"):
-            authorization = request.headers.get("Authorization", "")
-            provided_token = authorization.removeprefix("Bearer ").strip()
-            if not authorization.startswith("Bearer ") or not api_token:
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "需要访问令牌"},
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-            if not secrets.compare_digest(provided_token, api_token):
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "访问令牌无效"},
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
         response = await call_next(request)
         if request.method in {"POST", "PATCH", "PUT", "DELETE"} and response.status_code < 400:
             try:
@@ -403,29 +622,13 @@ def create_app() -> FastAPI:
                 app.state.startup_ready = False
         return response
 
-    # CORS 必须包在鉴权中间件外层，确保浏览器能读取 401/403 的中文错误。
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
+        allow_headers=["Content-Type", "Last-Event-ID"],
     )
-
-    async def require_bearer(authorization: str | None = Header(default=None)) -> None:
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(
-                status_code=401,
-                detail="需要访问令牌",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        provided_token = authorization.removeprefix("Bearer ").strip()
-        if not api_token or not secrets.compare_digest(provided_token, api_token):
-            raise HTTPException(
-                status_code=401,
-                detail="访问令牌无效",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
 
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)
@@ -490,11 +693,11 @@ def create_app() -> FastAPI:
             "role_options": collection.utterance_role_options(),
         }
 
-    @app.get("/api/v1/characters", dependencies=[Depends(require_bearer)])
+    @app.get("/api/v1/characters")
     async def list_v1_characters() -> dict[str, Any]:
         return role_payload()
 
-    @app.get("/api/v1/model-config", dependencies=[Depends(require_bearer)])
+    @app.get("/api/v1/model-config")
     async def get_v1_model_config() -> dict[str, Any]:
         return {
             "config": _redacted_model_config(
@@ -503,7 +706,7 @@ def create_app() -> FastAPI:
             )
         }
 
-    @app.get("/api/v1/downloads/{category}/{filename:path}", dependencies=[Depends(require_bearer)])
+    @app.get("/api/v1/downloads/{category}/{filename:path}")
     async def download_generated_file(category: str, filename: str):
         directories = {
             "audio": OUTPUT_AUDIO_DIR,
@@ -971,7 +1174,7 @@ def create_app() -> FastAPI:
             generation_status = "succeeded"
             generation_note = "已生成试听音色。"
             model_requirement = None
-        except TTSServiceError as exc:
+        except TTSServiceError:
             duration_seconds = _write_substitute_wav(output_path)
             generation_status = "substitute"
             generation_note = "已生成本地预览音频。"
@@ -1028,10 +1231,7 @@ def create_app() -> FastAPI:
             "voices": [_public_voice_to_dict(voice) for voice in voices.list()],
         }
 
-    @app.get(
-        "/api/v1/voice-profiles/{voice_id}/audio",
-        dependencies=[Depends(require_bearer)],
-    )
+    @app.get("/api/v1/voice-profiles/{voice_id}/audio")
     async def get_voice_resource_audio(voice_id: str):
         try:
             voice = _state(app)["voices"].get(voice_id)
@@ -1111,6 +1311,50 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"文本模型连接失败：{exc}") from exc
         return {"ok": True, "message": "文本模型连接成功"}
+
+    @app.get("/api/v1/model-config/tts/deployment")
+    async def get_tts_deployment_status() -> dict[str, Any]:
+        return {"deployment": _get_tts_deployment_status(app)}
+
+    @app.post("/api/v1/model-config/tts/deploy")
+    async def deploy_tts_models(payload: dict[str, Any] | None = None):
+        config = _normalize_tts_payload_config(app, payload)
+        _state(app)["model_config"]["tts"] = config
+        with app.state.tts_deployment_lock:
+            current = dict(app.state.tts_deployment)
+            if current.get("status") == "running":
+                return JSONResponse(status_code=202, content={"deployment": current})
+            if current.get("status") == "succeeded":
+                health = _fetch_tts_health(str(config.get("base_url") or "http://127.0.0.1:7811"))
+                if _is_tts_ready(health):
+                    current.update(
+                        {
+                            "health": health,
+                            "progress": 100,
+                            "message": "TTS 模型已经下载并部署完成。",
+                            "updated_at": time.time(),
+                        }
+                    )
+                    app.state.tts_deployment = current
+                    return {"deployment": current}
+            attempt = int(current.get("attempt") or 0) + 1
+            running = {
+                **_idle_tts_deployment_status(config),
+                "status": "running",
+                "stage": "checking",
+                "progress": 1,
+                "message": "已开始后台下载并部署 TTS 模型。",
+                "attempt": attempt,
+                "updated_at": time.time(),
+            }
+            app.state.tts_deployment = running
+        thread = threading.Thread(
+            target=_run_tts_download_and_deploy,
+            args=(app, config, attempt),
+            daemon=True,
+        )
+        thread.start()
+        return JSONResponse(status_code=202, content={"deployment": running})
 
     @app.post("/api/v1/model-config/tts/test")
     async def test_tts_model_connection(payload: dict[str, Any] | None = None) -> dict[str, Any]:

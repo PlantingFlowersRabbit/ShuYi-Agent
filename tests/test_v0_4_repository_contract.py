@@ -8,8 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_v0_4_package_names_use_shuyi_agent_brand():
-    """Covers v0.4 package branding at Python and frontend boundaries."""
+def test_v0_5_package_names_use_shuyi_agent_brand():
+    """Covers v0.5 package branding at Python and frontend boundaries."""
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
 
@@ -17,17 +17,17 @@ def test_v0_4_package_names_use_shuyi_agent_brand():
     assert frontend["name"] == "shuyi-agent-frontend"
 
 
-def test_v0_4_package_versions_are_consistent():
-    """Covers v0.4 release version at Python and frontend boundaries."""
+def test_v0_5_package_versions_are_consistent():
+    """Covers v0.5 release version at Python and frontend boundaries."""
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.4.2"
-    assert frontend["version"] == "0.4.2"
+    assert project["project"]["version"] == "0.5.0"
+    assert frontend["version"] == "0.5.0"
 
 
-def test_v0_4_harness_prompt_is_ignored():
-    """Covers v0.4 repository hygiene for runtime prompt material."""
+def test_v0_5_harness_prompt_is_ignored():
+    """Covers v0.5 repository hygiene for runtime prompt material."""
     ignored = subprocess.run(
         ["git", "check-ignore", "harness_prompt/example.md"],
         cwd=ROOT,
@@ -38,8 +38,8 @@ def test_v0_4_harness_prompt_is_ignored():
     assert ignored.returncode == 0, "harness_prompt/ must be ignored"
 
 
-def test_v0_4_legacy_development_agents_are_untracked():
-    """Covers v0.4 removal of retired development-only agent files."""
+def test_v0_5_legacy_development_agents_are_untracked():
+    """Covers v0.5 removal of retired development-only agent files."""
     tracked_agents = subprocess.run(
         ["git", "ls-files", ".codex/agents"],
         cwd=ROOT,

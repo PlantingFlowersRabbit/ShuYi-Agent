@@ -2,7 +2,7 @@
 
 FROM python:3.11-slim AS cpu-runtime
 
-ARG APP_VERSION=0.4.2
+ARG APP_VERSION=0.5.0
 ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG TORCH_CPU_VERSION=2.11.0+cpu
 ARG TORCHAUDIO_CPU_VERSION=2.11.0+cpu
@@ -21,7 +21,7 @@ RUN groupadd --system shuyi \
     && apt-get update \
     && apt-get install --no-install-recommends -y ffmpeg libsndfile1 sox \
     && rm -rf /var/lib/apt/lists/*
-ENV SHUYI_REQUIRE_TTS_READY=1
+ENV SHUYI_REQUIRE_TTS_READY=0
 WORKDIR /app
 COPY scripts/container/requirements-runtime.txt /tmp/requirements-runtime.txt
 RUN python -m pip install --no-cache-dir \
@@ -46,7 +46,7 @@ CMD []
 
 FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime AS cuda-runtime
 
-ARG APP_VERSION=0.4.2
+ARG APP_VERSION=0.5.0
 LABEL org.opencontainers.image.title="Shuyi Agent CUDA" \
       org.opencontainers.image.version="$APP_VERSION"
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -65,7 +65,7 @@ RUN groupadd --system shuyi \
     && apt-get update \
     && apt-get install --no-install-recommends -y ffmpeg libsndfile1 sox \
     && rm -rf /var/lib/apt/lists/*
-ENV SHUYI_REQUIRE_TTS_READY=1
+ENV SHUYI_REQUIRE_TTS_READY=0
 WORKDIR /app
 COPY scripts/container/requirements-runtime.txt /tmp/requirements-runtime.txt
 RUN python -m pip install --no-cache-dir -r /tmp/requirements-runtime.txt

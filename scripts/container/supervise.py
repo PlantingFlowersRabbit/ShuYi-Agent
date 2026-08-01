@@ -93,11 +93,16 @@ class ProcessSupervisor:
             time.sleep(poll_interval)
 
 
-def run(api_command: Sequence[str], tts_service_command: Sequence[str]) -> int:
+def _enabled(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def run(api_command: Sequence[str], tts_service_command: Sequence[str] | None = None) -> int:
     processes: dict[str, subprocess.Popen] = {}
     try:
         processes["api"] = subprocess.Popen(list(api_command), start_new_session=True)
-        processes["tts"] = subprocess.Popen(list(tts_service_command), start_new_session=True)
+        if tts_service_command is not None:
+            processes["tts"] = subprocess.Popen(list(tts_service_command), start_new_session=True)
     except Exception:
         for process in processes.values():
             if process.poll() is None:
@@ -113,7 +118,12 @@ def run(api_command: Sequence[str], tts_service_command: Sequence[str]) -> int:
 
 def main() -> int:
     api_command = tuple(sys.argv[1:]) or DEFAULT_API_COMMAND
-    return run(api_command, tts_command())
+    tts_service_command = (
+        tts_command()
+        if _enabled(os.environ.get("SHUYI_START_TTS_ON_BOOT", "0"))
+        else None
+    )
+    return run(api_command, tts_service_command)
 
 
 if __name__ == "__main__":

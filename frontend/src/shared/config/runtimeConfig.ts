@@ -1,5 +1,5 @@
 export const APP_BRAND = "书弈 Agent";
-export const APP_VERSION = "0.4.2";
+export const APP_VERSION = "0.5.0";
 
 type RuntimeEnv = {
   BASE_URL?: string;
@@ -19,8 +19,20 @@ function normalizePagesBase(value: string | undefined): string {
 }
 
 function normalizeApiBase(value: string | undefined): string {
-  const base = value?.trim() || "/api/v1";
-  return base === "/" ? "" : base.replace(/\/+$/, "");
+  const rawBase = value?.trim() || "/api/v1";
+  if (rawBase === "/") return "";
+  if (rawBase.startsWith("/")) return rawBase.replace(/\/+$/, "");
+
+  const withScheme = /^https?:\/\//i.test(rawBase) ? rawBase : `https://${rawBase}`;
+  const normalized = withScheme.replace(/\/+$/, "");
+  try {
+    const url = new URL(normalized);
+    const path = url.pathname.replace(/\/+$/, "");
+    if (!path) url.pathname = "/api/v1";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return normalized;
+  }
 }
 
 export function resolveRuntimeConfig(env: RuntimeEnv): RuntimeConfig {

@@ -6,33 +6,33 @@ import {
 } from "./features/agent-workflow/workflowMachine";
 import { APP_BRAND, APP_VERSION, runtimeConfig } from "./shared/config/runtimeConfig";
 
-const ACCESS_TOKEN_KEY = "shuyi-agent-api-token";
-let inMemoryAccessToken = "";
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly detail: unknown;
 
-function readAccessToken(): string {
-  try {
-    const stored =
-      typeof window !== "undefined" && window.sessionStorage
-        ? window.sessionStorage.getItem(ACCESS_TOKEN_KEY)
-        : null;
-    return stored ?? inMemoryAccessToken;
-  } catch {
-    return inMemoryAccessToken;
+  constructor(status: number, detail: unknown) {
+    super(formatApiErrorDetail(detail));
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.detail = detail;
   }
 }
 
-function storeAccessToken(value: string): void {
-  inMemoryAccessToken = value;
-  try {
-    if (value) window.sessionStorage.setItem(ACCESS_TOKEN_KEY, value);
-    else window.sessionStorage.removeItem(ACCESS_TOKEN_KEY);
-  } catch {
-    // 当前页面继续使用内存中的访问令牌。
+function formatApiErrorDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === "string") return message;
+    return JSON.stringify(detail);
   }
+  return String(detail || "请求失败");
 }
 
-function authorizationHeaders(token = readAccessToken()): Record<string, string> {
-  return token ? { Authorization: `Bearer ${token}` } : {};
+export function isRoleDeleteReferenceConflict(error: unknown): error is ApiRequestError {
+  if (!(error instanceof ApiRequestError) || error.status !== 409) return false;
+  const detail = error.detail as { delete_result?: { referenced_count?: unknown } } | null;
+  const referencedCount = detail?.delete_result?.referenced_count;
+  return typeof referencedCount === "number" && referencedCount > 0;
 }
 
 type Page = "main" | "voices" | "models";
@@ -259,6 +259,19 @@ type ConnectionTestResponse = {
   progress?: number;
 };
 
+type TtsDeploymentStatus = {
+  status: "idle" | "running" | "succeeded" | "failed";
+  stage: string;
+  progress: number;
+  message: string;
+  can_retry?: boolean;
+  error?: string | null;
+  pid?: number | null;
+  health?: Record<string, unknown> | null;
+  model_path?: string;
+  voice_design_model_path?: string;
+};
+
 const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
 const DEFAULT_BASE_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-Base";
@@ -277,6 +290,19 @@ const defaultModelConfig: ModelConfig = {
     model_path: DEFAULT_BASE_MODEL_PATH,
     voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
   },
+};
+
+const defaultTtsDeployment: TtsDeploymentStatus = {
+  status: "idle",
+  stage: "idle",
+  progress: 0,
+  message: "尚未下载并部署 TTS 模型。",
+  can_retry: false,
+  error: null,
+  pid: null,
+  health: null,
+  model_path: DEFAULT_BASE_MODEL_PATH,
+  voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
 };
 
 function initialPageFromUrl(): Page {
@@ -611,14 +637,12 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       ...(isMultipart ? {} : { "Content-Type": "application/json" }),
-      ...authorizationHeaders(),
       ...(init?.headers ?? {}),
     },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const detail = data.detail ?? data.error ?? response.statusText;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    throw new ApiRequestError(response.status, data.detail ?? data.error ?? response.statusText);
   }
   return data as T;
 }
@@ -698,7 +722,7 @@ export function parseAgentSseBuffer(buffer: string): {
   return { events, remainder };
 }
 
-function AuthorizedAudio({ source, accessToken }: { source: string; accessToken: string }) {
+function AuthorizedAudio({ source }: { source: string }) {
   const [playableUrl, setPlayableUrl] = useState("");
 
   useEffect(() => {
@@ -709,7 +733,7 @@ function AuthorizedAudio({ source, accessToken }: { source: string; accessToken:
     }
     let revokedUrl = "";
     let cancelled = false;
-    fetch(mediaRequestUrl(source), { headers: authorizationHeaders(accessToken) })
+    fetch(mediaRequestUrl(source))
       .then((response) => {
         if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
         return response.blob();
@@ -724,9 +748,9 @@ function AuthorizedAudio({ source, accessToken }: { source: string; accessToken:
       cancelled = true;
       if (revokedUrl) URL.revokeObjectURL(revokedUrl);
     };
-  }, [accessToken, source]);
+  }, [source]);
 
-  return playableUrl ? <audio controls src={playableUrl} /> : <small>音频需要有效访问令牌</small>;
+  return playableUrl ? <audio controls src={playableUrl} /> : <small>音频暂不可用</small>;
 }
 
 function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
@@ -809,6 +833,14 @@ function normalizeModelConfig(config: Partial<ModelConfig> & { llm?: Partial<Mod
   };
 }
 
+function normalizeTtsDeployment(status: Partial<TtsDeploymentStatus> | null | undefined): TtsDeploymentStatus {
+  return {
+    ...defaultTtsDeployment,
+    ...(status ?? {}),
+    progress: Number.isFinite(status?.progress) ? Number(status?.progress) : defaultTtsDeployment.progress,
+  };
+}
+
 function ProgressBar({ label, value }: { label: string; value: number }) {
   const normalized = Math.max(0, Math.min(100, Math.round(value)));
   return (
@@ -874,12 +906,12 @@ function App() {
   const [generatingUtteranceIds, setGeneratingUtteranceIds] = useState<Record<string, boolean>>({});
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
   const [localTtsStarting, setLocalTtsStarting] = useState(false);
+  const [ttsDeployment, setTtsDeployment] = useState<TtsDeploymentStatus>(defaultTtsDeployment);
   const [aiRoleCandidates, setAiRoleCandidates] = useState<AiRoleCandidate[]>([]);
   const [agentRunThreadId, setAgentRunThreadId] = useState("");
   const [agentRunWaitingForRoles, setAgentRunWaitingForRoles] = useState(false);
   const [agentRunRunning, setAgentRunRunning] = useState(false);
   const [workflowState, setWorkflowState] = useState(() => createWorkflowState("automatic"));
-  const [apiToken, setApiToken] = useState(readAccessToken);
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
@@ -907,6 +939,24 @@ function App() {
     setAgentRunRunning(false);
   }
 
+  function applyTtsDeployment(status: Partial<TtsDeploymentStatus> | null | undefined) {
+    const normalized = normalizeTtsDeployment(status);
+    setTtsDeployment(normalized);
+    if (normalized.model_path || normalized.voice_design_model_path) {
+      setModelConfig((current) => ({
+        ...current,
+        tts: {
+          ...current.tts,
+          ...(normalized.model_path ? { model_path: normalized.model_path } : {}),
+          ...(normalized.voice_design_model_path
+            ? { voice_design_model_path: normalized.voice_design_model_path }
+            : {}),
+        },
+      }));
+    }
+    return normalized;
+  }
+
   useEffect(() => {
     requestJson<{ voices: ApiVoiceResource[] }>("/voice-profiles")
       .then((data) => setVoices(data.voices.map(fromApiVoice)))
@@ -919,7 +969,33 @@ function App() {
     requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
       .catch(() => undefined);
-  }, [apiToken]);
+
+    requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deployment")
+      .then((data) => applyTtsDeployment(data.deployment))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (ttsDeployment.status !== "running") return undefined;
+    let cancelled = false;
+    const poll = () => {
+      requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deployment")
+        .then((data) => {
+          if (cancelled) return;
+          const status = applyTtsDeployment(data.deployment);
+          if (status.status !== "running") setApiStatus(status.message);
+        })
+        .catch((error) => {
+          if (!cancelled) setApiStatus(`TTS模型部署进度读取失败：${String(error)}`);
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [ttsDeployment.status]);
 
   useEffect(() => {
     if (workflowState.mode !== "automatic" || workflowState.status !== "running") return;
@@ -1242,9 +1318,17 @@ function App() {
       setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, data.roles.map(fromApiRole)));
       setApiStatus("角色删除成功");
     } catch (error) {
-      const shouldUnbind = window.confirm(`角色正在被语句引用，是否解除这些语句的角色绑定并删除？\n${String(error)}`);
+      if (!isRoleDeleteReferenceConflict(error)) {
+        setApiStatus(`角色删除失败：${String(error)}`);
+        return;
+      }
+      const detail = error.detail as { delete_result?: { referenced_count?: number } };
+      const referencedCount = detail.delete_result?.referenced_count ?? 0;
+      const shouldUnbind = window.confirm(
+        `角色正在被 ${referencedCount} 条语句引用，是否解除这些语句的角色绑定并删除？`,
+      );
       if (!shouldUnbind) {
-        setApiStatus(`角色删除已取消：${String(error)}`);
+        setApiStatus("角色删除已取消：仍保留角色和语句绑定");
         return;
       }
       try {
@@ -1268,9 +1352,7 @@ function App() {
       return;
     }
     try {
-      const response = await fetch(mediaRequestUrl(voiceAudioSrc(voice)), {
-        headers: authorizationHeaders(apiToken),
-      });
+      const response = await fetch(mediaRequestUrl(voiceAudioSrc(voice)));
       if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
       const objectUrl = URL.createObjectURL(await response.blob());
       const audio = new Audio(objectUrl);
@@ -1340,7 +1422,6 @@ function App() {
               headers: {
                 "Content-Type": "application/json",
                 ...(lastEventId ? { "Last-Event-ID": String(lastEventId) } : {}),
-                ...authorizationHeaders(apiToken),
               },
               body: requestBody,
             },
@@ -1612,9 +1693,7 @@ function App() {
           speed: 1.0,
         }),
       });
-      const response = await fetch(mediaRequestUrl(data.download_url), {
-        headers: authorizationHeaders(apiToken),
-      });
+      const response = await fetch(mediaRequestUrl(data.download_url));
       if (!response.ok) throw new Error(`制作包下载失败：${response.status}`);
       const objectUrl = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a");
@@ -1795,6 +1874,21 @@ function App() {
     }
   }
 
+  async function deployTtsModels() {
+    if (ttsDeployment.status === "running") return;
+    setApiStatus("已开始后台下载并部署 TTS 模型；其他不依赖 TTS 的功能可继续使用");
+    try {
+      const data = await requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deploy", {
+        method: "POST",
+        body: JSON.stringify({ tts: modelConfig.tts }),
+      });
+      const status = applyTtsDeployment(data.deployment);
+      setApiStatus(status.message);
+    } catch (error) {
+      setApiStatus(`TTS模型下载并部署启动失败：${String(error)}`);
+    }
+  }
+
   async function testTtsModelConnection() {
     if (localTtsStarting) return;
     setLocalTtsStarting(true);
@@ -1954,7 +2048,7 @@ function App() {
                           <strong>音色匹配</strong>
                           {role.voiceMatchReason ?? "用户可手动调整"}
                         </p>
-                        {voice && <AuthorizedAudio source={voiceAudioSrc(voice)} accessToken={apiToken} />}
+                        {voice && <AuthorizedAudio source={voiceAudioSrc(voice)} />}
                       </article>
                     );
                   })}
@@ -2141,7 +2235,7 @@ function App() {
                           })()}
                           <output>{utterance.audioStatus}</output>
                           {utterance.audioUrl && (
-                            <AuthorizedAudio source={utterance.audioUrl} accessToken={apiToken} />
+                            <AuthorizedAudio source={utterance.audioUrl} />
                           )}
                         </article>
                       ))}
@@ -2261,7 +2355,7 @@ function App() {
                     }
                   />
                 </label>
-                <AuthorizedAudio source={voiceAudioSrc(voice)} accessToken={apiToken} />
+                <AuthorizedAudio source={voiceAudioSrc(voice)} />
                 <button className="tool-button teal" type="button" onClick={() => void updateVoiceResource(voice)}>
                   保存音色
                 </button>
@@ -2314,7 +2408,7 @@ function App() {
             </button>
             {newVoice.referenceAudioPath && <small>已选择：{newVoice.referenceAudioPath}</small>}
             {newVoiceAudioPreviewUrl && (
-              <AuthorizedAudio source={newVoiceAudioPreviewUrl} accessToken={apiToken} />
+              <AuthorizedAudio source={newVoiceAudioPreviewUrl} />
             )}
             <button className="tool-button teal" type="button" onClick={() => void saveVoiceResource(newVoice)}>
               保存音色
@@ -2355,7 +2449,7 @@ function App() {
             {generatedVoicePreviewUrl && (
               <div className="generated-preview">
                 <small>试听生成音色：{generatedVoicePreview?.name}</small>
-                <AuthorizedAudio source={generatedVoicePreviewUrl} accessToken={apiToken} />
+                <AuthorizedAudio source={generatedVoicePreviewUrl} />
               </div>
             )}
             <button className="tool-button teal" type="button" onClick={() => void saveGeneratedVoiceResource()}>
@@ -2453,9 +2547,19 @@ function App() {
               }
             />
           </label>
+          <ProgressBar label="TTS模型下载并部署进度" value={ttsDeployment.progress} />
+          <small className="status-message" aria-label="TTS模型部署反馈">{ttsDeployment.message}</small>
           <div className="toolbar-row">
             <button className="tool-button teal" type="button" onClick={() => void saveLocalModelConfig()}>
               保存模型配置
+            </button>
+            <button
+              className="tool-button amber"
+              type="button"
+              disabled={ttsDeployment.status === "running"}
+              onClick={() => void deployTtsModels()}
+            >
+              {ttsDeployment.status === "running" ? "部署中" : "下载并部署"}
             </button>
             <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testTtsModelConnection()}>
               {localTtsStarting ? "测试中" : "测试连接"}
@@ -2469,26 +2573,14 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>
-          {APP_BRAND} <span>v{APP_VERSION}</span>
-        </h1>
-        <p className="product-subtitle">基于 Agent 的多人有声书自动配音工作台</p>
+        <div className="brand-block">
+          <h1>
+            <img className="brand-logo" src={`${runtimeConfig.pagesBase}shuyi-agent-zh.svg`} alt={APP_BRAND} />
+            <span>v{APP_VERSION}</span>
+          </h1>
+          <p className="product-subtitle">基于 Agent 的多人有声书自动配音工作台</p>
+        </div>
         <div className="topbar-actions">
-          <label className="access-token-field">
-            <span>访问令牌</span>
-            <input
-              aria-label="后端访问令牌"
-              autoComplete="off"
-              onChange={(event) => {
-                const value = event.target.value;
-                setApiToken(value);
-                storeAccessToken(value);
-              }}
-              placeholder="输入后端访问令牌"
-              type="password"
-              value={apiToken}
-            />
-          </label>
           <div className="mode-selector" role="group" aria-label="配音模式">
             {[
               ["automatic", "自动配音"],

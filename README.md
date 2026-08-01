@@ -31,7 +31,7 @@ src="https://img.shields.io/badge/Code_License-MIT-f5de53?&color=f5de53"/></a>
 
 ## 简介
 
-书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.4.2 将文本模型统一为 OpenAI SDK 兼容配置，并保证模型结果可以人工修改；运行时不会生成或执行模型返回的 Python 代码。
+书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.5.0 取消后端访问令牌流程，支持前端一键后台下载并部署 TTS 模型，同时保留 OpenAI SDK 兼容文本模型配置；运行时不会生成或执行模型返回的 Python 代码。
 
 ## 项目结构
 
@@ -67,7 +67,7 @@ npm --prefix frontend run dev
 - 健康检查：`GET /health/live`、`/health/startup`、`/health/ready`
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 - Swagger UI：`http://127.0.0.1:8000/docs`
-- v1 接口使用 `Authorization: Bearer <SHUYI_API_TOKEN>`；后端读取启动环境中的访问令牌并校验请求，前端顶部的“访问令牌”输入框填写同一个令牌后即可连接。文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
+- v1 接口默认公开访问，不再需要后端访问令牌；文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
 
 ## Docker CPU / GPU
 
@@ -83,9 +83,9 @@ CUDA 启动需要 NVIDIA 驱动、Docker Engine 和 NVIDIA Container Toolkit：
 docker compose -f compose.cuda.yaml up --build
 ```
 
-两个配置都以非 root 用户运行，默认将容器内 FastAPI `0.0.0.0:8000` 显式发布到宿主机 `0.0.0.0:8000`；可用 `SHUYI_HOST_PORT=8686` 改为其他宿主机端口。命名卷会持久化 `/data` 与 `/models`。监督器同时启动 FastAPI 和只监听 `127.0.0.1:7811` 的 TTS；TTS 仅供后端容器内部调用，不作为 CNB 公网端口暴露。任一进程退出都会终止另一进程，容器健康检查要求两者都就绪。健康检查留出 5 分钟模型初始化时间。
+两个配置都以非 root 用户运行，默认将容器内 FastAPI `0.0.0.0:8000` 显式发布到宿主机 `0.0.0.0:8000`；可用 `SHUYI_HOST_PORT=8686` 改为其他宿主机端口。命名卷会持久化 `/data` 与 `/models`。容器默认先启动 FastAPI；TTS 模型由前端“模型配置 > 下载并部署”按钮在后台下载、校验并启动，过程中其他不依赖 TTS 的 API 可继续使用。
 
-首次启动按固定 commit revision 优先从 ModelScope 下载 Base 与 VoiceDesign 模型，失败后回退 Hugging Face。每个模型使用独立文件锁，下载到同一文件系统的临时目录，完成 SHA-256 校验和标记后再原子切换；后续启动重新校验缓存。设置 `SHUYI_MODEL_AUTO_DOWNLOAD=0` 可禁用下载并自行挂载模型。
+模型下载按固定 commit revision 优先从 ModelScope 下载 Base 与 VoiceDesign 模型，失败后回退 Hugging Face。每个模型使用独立文件锁，下载到同一文件系统的临时目录，完成 SHA-256 校验和标记后再原子切换；后续点击部署会复用已校验缓存。设置 `SHUYI_MODEL_AUTO_DOWNLOAD=1` 且 `SHUYI_START_TTS_ON_BOOT=1` 可恢复容器启动时下载并启动 TTS 的验收/CI 行为。
 
 模型体积较大，下载失败不会删除用户已存在的非空模型目录。需要重新下载时，应先停止容器并自行备份、检查对应命名卷，不要直接清理整个 Docker 数据目录。
 
@@ -93,13 +93,12 @@ docker compose -f compose.cuda.yaml up --build
 
 | 变量 | 用途 | 默认值 |
 | --- | --- | --- |
-| `SHUYI_API_TOKEN` | v1 API Bearer token；CNB 启动脚本未检测到时会自动生成 | 空，直接 Docker 启动时受保护接口会被拒绝 |
 | `SHUYI_CORS_ORIGINS` | 允许的浏览器来源，逗号分隔 | 空 |
 | `SHUYI_HOST_PORT` | Docker 暴露到宿主机的后端端口；CNB 启动脚本默认用 `8000` | `8000` |
 | `SHUYI_DEVICE` | `auto`、`cpu` 或 `cuda` | `auto` |
 | `SHUYI_DATA_DIR` | 持久数据目录 | 容器内 `/data` |
 | `SHUYI_MODEL_DIR` | 模型缓存根目录 | 容器内 `/models` |
-| `SHUYI_MODEL_AUTO_DOWNLOAD` | 首次启动自动下载 | `1` |
+| `SHUYI_MODEL_AUTO_DOWNLOAD` | 启动时自动下载模型；普通运行建议由前端按钮触发 | `0` |
 | `SHUYI_TTS_MODEL_ID` | 两个模型源共用的 Base 模型 ID | `Qwen/Qwen3-TTS-12Hz-1.7B-Base` |
 | `SHUYI_TTS_VOICE_DESIGN_MODEL_ID` | 两个模型源共用的 VoiceDesign 模型 ID | `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` |
 | `SHUYI_MODELSCOPE_TTS_REVISION` | Base 模型固定 ModelScope commit | `dfb4a462...` |
@@ -111,38 +110,23 @@ docker compose -f compose.cuda.yaml up --build
 | `SHUYI_TEXT_MODEL_API_KEY` | OpenAI SDK 兼容文本模型密钥，也可在前端临时输入 | 空 |
 | `SHUYI_TEXT_MODEL_BASE_URL` | OpenAI SDK 兼容文本模型 Base URL | 空 |
 | `SHUYI_TEXT_MODEL_NAME` | OpenAI SDK 兼容文本模型名称 | 空 |
-| `VITE_API_BASE_URL` | 前端构建时 API 地址 | 本地为 `/api/v1` |
+| `VITE_API_BASE_URL` | 前端构建时 API 地址；可填完整 URL 或裸域名，裸域名会按 `https://域名/api/v1` 解析 | 本地为 `/api/v1` |
 
 全部环境变量示例见 `.env.example`。
 
-## CNB 启动、公网访问与访问令牌
+## CNB 启动与公网访问
 
-CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会先停止旧的同名 Compose 服务，再把容器内 FastAPI `0.0.0.0:8000` 显式映射到 CNB 工作区的 `0.0.0.0:8000`，满足 WebIDE/VS Code PORTS 面板要求服务监听 `0.0.0.0` 的访问条件。公网地址由 VS Code 工作区的 PORTS/端口面板显示；如果没有自动弹出，在 PORTS 面板手动添加 `8000`。
+CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会先停止旧的同名 Compose 服务，再把容器内 FastAPI `0.0.0.0:8000` 显式映射到 CNB 工作区的 `0.0.0.0:8000`，满足 WebIDE/VS Code PORTS 面板要求服务监听 `0.0.0.0` 的访问条件。若 CNB 提供 `CNB_VSCODE_PROXY_URI`，脚本会自动打印 8000 端口的后端公网访问地址；否则仍可在 PORTS 面板查看或手动添加 `8000`。
 
-GitHub Pages 访问 CNB 后端时，把 PORTS 面板显示的公网地址加上 `/api/v1` 配置为仓库变量 `VITE_API_BASE_URL`，例如 `<PORTS 面板公网地址>/api/v1`。模型配置页的 TTS 默认值按 CNB/Docker 后端显示为 `http://127.0.0.1:7811`、`/models/Qwen3-TTS-12Hz-1.7B-Base`、`/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`；后端容器内部会用这些路径读取下载好的模型。
-
-身份验证链路是：启动环境先提供后端访问令牌，后端读取 `SHUYI_API_TOKEN` 并校验 `Authorization: Bearer ...`，前端顶部“访问令牌”输入框填写同一个令牌后才会连接成功。
-
-后端访问令牌有两种获取方式：
-
-1. 推荐在 CNB 环境变量或本地 `.env` 中预先设置 `SHUYI_API_TOKEN`。这种方式不会在日志中显示令牌；你使用自己设置的值作为 Bearer token，并在前端“访问令牌”输入框中填写它。
-2. 如果没有设置 `SHUYI_API_TOKEN`，CNB 启动脚本会在后端启动前自动生成一个令牌，写入工作区 `.shuyi-api-token`，传给后端容器，并在启动日志中打印：
-
-```text
-后端访问令牌（自动生成，已写入 .shuyi-api-token）：
-<token>
-请求头格式：Authorization: Bearer <上方后端访问令牌>
-```
-
-本地 Docker 启动默认仍使用 `http://127.0.0.1:8000`；CNB 场景使用 PORTS 面板显示的公网地址。
+GitHub Pages 访问 CNB 后端时，可把 PORTS 面板显示的公网地址加 `/api/v1` 配置为仓库变量 `VITE_API_BASE_URL`，也可只填写裸域名，前端会自动解析为 `https://<域名>/api/v1`。模型配置页的 TTS 默认值按 CNB/Docker 后端显示为 `http://127.0.0.1:7811`、`/models/Qwen3-TTS-12Hz-1.7B-Base`、`/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`；后端容器内部会用这些路径下载、校验并读取模型。
 
 ## GitHub Pages
 
-`.github/workflows/pages.yml` 在 `main` 分支每次更新时构建静态站点并发布到 `gh-pages` 分支。先在仓库 Settings > Pages 中选择从 `gh-pages` 分支发布，再按需配置仓库变量 `VITE_API_BASE_URL`。Pages 只托管前端，不提供 FastAPI 或模型服务；生产 API 必须启用 HTTPS、Bearer token 和准确的 CORS 来源。
+`.github/workflows/pages.yml` 在 `main` 分支每次更新时构建静态站点并发布到 `gh-pages` 分支。先在仓库 Settings > Pages 中选择从 `gh-pages` 分支发布，再按需配置仓库变量 `VITE_API_BASE_URL`。Pages 只托管前端，不提供 FastAPI 或模型服务；生产 API 应启用 HTTPS，并把 Pages 域名加入准确的 CORS 来源。
 
 ## CNB 镜像发布模板
 
-`.cnb.yml` 是可移植模板：先运行 CPU 契约测试，再在支持 NVIDIA Container Toolkit 的 GPU runner 上构建 CPU/CUDA 镜像并调用本地 TTS 完成真实音频推理。推理成功后始终推送 `${CNB_COMMIT_SHA}-cpu` 和 `${CNB_COMMIT_SHA}-cuda`；仅在 `CNB_TAG=v0.4.2` 时额外推送不可由普通分支流水线覆盖的 `v0.4.2-cpu` 与 `v0.4.2-cuda`。使用前在 CNB 仓库密钥中配置 registry 凭据和必要的模型 token，并根据实际执行器调整 Docker/GPU 服务声明。该模板不代表项目承诺长期托管任何公共镜像。
+`.cnb.yml` 是可移植模板：先运行 CPU 契约测试，再在支持 NVIDIA Container Toolkit 的 GPU runner 上构建 CPU/CUDA 镜像并调用本地 TTS 完成真实音频推理。推理成功后始终推送 `${CNB_COMMIT_SHA}-cpu` 和 `${CNB_COMMIT_SHA}-cuda`；仅在 `CNB_TAG=v0.5.0` 时额外推送不可由普通分支流水线覆盖的 `v0.5.0-cpu` 与 `v0.5.0-cuda`。使用前在 CNB 仓库密钥中配置 registry 凭据和必要的模型 token，并根据实际执行器调整 Docker/GPU 服务声明。该模板不代表项目承诺长期托管任何公共镜像。
 
 ## 验证
 

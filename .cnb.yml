@@ -42,11 +42,11 @@ pipeline:
         test -n "$CNB_COMMIT_SHA"
 
         image_root="$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY"
-        cpu_version="$image_root:v0.4.2-cpu"
-        cuda_version="$image_root:v0.4.2-cuda"
+        cpu_version="$image_root:v0.5.0-cpu"
+        cuda_version="$image_root:v0.5.0-cuda"
         cpu_commit="$image_root:${CNB_COMMIT_SHA}-cpu"
         cuda_commit="$image_root:${CNB_COMMIT_SHA}-cuda"
-        test_container="shuyi-v042-gpu-test"
+        test_container="shuyi-v050-gpu-test"
 
         echo "$CNB_DOCKER_PASSWORD" | docker login "$CNB_DOCKER_REGISTRY" --username "$CNB_DOCKER_USERNAME" --password-stdin
         docker build --target cpu-runtime --tag "$cpu_version" --tag "$cpu_commit" .
@@ -58,6 +58,7 @@ pipeline:
         trap cleanup EXIT
         docker run --name "$test_container" --gpus all --detach \
           --env SHUYI_MODEL_AUTO_DOWNLOAD=1 \
+          --env SHUYI_START_TTS_ON_BOOT=1 \
           --env QWEN3_TTS_DEVICE=auto \
           --env MODELSCOPE_API_TOKEN="${MODELSCOPE_API_TOKEN:-}" \
           --env HF_TOKEN="${HF_TOKEN:-}" \
@@ -79,9 +80,9 @@ pipeline:
 
         docker push "$cpu_commit"
         docker push "$cuda_commit"
-        if [ "${CNB_TAG:-}" = "v0.4.2" ]; then
+        if [ "${CNB_TAG:-}" = "v0.5.0" ]; then
           docker push "$cpu_version"
           docker push "$cuda_version"
         else
-          echo "当前不是 v0.4.2 标签流水线，跳过固定版本标签推送"
+          echo "当前不是 v0.5.0 标签流水线，跳过固定版本标签推送"
         fi

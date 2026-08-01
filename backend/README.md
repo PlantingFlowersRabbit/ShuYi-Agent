@@ -12,7 +12,7 @@ uv sync --group backend --group tts
 uv run uvicorn backend.app.api.app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-健康检查为 `GET /health/ready`，OpenAPI 为 `/openapi.json`，交互文档为 `/docs`。`/api/v1/*` 接口要求 `Authorization: Bearer <SHUYI_API_TOKEN>`。
+健康检查为 `GET /health/ready`，OpenAPI 为 `/openapi.json`，交互文档为 `/docs`。`/api/v1/*` 接口默认公开访问，不再要求后端访问令牌。
 
 ## TTS 服务
 
@@ -25,9 +25,9 @@ QWEN3_TTS_DEVICE=auto
 QWEN3_TTS_BASE_URL=http://127.0.0.1:7811
 ```
 
-容器监督器同时启动 FastAPI 与 TTS。TTS 固定监听 `127.0.0.1:7811`，不会直接暴露到容器外；任一子进程退出或收到 `SIGTERM` 时，监督器会向两个进程组转发信号并回收进程。
+容器默认先启动 FastAPI；TTS 固定监听 `127.0.0.1:7811`，由 `/api/v1/model-config/tts/deploy` 后台下载模型并启动，不会直接暴露到容器外。设置 `SHUYI_START_TTS_ON_BOOT=1` 可恢复启动时同时监督 TTS 的验收/CI 行为。
 
-首次启动由 `scripts/container/download_models.py` 将模型下载到持久卷。下载器默认优先 ModelScope、失败后回退 Hugging Face；两个来源分别使用固定非空 revision。每个模型有文件锁，下载在唯一临时目录进行，生成文件内容 SHA-256 校验和与完成标记后原子切换。已有缓存会在每次启动时重新校验，冲突或损坏目录不会被覆盖。
+`scripts/container/download_models.py` 默认优先 ModelScope、失败后回退 Hugging Face；两个来源分别使用固定非空 revision。每个模型有文件锁，下载在唯一临时目录进行，生成文件内容 SHA-256 校验和与完成标记后原子切换。已有缓存会在部署时重新校验，冲突或损坏目录不会被覆盖。
 
 ## 容器
 
