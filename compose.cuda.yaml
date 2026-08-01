@@ -19,7 +19,7 @@ services:
       - path: .env
         required: false
     ports:
-      - "${SHUYI_HOST_PORT:-8000}:8000"
+      - "0.0.0.0:${SHUYI_HOST_PORT:-8000}:8000"
     volumes:
       - shuyi-data:/data
       - shuyi-models:/models

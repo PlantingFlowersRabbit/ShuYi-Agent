@@ -62,8 +62,13 @@ def test_v0_4_compose_accepts_public_host_port_and_api_token(compose_file: str):
 
     environment = service["environment"]
     assert "SHUYI_API_TOKEN" in environment
-    assert any(port.get("target") == 8000 and port.get("published") == "8000" for port in service["ports"])
-    assert "${SHUYI_HOST_PORT:-8000}:8000" in (ROOT / compose_file).read_text(encoding="utf-8")
+    assert any(
+        port.get("host_ip") == "0.0.0.0"
+        and port.get("target") == 8000
+        and port.get("published") == "8000"
+        for port in service["ports"]
+    )
+    assert "0.0.0.0:${SHUYI_HOST_PORT:-8000}:8000" in (ROOT / compose_file).read_text(encoding="utf-8")
 
 
 def test_v0_4_dockerfile_defines_cpu_and_cuda_runtime_targets():

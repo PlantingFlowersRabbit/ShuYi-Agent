@@ -83,7 +83,7 @@ CUDA 启动需要 NVIDIA 驱动、Docker Engine 和 NVIDIA Container Toolkit：
 docker compose -f compose.cuda.yaml up --build
 ```
 
-两个配置都以非 root 用户运行，默认通过宿主机 `8000` 端口公开容器内 FastAPI `8000` 端口；可用 `SHUYI_HOST_PORT=8686` 改为其他宿主机端口。命名卷会持久化 `/data` 与 `/models`。监督器同时启动 FastAPI 和只监听 `127.0.0.1:7811` 的 TTS；任一进程退出都会终止另一进程，容器健康检查要求两者都就绪。健康检查留出 5 分钟模型初始化时间。
+两个配置都以非 root 用户运行，默认将容器内 FastAPI `0.0.0.0:8000` 显式发布到宿主机 `0.0.0.0:8000`；可用 `SHUYI_HOST_PORT=8686` 改为其他宿主机端口。命名卷会持久化 `/data` 与 `/models`。监督器同时启动 FastAPI 和只监听 `127.0.0.1:7811` 的 TTS；TTS 仅供后端容器内部调用，不作为 CNB 公网端口暴露。任一进程退出都会终止另一进程，容器健康检查要求两者都就绪。健康检查留出 5 分钟模型初始化时间。
 
 首次启动按固定 commit revision 优先从 ModelScope 下载 Base 与 VoiceDesign 模型，失败后回退 Hugging Face。每个模型使用独立文件锁，下载到同一文件系统的临时目录，完成 SHA-256 校验和标记后再原子切换；后续启动重新校验缓存。设置 `SHUYI_MODEL_AUTO_DOWNLOAD=0` 可禁用下载并自行挂载模型。
 
@@ -117,7 +117,7 @@ docker compose -f compose.cuda.yaml up --build
 
 ## CNB 启动、公网访问与访问令牌
 
-CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会先停止旧的同名 Compose 服务，再把容器内 FastAPI `8000` 端口映射到 CNB 工作区的 `8000` 端口，避免旧的 `8686` 映射占用导致 `bind: address already in use`。公网地址由 VS Code 工作区的 PORTS/端口面板显示；如果没有自动弹出，在 PORTS 面板手动添加 `8000`。
+CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会先停止旧的同名 Compose 服务，再把容器内 FastAPI `0.0.0.0:8000` 显式映射到 CNB 工作区的 `0.0.0.0:8000`，满足 WebIDE/VS Code PORTS 面板要求服务监听 `0.0.0.0` 的访问条件。公网地址由 VS Code 工作区的 PORTS/端口面板显示；如果没有自动弹出，在 PORTS 面板手动添加 `8000`。
 
 GitHub Pages 访问 CNB 后端时，把 PORTS 面板显示的公网地址加上 `/api/v1` 配置为仓库变量 `VITE_API_BASE_URL`，例如 `<PORTS 面板公网地址>/api/v1`。模型配置页的 TTS 默认值按 CNB/Docker 后端显示为 `http://127.0.0.1:7811`、`/models/Qwen3-TTS-12Hz-1.7B-Base`、`/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`；后端容器内部会用这些路径读取下载好的模型。
 
