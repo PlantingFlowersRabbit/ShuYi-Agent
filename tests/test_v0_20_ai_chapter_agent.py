@@ -155,7 +155,7 @@ def test_generated_rule_requires_agent_review(tmp_path):
 
 
 def test_api_chapter_split_uses_rule_directory_and_updates_chapters(tmp_path, monkeypatch):
-    """API 应调用小说解析 Agent，并用结果更新章节目录。"""
+    """API 应调用文本模型，并用结果更新章节目录。"""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -186,7 +186,7 @@ def test_api_chapter_split_uses_rule_directory_and_updates_chapters(tmp_path, mo
 
     monkeypatch.setattr(app_module, "CHAPTER_RULE_DIR", tmp_path / "chapter_rules")
     monkeypatch.setattr(app_module, "AiChapterSplitAgent", FakeAgent)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_API_KEY", "test-deepseek-key")
 
     client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     response = client.post(

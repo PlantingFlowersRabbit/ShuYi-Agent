@@ -44,11 +44,11 @@ def test_extracts_epub_spine_text_for_novel_parser_agent():
     text = extract_novel_file_text(
         filename="mushroom.epub",
         data=make_epub_bytes(
-            [("1.变成蘑菇的公爵千金", "第一章正文。"), ("2.蘑菇园来了个外乡菇", "第二章正文。")]
+            [("1.测试章节甲", "第一章正文。"), ("2.测试章节乙", "第二章正文。")]
         ),
     )
 
-    assert text.index("1.变成蘑菇的公爵千金") < text.index("2.蘑菇园来了个外乡菇")
+    assert text.index("1.测试章节甲") < text.index("2.测试章节乙")
     assert "第一章正文。" in text
 
 
@@ -103,9 +103,9 @@ def test_bundled_numeric_rule_beats_incidental_body_headings(tmp_path):
         filename="mushroom.epub",
         data=make_epub_bytes(
             [
-                ("1.变成蘑菇的公爵千金", "第一章，人体七大魔力节点模型？正文。"),
-                ("2.蘑菇园来了个外乡菇", "第二章并不是这里的标题。"),
-                ("3.公爵的怒火", "第三章也只是正文句子。"),
+                ("1.测试章节甲", "第一章，人体七大魔力节点模型？正文。"),
+                ("2.测试章节乙", "第二章并不是这里的标题。"),
+                ("3.测试章节丙", "第三章也只是正文句子。"),
             ]
         ),
     )
@@ -118,14 +118,14 @@ def test_bundled_numeric_rule_beats_incidental_body_headings(tmp_path):
 
     assert result.rule_path and result.rule_path.name == "numeric_heading.json"
     assert [chapter.title for chapter in result.chapters] == [
-        "1.变成蘑菇的公爵千金",
-        "2.蘑菇园来了个外乡菇",
-        "3.公爵的怒火",
+        "1.测试章节甲",
+        "2.测试章节乙",
+        "3.测试章节丙",
     ]
 
 
 def test_api_epub_split_updates_chapter_workbench(tmp_path, monkeypatch):
-    """EPUB 上传结果应进入小说解析 Agent 并更新章节工作台。"""
+    """EPUB 上传结果应进入文本模型并更新章节工作台。"""
     from fastapi.testclient import TestClient
 
     from backend.app.api import app as app_module
@@ -137,14 +137,14 @@ def test_api_epub_split_updates_chapter_workbench(tmp_path, monkeypatch):
             pass
 
         def split(self, text):
-            assert "1.变成蘑菇的公爵千金" in text
+            assert "1.测试章节甲" in text
             return type(
                 "Result",
                 (),
                 {
                     "chapters": [
-                        Chapter("chapter-0001", "1.变成蘑菇的公爵千金", "第一章正文。"),
-                        Chapter("chapter-0002", "2.蘑菇园来了个外乡菇", "第二章正文。"),
+                        Chapter("chapter-0001", "1.测试章节甲", "第一章正文。"),
+                        Chapter("chapter-0002", "2.测试章节乙", "第二章正文。"),
                     ],
                     "status": "rule_reused",
                     "rule_path": tmp_path / "numeric_heading.json",
@@ -155,7 +155,7 @@ def test_api_epub_split_updates_chapter_workbench(tmp_path, monkeypatch):
 
     monkeypatch.setattr(app_module, "CHAPTER_RULE_DIR", tmp_path / "chapter_rules")
     monkeypatch.setattr(app_module, "AiChapterSplitAgent", FakeAgent)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_API_KEY", "test-deepseek-key")
 
     client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
     response = client.post(
@@ -165,8 +165,8 @@ def test_api_epub_split_updates_chapter_workbench(tmp_path, monkeypatch):
                 "mushroom.epub",
                 make_epub_bytes(
                     [
-                        ("1.变成蘑菇的公爵千金", "第一章正文。"),
-                        ("2.蘑菇园来了个外乡菇", "第二章正文。"),
+                        ("1.测试章节甲", "第一章正文。"),
+                        ("2.测试章节乙", "第二章正文。"),
                     ]
                 ),
                 "application/epub+zip",
@@ -176,4 +176,4 @@ def test_api_epub_split_updates_chapter_workbench(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["source"]["kind"] == "epub"
-    assert client.get("/api/v1/chapters").json()["chapters"][0]["title"] == "1.变成蘑菇的公爵千金"
+    assert client.get("/api/v1/chapters").json()["chapters"][0]["title"] == "1.测试章节甲"

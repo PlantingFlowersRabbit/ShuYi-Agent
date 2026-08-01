@@ -242,7 +242,7 @@ type DubbingArrangementResponse = {
 };
 
 type ModelConfig = {
-  llm: {
+  text_model: {
     base_url: string;
     model: string;
     has_api_key: boolean;
@@ -252,81 +252,30 @@ type ModelConfig = {
     model_path: string;
     voice_design_model_path: string;
   };
-  chapter_agent: {
-    base_url: string;
-    model: string;
-    has_api_key: boolean;
-  };
 };
 
-type LocalTtsStartResponse = {
+type ConnectionTestResponse = {
   message: string;
   progress?: number;
 };
-
-const sampleNovel = `1.变成蘑菇的公爵千金
-“放开我！你们是谁？快放开我！”
-
-一醒来就发现自己被装麻袋了的伊南娜竭力扭动身体。
-
-“佩罗，你昏迷术掺水了？这就醒了。”`;
 
 const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
 const DEFAULT_BASE_MODEL_PATH = "./models/Qwen3-TTS-12Hz-1.7B-Base";
 const DEFAULT_VOICE_DESIGN_MODEL_PATH = "./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
 
-const defaultVoices: VoiceResource[] = [
-  {
-    voiceId: "voice-male-narrator",
-    name: "男声旁白",
-    gender: "男",
-    description: "沉稳、叙事感强，适合旁白和长段说明。",
-    suitableRoleTypes: ["旁白", "叙述", "长段说明"],
-    referenceText: "探索那些被遗忘的地下空间，比如废弃的地铁站、防空洞。",
-    referenceAudioPath: "/api/v1/voice-profiles/voice-male-narrator/audio",
-    playableAudioPath: "/api/v1/voice-profiles/voice-male-narrator/audio",
-    generated: false,
-  },
-  {
-    voiceId: "voice-young-male",
-    name: "年轻男",
-    gender: "男",
-    description: "清亮自然，适合年轻男性角色对白。",
-    suitableRoleTypes: ["年轻男性", "对白"],
-    referenceText: "光柱最终落在那株已经遍布猩红纹路的神木幼苗上。",
-    referenceAudioPath: "/api/v1/voice-profiles/voice-young-male/audio",
-    playableAudioPath: "/api/v1/voice-profiles/voice-young-male/audio",
-    generated: false,
-  },
-  {
-    voiceId: "voice-yujie",
-    name: "御姐音",
-    gender: "女",
-    description: "成熟亲近，适合女性角色对白。",
-    suitableRoleTypes: ["女性角色", "成熟", "对白"],
-    referenceText: "宝宝，今天你可得好好陪我逛逛。",
-    referenceAudioPath: "/api/v1/voice-profiles/voice-yujie/audio",
-    playableAudioPath: "/api/v1/voice-profiles/voice-yujie/audio",
-    generated: false,
-  },
-];
+const defaultVoices: VoiceResource[] = [];
 
 const defaultModelConfig: ModelConfig = {
-  llm: {
-    base_url: "https://api.siliconflow.cn/v1",
-    model: "Qwen/Qwen3-8B",
+  text_model: {
+    base_url: "",
+    model: "",
     has_api_key: false,
   },
   tts: {
     base_url: "http://127.0.0.1:7811",
     model_path: DEFAULT_BASE_MODEL_PATH,
     voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
-  },
-  chapter_agent: {
-    base_url: "https://api.deepseek.com",
-    model: "deepseek-v4-flash",
-    has_api_key: false,
   },
 };
 
@@ -383,7 +332,7 @@ async function readNovelFileUpload(file: File): Promise<NovelFileUpload> {
   if (isEpub) {
     return {
       text: "",
-      preview: `已上传 EPUB：${file.name}\n\n点击“小说解析 Agent”后将由后端解析 EPUB 目录和正文。`,
+      preview: `已上传 EPUB：${file.name}\n\n点击“文本模型”后将由后端解析 EPUB 目录和正文。`,
       uploadedFile: {
         filename: file.name,
         contentBase64: arrayBufferToBase64(buffer),
@@ -625,19 +574,35 @@ function roleFromVoice(roleId: string, name: string, voice: VoiceResource): Role
     voiceSampleText: voice.referenceText,
     playableVoicePath: voice.playableAudioPath || voice.referenceAudioPath,
     voiceMatchScore: null,
-    voiceMatchReason: "默认角色绑定音色",
+    voiceMatchReason: "用户手动选择音色",
     voiceGeneratedByAi: voice.generated,
   };
 }
 
-function createDefaultRoles(voices: VoiceResource[]): RoleCard[] {
-  const fallback = voices[0] ?? defaultVoices[0];
-  const pick = (voiceId: string) => voices.find((voice) => voice.voiceId === voiceId) ?? fallback;
-  return [
-    roleFromVoice("narrator", "旁白", pick("voice-male-narrator")),
-    roleFromVoice("male_lead", "年轻男", pick("voice-young-male")),
-    roleFromVoice("female_lead", "御姐音", pick("voice-yujie")),
-  ];
+function createDefaultRoles(_voices: VoiceResource[]): RoleCard[] {
+  return [];
+}
+
+function createBlankRole(roleId: string, name: string): RoleCard {
+  return {
+    roleId,
+    name,
+    aliases: [],
+    gender: "",
+    profile: "",
+    description: "",
+    voiceMode: "voice_design",
+    voiceResourceId: "",
+    referenceAudioPath: "",
+    referenceText: "",
+    designPrompt: "",
+    voiceDescription: "",
+    voiceSampleText: "",
+    playableVoicePath: "",
+    voiceMatchScore: null,
+    voiceMatchReason: "用户手动创建",
+    voiceGeneratedByAi: false,
+  };
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -656,6 +621,45 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return data as T;
+}
+
+type SecretExchangePayload = {
+  secret_id: string;
+  ciphertext_b64: string;
+  length: number;
+};
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return window.btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  return Uint8Array.from(window.atob(value), (character) => character.charCodeAt(0));
+}
+
+async function createSecretExchangePayload(secret: string): Promise<SecretExchangePayload | null> {
+  const trimmed = secret.trim();
+  if (!trimmed) return null;
+  const secretBytes = new TextEncoder().encode(trimmed);
+  const challenge = await requestJson<{ secret_id: string; pad_b64: string }>(
+    "/model-config/secret-exchange",
+    {
+      method: "POST",
+      body: JSON.stringify({ byte_length: Math.max(128, secretBytes.length) }),
+    },
+  );
+  const pad = base64ToBytes(challenge.pad_b64);
+  const cipher = secretBytes.map((value, index) => value ^ pad[index]);
+  return {
+    secret_id: challenge.secret_id,
+    ciphertext_b64: bytesToBase64(cipher),
+    length: secretBytes.length,
+  };
 }
 
 function mediaRequestUrl(source: string): string {
@@ -789,22 +793,18 @@ function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, r
   };
 }
 
-function normalizeModelConfig(config: Partial<ModelConfig>): ModelConfig {
+function normalizeModelConfig(config: Partial<ModelConfig> & { llm?: Partial<ModelConfig["text_model"]>; chapter_agent?: Partial<ModelConfig["text_model"]> }): ModelConfig {
+  const textModel = config.text_model ?? config.chapter_agent ?? config.llm ?? {};
   return {
-    llm: {
-      base_url: config.llm?.base_url ?? defaultModelConfig.llm.base_url,
-      model: config.llm?.model ?? defaultModelConfig.llm.model,
-      has_api_key: config.llm?.has_api_key ?? false,
+    text_model: {
+      base_url: textModel.base_url ?? defaultModelConfig.text_model.base_url,
+      model: textModel.model ?? defaultModelConfig.text_model.model,
+      has_api_key: textModel.has_api_key ?? false,
     },
     tts: {
       base_url: config.tts?.base_url ?? defaultModelConfig.tts.base_url,
       model_path: config.tts?.model_path ?? defaultModelConfig.tts.model_path,
       voice_design_model_path: config.tts?.voice_design_model_path ?? defaultModelConfig.tts.voice_design_model_path,
-    },
-    chapter_agent: {
-      base_url: config.chapter_agent?.base_url ?? defaultModelConfig.chapter_agent.base_url,
-      model: config.chapter_agent?.model ?? defaultModelConfig.chapter_agent.model,
-      has_api_key: config.chapter_agent?.has_api_key ?? false,
     },
   };
 }
@@ -827,13 +827,13 @@ function ProgressBar({ label, value }: { label: string; value: number }) {
 function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const voiceAudioInputRef = useRef<HTMLInputElement>(null);
-  const fullNovelTextRef = useRef(sampleNovel);
+  const fullNovelTextRef = useRef("");
   const uploadedNovelFileRef = useRef<UploadedNovelFile | null>(null);
   const automaticDubbingStartedRef = useRef(false);
   const automaticRoleMatchingAttemptedRef = useRef(false);
   const dubbingInFlightRef = useRef(false);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
-  const [novelPreview, setNovelPreview] = useState(() => makeNovelPreview(sampleNovel));
+  const [novelPreview, setNovelPreview] = useState("");
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState("");
   const [paragraphs, setParagraphs] = useState<ParagraphModule[]>([]);
@@ -841,7 +841,7 @@ function App() {
   const [hasSplitChapters, setHasSplitChapters] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [voices, setVoices] = useState<VoiceResource[]>(defaultVoices);
-  const [roles, setRoles] = useState<RoleCard[]>(() => createDefaultRoles(defaultVoices));
+  const [roles, setRoles] = useState<RoleCard[]>([]);
   const [utterancesByParagraph, setUtterancesByParagraph] = useState<Record<string, UtteranceDraft[]>>({});
   const [chapterBackendSynced, setChapterBackendSynced] = useState(false);
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<Record<string, boolean>>({});
@@ -865,6 +865,7 @@ function App() {
   const [generatedVoicePreview, setGeneratedVoicePreview] = useState<VoiceResource | null>(null);
   const [generatedVoicePreviewUrl, setGeneratedVoicePreviewUrl] = useState("");
   const [modelConfig, setModelConfig] = useState<ModelConfig>(defaultModelConfig);
+  const [textModelApiKey, setTextModelApiKey] = useState("");
   const [apiStatus, setApiStatus] = useState("等待上传小说");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
@@ -909,14 +910,12 @@ function App() {
 
   useEffect(() => {
     requestJson<{ voices: ApiVoiceResource[] }>("/voice-profiles")
-      .then((data) => {
-        const loaded = data.voices.map(fromApiVoice);
-        if (loaded.length > 0) {
-          setVoices(loaded);
-          setRoles(createDefaultRoles(loaded));
-        }
-      })
-      .catch((error) => setApiStatus(`音色资源库载入失败，已使用本地预览：${String(error)}`));
+      .then((data) => setVoices(data.voices.map(fromApiVoice)))
+      .catch((error) => setApiStatus(`音色库载入失败，已保持空列表：${String(error)}`));
+
+    requestJson<{ roles: ApiRoleCard[] }>("/characters")
+      .then((data) => setRoles(data.roles.map(fromApiRole)))
+      .catch((error) => setApiStatus(`角色列表载入失败，已保持空列表：${String(error)}`));
 
     requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
@@ -1000,13 +999,13 @@ function App() {
     setGeneratingUtteranceIds({});
     resetAgentRunState();
     setUploadProgress(62);
-    setApiStatus("小说已上传，仅展示开头预览；点击“小说解析 Agent”生成章节目录");
+    setApiStatus("小说已上传，仅展示开头预览；点击“文本模型”生成章节目录");
     setUploadProgress(100);
   }
 
   async function runAiChapterSplit() {
     setChapterSplitProgress(12);
-    setApiStatus("小说解析 Agent 正在检查可复用规则");
+    setApiStatus("文本模型正在检查可复用规则");
     try {
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
@@ -1031,13 +1030,13 @@ function App() {
       const ruleName = data.agent.rule_path?.split(/[\\/]/).pop() ?? "未记录规则";
       const agentStatus =
         data.agent.status === "rule_reused"
-          ? `小说解析 Agent 完成：已复用 ${ruleName}`
-          : `小说解析 Agent 完成：已生成并保存 ${ruleName}`;
+          ? `文本模型完成：已复用 ${ruleName}`
+          : `文本模型完成：已生成并保存 ${ruleName}`;
       applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
     } catch (error) {
       setChapterSplitProgress(76);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
-      applyChapters(parsed, `小说解析 Agent 失败，已使用本地章节索引兜底：${String(error)}`);
+      applyChapters(parsed, `文本模型失败，已使用本地章节索引兜底：${String(error)}`);
     } finally {
       setChapterSplitProgress(100);
     }
@@ -1048,10 +1047,11 @@ function App() {
     if (!chapter) return;
     setActiveChapterId(chapterId);
     const body = extractChapterBody(fullNovelTextRef.current, chapter);
-    setParagraphs(paragraphsFromChapter({ ...chapter, body }));
+    const nextParagraphs = paragraphsFromChapter({ ...chapter, body });
+    setParagraphs(nextParagraphs);
     setConfirmed(false);
     setChapterBackendSynced(false);
-    setUtterancesByParagraph({});
+    setUtterancesByParagraph(makeWholeParagraphUtteranceGroups(nextParagraphs));
     setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
@@ -1167,6 +1167,21 @@ function App() {
   }
 
   function applyVoiceToRole(role: RoleCard, voiceId: string): RoleCard {
+    if (!voiceId) {
+      return {
+        ...role,
+        voiceResourceId: "",
+        referenceAudioPath: "",
+        referenceText: "",
+        voiceMode: "voice_design",
+        voiceDescription: "",
+        voiceSampleText: "",
+        playableVoicePath: "",
+        voiceMatchScore: null,
+        voiceMatchReason: "用户手动清除音色",
+        voiceGeneratedByAi: false,
+      };
+    }
     const voice = voices.find((item) => item.voiceId === voiceId);
     if (!voice) return role;
     return {
@@ -1201,13 +1216,9 @@ function App() {
 
   async function addRole() {
     const voice = voices[0];
-    if (!voice) {
-      setApiStatus("新增角色失败：请先添加至少一个音色资源");
-      return;
-    }
-    const role: RoleCard = {
-      ...roleFromVoice(`custom_role_${Date.now()}`, `新角色${roles.length + 1}`, voice),
-    };
+    const roleId = `custom_role_${Date.now()}`;
+    const roleName = `新角色${roles.length + 1}`;
+    const role = voice ? roleFromVoice(roleId, roleName, voice) : createBlankRole(roleId, roleName);
     setRoles((current) => [...current, role]);
     try {
       const data = await requestJson<{ roles: ApiRoleCard[] }>("/characters", {
@@ -1695,9 +1706,8 @@ function App() {
       setGeneratedVoiceProgress(100);
       setGeneratedVoicePreview(fromApiVoice(data.voice));
       setGeneratedVoicePreviewUrl(data.audio_url);
-      const requirement = data.model_requirement ? `；${data.model_requirement}` : "";
       const prefix = data.generation_status === "substitute" ? "生成音色使用占位预览" : "生成音色成功";
-      setApiStatus(`${prefix}：${data.generation_note}${requirement}`);
+      setApiStatus(`${prefix}：${data.generation_note}`);
     } catch (error) {
       setGeneratedVoiceProgress(100);
       setApiStatus(`生成音色失败：${String(error)}`);
@@ -1738,16 +1748,21 @@ function App() {
     }
   }
 
-  async function saveRemoteModelConfig() {
+  async function saveTextModelConfig() {
     try {
+      const secretPayload = await createSecretExchangePayload(textModelApiKey);
       const data = await requestJson<{ config: ModelConfig }>("/model-config", {
         method: "PATCH",
-        body: JSON.stringify({ llm: modelConfig.llm }),
+        body: JSON.stringify({
+          text_model: modelConfig.text_model,
+          ...(secretPayload ? { text_model_secret: secretPayload } : {}),
+        }),
       });
       setModelConfig(normalizeModelConfig(data.config));
-      setApiStatus("远端模型配置保存成功");
+      setTextModelApiKey("");
+      setApiStatus("文本模型配置保存成功；密钥仅保存在后端内存中");
     } catch (error) {
-      setApiStatus(`远端模型配置保存失败：${String(error)}`);
+      setApiStatus(`文本模型配置保存失败：${String(error)}`);
     }
   }
 
@@ -1758,69 +1773,49 @@ function App() {
         body: JSON.stringify({ tts: modelConfig.tts }),
       });
       setModelConfig(normalizeModelConfig(data.config));
-      setApiStatus("本地模型配置保存成功");
+      setApiStatus("TTS模型配置保存成功");
     } catch (error) {
-      setApiStatus(`本地模型配置保存失败：${String(error)}`);
+      setApiStatus(`TTS模型配置保存失败：${String(error)}`);
     }
   }
 
-  async function saveChapterAgentModelConfig() {
+  async function testTextModelLink() {
     try {
-      const data = await requestJson<{ config: ModelConfig }>("/model-config", {
-        method: "PATCH",
-        body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
-      });
-      setModelConfig(normalizeModelConfig(data.config));
-      setApiStatus("小说格式解析智能体配置保存成功");
-    } catch (error) {
-      setApiStatus(`小说格式解析智能体配置保存失败：${String(error)}`);
-    }
-  }
-
-  async function testRemoteModelLink() {
-    try {
-      const data = await requestJson<{ message: string }>("/model-config/llm/test", {
+      const secretPayload = await createSecretExchangePayload(textModelApiKey);
+      const data = await requestJson<{ message: string }>("/model-config/text-model/test", {
         method: "POST",
-        body: JSON.stringify({ llm: modelConfig.llm }),
+        body: JSON.stringify({
+          text_model: modelConfig.text_model,
+          ...(secretPayload ? { text_model_secret: secretPayload } : {}),
+        }),
       });
-      setApiStatus(data.message || "远端模型连接成功");
+      setTextModelApiKey("");
+      setApiStatus(data.message || "文本模型连接成功");
     } catch (error) {
-      setApiStatus(`测试链接失败：${String(error)}`);
+      setApiStatus(`测试连接失败：${String(error)}`);
     }
   }
 
-  async function testChapterAgentModelLink() {
-    try {
-      const data = await requestJson<{ message: string }>("/model-config/chapter-agent/test", {
-        method: "POST",
-        body: JSON.stringify({ chapter_agent: modelConfig.chapter_agent }),
-      });
-      setApiStatus(data.message || "小说格式解析智能体连接成功");
-    } catch (error) {
-      setApiStatus(`小说格式解析智能体测试链接失败：${String(error)}`);
-    }
-  }
-
-  async function startLocalTtsService() {
+  async function testTtsModelConnection() {
     if (localTtsStarting) return;
     setLocalTtsStarting(true);
     setLocalTtsStartProgress(8);
-    setApiStatus("正在启动本地 TTS 服务并加载 Base/VoiceDesign 模型");
+    setApiStatus("正在测试 TTS 模型连接");
     let currentProgress = 8;
     const progressTimer = window.setInterval(() => {
       currentProgress = Math.min(95, currentProgress + (currentProgress < 60 ? 7 : 3));
       setLocalTtsStartProgress(currentProgress);
     }, 1000);
     try {
-      const data = await requestJson<LocalTtsStartResponse>("/model-config/tts/start", {
+      const data = await requestJson<ConnectionTestResponse>("/model-config/tts/test", {
         method: "POST",
         body: JSON.stringify({ tts: modelConfig.tts }),
       });
       setLocalTtsStartProgress(data.progress ?? 100);
-      setApiStatus(data.message || "本地 TTS 服务启动成功，模型加载完成");
+      setApiStatus(data.message || "TTS模型连接成功");
     } catch (error) {
       setLocalTtsStartProgress(100);
-      setApiStatus(`启动服务失败：${String(error)}`);
+      setApiStatus(`TTS模型测试连接失败：${String(error)}`);
     } finally {
       window.clearInterval(progressTimer);
       setLocalTtsStarting(false);
@@ -1854,7 +1849,7 @@ function App() {
                     上传小说
                   </button>
                   <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
-                    小说解析 Agent
+                    文本模型
                   </button>
                 </div>
                 <input
@@ -1936,6 +1931,7 @@ function App() {
                               value={role.voiceResourceId}
                               onChange={(event) => updateRole(role.roleId, { voiceResourceId: event.target.value })}
                             >
+                              <option value="">未选择音色</option>
                               {voices.map((item) => (
                                 <option key={item.voiceId} value={item.voiceId}>
                                   {item.name}
@@ -1958,11 +1954,11 @@ function App() {
                         </button>
                         <p>
                           <strong>音色描述</strong>
-                          {voice?.description ?? role.voiceDescription ?? role.description}
+                          {voice?.description || role.voiceDescription || role.description || "未选择音色"}
                         </p>
                         <p>
                           <strong>语音具体内容</strong>
-                          {voice?.referenceText ?? role.voiceSampleText ?? role.referenceText}
+                          {voice?.referenceText || role.voiceSampleText || role.referenceText || "未选择音色"}
                         </p>
                         <p>
                           <strong>音色匹配</strong>
@@ -2000,7 +1996,7 @@ function App() {
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>尚未划分章节</h2>
-              <p>上传小说后点击左侧“小说解析 Agent”，当前章节区暂不渲染具体正文。</p>
+              <p>上传小说后点击左侧“文本模型”，当前章节区暂不渲染具体正文。</p>
             </div>
           ) : !activeChapter ? (
             <div className="empty-state">
@@ -2065,15 +2061,15 @@ function App() {
                 <article className="panel statement-panel" aria-label="划分语句与角色匹配">
                   <div className="section-heading">
                     <div className="section-title">划分语句与角色匹配</div>
-                    {confirmed && primaryStatementParagraphId && (
+                    {primaryStatementParagraphId && (
                       <button className="tool-button amber" type="button" onClick={() => addUtteranceAfter(primaryStatementParagraphId)}>
-                        添加音频生成
+                        添加语句
                       </button>
                     )}
                   </div>
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
-                      点击“配音编排 Agent”后，这里只显示拆分后的语句、匹配角色和音频生成控件。
+                      当前章节可手动添加语句、选择角色并生成音频；也可以稍后使用配音编排 Agent 自动辅助。
                     </div>
 	                  ) : (
 	                    <div className="statement-list">
@@ -2163,8 +2159,8 @@ function App() {
     return (
       <main className="library-page">
         <section className="panel">
-          <div className="section-title">音色资源库列表</div>
-          <small className="status-message" aria-label="音色资源库反馈">{apiStatus}</small>
+          <div className="section-title">音色列表</div>
+          <small className="status-message" aria-label="音色库反馈">{apiStatus}</small>
           <div className="voice-grid">
             {voices.map((voice) => (
               <article className="voice-card" key={voice.voiceId}>
@@ -2278,7 +2274,7 @@ function App() {
 
         <section className="two-column">
           <div className="panel">
-            <div className="section-title">添加资源到资源库列表</div>
+            <div className="section-title">添加音色</div>
             <input
               placeholder="音色名称"
               value={newVoice.name}
@@ -2325,11 +2321,7 @@ function App() {
           </div>
 
           <div className="panel">
-            <div className="section-title">生成资源到资源库列表</div>
-            <small>
-              当前 Base 模型不会凭描述生成新音色；若返回占位预览，请下载并启动 Qwen3-TTS-12Hz-1.7B-VoiceDesign。
-              没有成功调用 VoiceDesign 模型时，会显示模型需求并播放本地占位预览。
-            </small>
+            <div className="section-title">生成音色</div>
             <input
               placeholder="音色名称"
               value={generatedVoice.name}
@@ -2378,43 +2370,60 @@ function App() {
     return (
       <main className="model-page">
         <section className="panel">
-          <div className="section-title">远端模型</div>
+          <div className="section-title">文本模型</div>
           <small className="status-message" aria-label="模型配置反馈">{apiStatus}</small>
           <label>
             Base URL
             <input
-              value={modelConfig.llm.base_url}
+              placeholder="https://your-openai-compatible-endpoint/v1"
+              value={modelConfig.text_model.base_url}
               onChange={(event) =>
-                setModelConfig((current) => ({ ...current, llm: { ...current.llm, base_url: event.target.value } }))
+                setModelConfig((current) => ({
+                  ...current,
+                  text_model: { ...current.text_model, base_url: event.target.value },
+                }))
               }
             />
           </label>
           <label>
             模型名称
             <input
-              value={modelConfig.llm.model}
+              placeholder="输入任意 OpenAI SDK 兼容模型名"
+              value={modelConfig.text_model.model}
               onChange={(event) =>
-                setModelConfig((current) => ({ ...current, llm: { ...current.llm, model: event.target.value } }))
+                setModelConfig((current) => ({
+                  ...current,
+                  text_model: { ...current.text_model, model: event.target.value },
+                }))
               }
             />
           </label>
-          <p className="config-secret-status">
-            后端密钥状态：{modelConfig.llm.has_api_key ? "已配置" : "未配置"}
-          </p>
+          <label>
+            API Key（仅本次运行）
+            <input
+              aria-label="文本模型 API Key"
+              autoComplete="off"
+              placeholder="输入后会加扰发送，后端只保存在内存"
+              type="password"
+              value={textModelApiKey}
+              onChange={(event) => setTextModelApiKey(event.target.value)}
+            />
+          </label>
+          <p className="config-secret-status">临时密钥：{modelConfig.text_model.has_api_key ? "后端内存已配置" : "未输入"}</p>
           <div className="toolbar-row">
-            <button className="tool-button teal" type="button" onClick={() => void saveRemoteModelConfig()}>
+            <button className="tool-button teal" type="button" onClick={() => void saveTextModelConfig()}>
               保存模型配置
             </button>
-            <button className="tool-button sky" type="button" onClick={() => void testRemoteModelLink()}>
-              测试链接
+            <button className="tool-button sky" type="button" onClick={() => void testTextModelLink()}>
+              测试连接
             </button>
           </div>
         </section>
 
         <section className="panel">
-          <div className="section-title">本地模型</div>
+          <div className="section-title">TTS模型</div>
           <label>
-            BASE_URL
+            Base URL
             <input
               value={modelConfig.tts.base_url}
               onChange={(event) =>
@@ -2447,50 +2456,11 @@ function App() {
             <button className="tool-button teal" type="button" onClick={() => void saveLocalModelConfig()}>
               保存模型配置
             </button>
-            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void startLocalTtsService()}>
-              {localTtsStarting ? "启动中" : "启动服务"}
+            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testTtsModelConnection()}>
+              {localTtsStarting ? "测试中" : "测试连接"}
             </button>
           </div>
-          <ProgressBar label="启动服务进度" value={localTtsStartProgress} />
-        </section>
-
-        <section className="panel">
-          <div className="section-title">小说解析 Agent</div>
-          <label>
-            Base URL
-            <input
-              value={modelConfig.chapter_agent.base_url}
-              onChange={(event) =>
-                setModelConfig((current) => ({
-                  ...current,
-                  chapter_agent: { ...current.chapter_agent, base_url: event.target.value },
-                }))
-              }
-            />
-          </label>
-          <label>
-            模型名称
-            <input
-              value={modelConfig.chapter_agent.model}
-              onChange={(event) =>
-                setModelConfig((current) => ({
-                  ...current,
-                  chapter_agent: { ...current.chapter_agent, model: event.target.value },
-                }))
-              }
-            />
-          </label>
-          <p className="config-secret-status">
-            后端密钥状态：{modelConfig.chapter_agent.has_api_key ? "已配置" : "未配置"}
-          </p>
-          <div className="toolbar-row">
-            <button className="tool-button teal" type="button" onClick={() => void saveChapterAgentModelConfig()}>
-              保存智能体配置
-            </button>
-            <button className="tool-button sky" type="button" onClick={() => void testChapterAgentModelLink()}>
-              测试链接
-            </button>
-          </div>
+          <ProgressBar label="测试连接进度" value={localTtsStartProgress} />
         </section>
       </main>
     );
@@ -2542,7 +2512,7 @@ function App() {
           <nav className="tabbar" aria-label="页面切换">
             {[
               ["main", "主页面"],
-              ["voices", "音色资源库"],
+              ["voices", "音色库"],
               ["models", "模型配置"],
             ].map(([value, label]) => (
               <button

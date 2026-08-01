@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 AGENT_NAMES = {
-    "novel_parser": "小说解析 Agent",
+    "novel_parser": "文本模型",
     "role_analyzer": "角色分析 Agent",
     "dubbing_director": "配音编排 Agent",
 }
@@ -17,7 +17,7 @@ def test_v0_4_registry_exposes_exactly_three_versioned_agents():
     assert {agent.agent_id: agent.display_name for agent in agents} == AGENT_NAMES
     assert len(agents) == 3
     for agent in agents:
-        assert agent.release_version == "0.4.0"
+        assert agent.release_version == "0.4.1"
         assert agent.prompt_id == agent.agent_id
         assert agent.prompt_version
         assert agent.prompt_text.strip()

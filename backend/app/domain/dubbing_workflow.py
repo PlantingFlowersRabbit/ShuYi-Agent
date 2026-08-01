@@ -286,7 +286,7 @@ class LangChainRoleAnalysisSkill:
         return parsed
 
     def _chat_model(self):
-        api_key_env = str(self.provider.get("api_key_env") or "SILICONFLOW_API_KEY")
+        api_key_env = str(self.provider.get("api_key_env") or "SHUYI_TEXT_MODEL_API_KEY")
         api_key = self.api_key_lookup(api_key_env)
         if not api_key:
             raise MissingProviderCredential(f"Missing API key environment variable: {api_key_env}")
@@ -295,8 +295,8 @@ class LangChainRoleAnalysisSkill:
 
         kwargs: dict[str, Any] = {
             "api_key": api_key,
-            "base_url": str(self.provider.get("base_url") or "https://api.siliconflow.cn/v1"),
-            "model": str(self.provider.get("model") or "Qwen/Qwen3-8B"),
+            "base_url": str(self.provider.get("base_url") or ""),
+            "model": str(self.provider.get("model") or ""),
             "temperature": 0,
             "timeout": int(self.provider.get("timeout_seconds", 60)),
         }
@@ -1342,7 +1342,7 @@ def _build_batch_role_selection_prompt(
 - 只处理传入 statements 中的 statement_id；不要改写原文内容。
 - 如果某条语句不是单人配音文本，包含多人对白、对白 + 说话动作/旁白、对白 + 旁白动作 + 对白，返回 action=\"split_and_select\"，并给出 utterances。
 - split_and_select 的 utterances 文本按原顺序拼接后必须与原 statement.text 完全一致（允许空白差异），每个子句都要直接给出 role_id/confidence/reason。
-- 引号外的“他说/问/怒道/佩罗恼火道”等说话动作属于旁白，不属于被提到的说话人。
+- 引号外的“他说/问/怒道/林舟低声说”等说话动作属于旁白，不属于被提到的说话人。
 - 如果角色归属不确定，返回 action=\"uncertain\"，role_id=null，不要乱选。
 - 已有 role_id 的语句不会传给你；不要推测未提供语句。
 

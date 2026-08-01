@@ -2,12 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field, replace
-from pathlib import Path
 from typing import Any
-
-ROOT = Path(__file__).resolve().parents[3]
-BUILTIN_REFERENCE_AUDIO = "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav"
-BUILTIN_REFERENCE_TEXT = "齐心协力"
 
 
 @dataclass(frozen=True)
@@ -39,10 +34,6 @@ def _slug(text: str) -> str:
     return str(abs(hash(text)))[:8]
 
 
-def _read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8").strip()
-
-
 def _resource_from_mapping(data: VoiceResource | dict[str, Any]) -> VoiceResource:
     if isinstance(data, VoiceResource):
         return data
@@ -59,65 +50,8 @@ def _resource_from_mapping(data: VoiceResource | dict[str, Any]) -> VoiceResourc
     )
 
 
-def default_voice_resources(sample_root: Path | None = None) -> list[VoiceResource]:
-    resources: list[VoiceResource] = []
-    if sample_root and sample_root.exists():
-        known_ids = {
-            "男声旁白": "voice-male-narrator",
-            "年轻男": "voice-young-male",
-            "御姐音": "voice-yujie",
-            "播音腔女": "voice-broadcast-female",
-        }
-        descriptions = {
-            "男声旁白": "沉稳、叙事感强，适合旁白和长段说明。",
-            "年轻男": "清亮自然，适合年轻男性角色对白。",
-            "御姐音": "成熟亲近，适合女性角色对白。",
-            "播音腔女": "端正清晰，适合公告、说明和新闻感旁白。",
-        }
-        for folder in sorted(path for path in sample_root.iterdir() if path.is_dir()):
-            audio_path = folder / f"{folder.name}.mp3"
-            transcript_path = folder / "语音内容.txt"
-            if not audio_path.exists() or not transcript_path.exists():
-                continue
-            resources.append(
-                VoiceResource(
-                    voice_id=known_ids.get(folder.name, f"voice-{_slug(folder.name)}"),
-                    name=folder.name,
-                    description=descriptions.get(folder.name, f"{folder.name} 本地参考音色。"),
-                    reference_text=_read_text(transcript_path),
-                    reference_audio_path=str(audio_path),
-                    generated=False,
-                )
-            )
-    if resources:
-        return resources
-
-    return [
-        VoiceResource(
-            voice_id="voice-male-narrator",
-            name="男声旁白",
-            description="默认旁白音色资源；可在资源库替换为真实项目素材。",
-            reference_text=BUILTIN_REFERENCE_TEXT,
-            reference_audio_path=BUILTIN_REFERENCE_AUDIO,
-            generated=False,
-        ),
-        VoiceResource(
-            voice_id="voice-young-male",
-            name="年轻男",
-            description="默认年轻男性音色资源；可在资源库替换为真实项目素材。",
-            reference_text=BUILTIN_REFERENCE_TEXT,
-            reference_audio_path=BUILTIN_REFERENCE_AUDIO,
-            generated=False,
-        ),
-        VoiceResource(
-            voice_id="voice-yujie",
-            name="御姐音",
-            description="默认成熟女性音色资源；可在资源库替换为真实项目素材。",
-            reference_text=BUILTIN_REFERENCE_TEXT,
-            reference_audio_path=BUILTIN_REFERENCE_AUDIO,
-            generated=False,
-        ),
-    ]
+def default_voice_resources(_sample_root: Any | None = None) -> list[VoiceResource]:
+    return []
 
 
 def generated_voice_content(name: str, description: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -78,7 +79,7 @@ DEFAULT_BASE_MODEL_PATH = str(ROOT / "models/Qwen3-TTS-12Hz-1.7B-Base")
 DEFAULT_VOICE_DESIGN_MODEL_PATH = str(ROOT / "models/Qwen3-TTS-12Hz-1.7B-VoiceDesign")
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.4.0"
+SERVICE_VERSION = "0.4.1"
 MAX_NOVEL_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -195,13 +196,11 @@ def _materialize_voice_resources(resources: list[VoiceResource]) -> list[VoiceRe
 
 def _default_model_config() -> dict[str, Any]:
     providers = default_provider_registry()
-    siliconflow = providers["siliconflow-qwen3-8b"]
-    deepseek = providers["deepseek-harness"]
+    text_model = providers["openai-compatible-text"]
     return {
-        "llm": {
-            "base_url": siliconflow["base_url"],
-            "model": siliconflow["model"],
-            "api_key": "",
+        "text_model": {
+            "base_url": os.environ.get("SHUYI_TEXT_MODEL_BASE_URL", text_model["base_url"]),
+            "model": os.environ.get("SHUYI_TEXT_MODEL_NAME", text_model["model"]),
         },
         "tts": {
             "base_url": os.environ.get("QWEN3_TTS_BASE_URL", "http://127.0.0.1:7811"),
@@ -211,32 +210,116 @@ def _default_model_config() -> dict[str, Any]:
                 DEFAULT_VOICE_DESIGN_MODEL_PATH,
             ),
         },
-        "chapter_agent": {
-            "base_url": deepseek["base_url"],
-            "model": deepseek["model"],
-            "api_key": "",
+    }
+
+
+def _normalize_model_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = _default_model_config()
+    if not isinstance(config, dict):
+        return normalized
+
+    legacy_text_model = (
+        config.get("text_model")
+        or config.get("chapter_agent")
+        or config.get("llm")
+        or {}
+    )
+    if isinstance(legacy_text_model, dict):
+        normalized["text_model"].update(
+            {
+                key: value
+                for key, value in legacy_text_model.items()
+                if key in {"base_url", "model"}
+            }
+        )
+    if isinstance(config.get("tts"), dict):
+        normalized["tts"].update(
+            {
+                key: value
+                for key, value in config["tts"].items()
+                if key in {"base_url", "model_path", "voice_design_model_path"}
+            }
+        )
+    return normalized
+
+
+def _has_text_model_api_key(app: FastAPI) -> bool:
+    in_memory = str(getattr(app.state, "text_model_api_key", "") or "").strip()
+    environment_value = str(
+        os.environ.get("SHUYI_TEXT_MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+    ).strip()
+    return bool(in_memory or environment_value)
+
+
+def _redacted_model_config(
+    config: dict[str, Any],
+    *,
+    has_text_model_api_key: bool = False,
+) -> dict[str, Any]:
+    normalized = _normalize_model_config(config)
+    return {
+        "text_model": {
+            **normalized["text_model"],
+            "has_api_key": has_text_model_api_key,
         },
+        "tts": dict(normalized["tts"]),
     }
 
 
-def _redacted_model_config(config: dict[str, Any]) -> dict[str, Any]:
-    secret_environments = {
-        "llm": "SILICONFLOW_API_KEY",
-        "chapter_agent": "DEEPSEEK_API_KEY",
+def _prune_expired_secret_exchanges(app: FastAPI) -> None:
+    now = time.monotonic()
+    exchanges = getattr(app.state, "secret_exchanges", {})
+    for secret_id, item in list(exchanges.items()):
+        if item["expires_at"] <= now:
+            exchanges.pop(secret_id, None)
+
+
+def _create_secret_exchange(app: FastAPI, byte_length: int) -> dict[str, str]:
+    _prune_expired_secret_exchanges(app)
+    safe_length = max(16, min(4096, int(byte_length or 256)))
+    secret_id = secrets.token_urlsafe(24)
+    pad = secrets.token_bytes(safe_length)
+    app.state.secret_exchanges[secret_id] = {
+        "pad": pad,
+        "expires_at": time.monotonic() + 120,
     }
-    redacted: dict[str, Any] = {}
-    for section_name, section in config.items():
-        if not isinstance(section, dict):
-            redacted[section_name] = section
-            continue
-        clean_section = {key: value for key, value in section.items() if key != "api_key"}
-        environment_name = secret_environments.get(section_name)
-        if environment_name:
-            configured = str(section.get("api_key") or "").strip()
-            environment_value = str(os.environ.get(environment_name) or "").strip()
-            clean_section["has_api_key"] = bool(configured or environment_value)
-        redacted[section_name] = clean_section
-    return redacted
+    return {
+        "secret_id": secret_id,
+        "pad_b64": base64.b64encode(pad).decode("ascii"),
+        "expires_in_seconds": 120,
+    }
+
+
+def _consume_secret_exchange(app: FastAPI, payload: Any) -> str:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="缺少密钥交换数据")
+    _prune_expired_secret_exchanges(app)
+    secret_id = str(payload.get("secret_id") or "")
+    exchange = app.state.secret_exchanges.pop(secret_id, None)
+    if not exchange:
+        raise HTTPException(status_code=400, detail="密钥交换已过期，请重新输入")
+    try:
+        ciphertext = base64.b64decode(str(payload.get("ciphertext_b64") or ""), validate=True)
+        expected_length = int(payload.get("length") or len(ciphertext))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="密钥交换数据无效") from None
+    pad = exchange["pad"]
+    if expected_length < 0 or expected_length > len(ciphertext) or expected_length > len(pad):
+        raise HTTPException(status_code=400, detail="密钥交换长度无效")
+    secret_bytes = bytes(
+        ciphertext[index] ^ pad[index] for index in range(expected_length)
+    )
+    try:
+        return secret_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="密钥交换内容无法解码") from None
+
+
+def _set_text_model_api_key_from_exchange(app: FastAPI, payload: Any) -> None:
+    secret = _consume_secret_exchange(app, payload)
+    if not secret:
+        raise HTTPException(status_code=400, detail="文本模型 API Key 不能为空")
+    app.state.text_model_api_key = secret
 
 
 def _role_with_voice(role: RoleCard, voice: VoiceResource) -> RoleCard:
@@ -287,6 +370,8 @@ def create_app() -> FastAPI:
     )
     app.state.startup_ready = True
     app.state.require_tts_ready = _service_env("SHUYI_REQUIRE_TTS_READY", "0") == "1"
+    app.state.secret_exchanges = {}
+    app.state.text_model_api_key = ""
 
     @app.middleware("http")
     async def versioned_api_boundary(request: Request, call_next):
@@ -361,6 +446,7 @@ def create_app() -> FastAPI:
         "agent_streams": {},
     }
     restore_runtime_state(app.state.workflow, repository.get_workflow("application"))
+    _state(app)["model_config"] = _normalize_model_config(_state(app).get("model_config"))
 
     @app.get("/health/live")
     async def liveness_probe() -> dict[str, str]:
@@ -410,7 +496,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/model-config", dependencies=[Depends(require_bearer)])
     async def get_v1_model_config() -> dict[str, Any]:
-        return {"config": _redacted_model_config(_state(app)["model_config"])}
+        return {
+            "config": _redacted_model_config(
+                _state(app)["model_config"],
+                has_text_model_api_key=_has_text_model_api_key(app),
+            )
+        }
 
     @app.get("/api/v1/downloads/{category}/{filename:path}", dependencies=[Depends(require_bearer)])
     async def download_generated_file(category: str, filename: str):
@@ -878,16 +969,13 @@ def create_app() -> FastAPI:
                 service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
             )
             generation_status = "succeeded"
-            generation_note = "已调用本地 Qwen3-TTS VoiceDesign 模型生成试听音色。"
+            generation_note = "已生成试听音色。"
             model_requirement = None
         except TTSServiceError as exc:
             duration_seconds = _write_substitute_wav(output_path)
             generation_status = "substitute"
-            generation_note = f"没有成功调用 VoiceDesign 模型，已生成本地占位 wav 供流程预览：{exc}"
-            model_requirement = (
-                "需要下载并启动 Qwen3-TTS-12Hz-1.7B-VoiceDesign；"
-                "当前 Qwen3-TTS-12Hz-1.7B-Base 主要支持有参考音频的 voice cloning。"
-            )
+            generation_note = "已生成本地预览音频。"
+            model_requirement = None
         resource = VoiceResource(
             voice_id=preview_id,
             name=name,
@@ -966,16 +1054,30 @@ def create_app() -> FastAPI:
 
     @app.get("/api/v1/model-config")
     async def get_model_config() -> dict[str, Any]:
-        return {"config": _redacted_model_config(_state(app)["model_config"])}
+        return {
+            "config": _redacted_model_config(
+                _state(app)["model_config"],
+                has_text_model_api_key=_has_text_model_api_key(app),
+            )
+        }
+
+    @app.post("/api/v1/model-config/secret-exchange")
+    async def create_model_config_secret_exchange(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        byte_length = int((payload or {}).get("byte_length") or 256)
+        return _create_secret_exchange(app, byte_length)
 
     @app.patch("/api/v1/model-config")
     async def update_model_config(payload: dict[str, Any]) -> dict[str, Any]:
-        config = _state(app)["model_config"]
-        if isinstance(payload.get("llm"), dict):
-            llm_updates = {
-                key: value for key, value in payload["llm"].items() if key in {"base_url", "model"}
+        config = _normalize_model_config(_state(app)["model_config"])
+        if isinstance(payload.get("text_model"), dict):
+            text_model_updates = {
+                key: value
+                for key, value in payload["text_model"].items()
+                if key in {"base_url", "model"}
             }
-            config["llm"] = {**config["llm"], **llm_updates}
+            config["text_model"] = {**config["text_model"], **text_model_updates}
+        if payload.get("text_model_secret"):
+            _set_text_model_api_key_from_exchange(app, payload["text_model_secret"])
         if isinstance(payload.get("tts"), dict):
             tts_updates = {
                 key: value
@@ -983,48 +1085,53 @@ def create_app() -> FastAPI:
                 if key in {"base_url", "model_path", "voice_design_model_path"}
             }
             config["tts"] = {**config["tts"], **tts_updates}
-        if isinstance(payload.get("chapter_agent"), dict):
-            chapter_agent_updates = {
-                key: value
-                for key, value in payload["chapter_agent"].items()
-                if key in {"base_url", "model"}
-            }
-            config["chapter_agent"] = {**config["chapter_agent"], **chapter_agent_updates}
-        return {"config": _redacted_model_config(config)}
+        _state(app)["model_config"] = config
+        return {
+            "config": _redacted_model_config(
+                config,
+                has_text_model_api_key=_has_text_model_api_key(app),
+            )
+        }
 
-    @app.post("/api/v1/model-config/llm/test")
-    async def test_remote_model_link(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        supplied = (payload or {}).get("llm") or {}
+    @app.post("/api/v1/model-config/text-model/test")
+    async def test_text_model_link(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        if payload.get("text_model_secret"):
+            _set_text_model_api_key_from_exchange(app, payload["text_model_secret"])
+        supplied = payload.get("text_model") or {}
         config = {
-            **_state(app)["model_config"]["llm"],
+            **_state(app)["model_config"]["text_model"],
             **{key: value for key, value in supplied.items() if key in {"base_url", "model"}},
-            "api_key": _api_key_lookup_from_config(app)("SILICONFLOW_API_KEY"),
+            "api_key": _api_key_lookup_from_config(app)("SHUYI_TEXT_MODEL_API_KEY"),
         }
         try:
             await _test_model_link(config)
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"远端模型连接失败：{exc}") from exc
-        return {"ok": True, "message": "远端模型连接成功"}
+            raise HTTPException(status_code=502, detail=f"文本模型连接失败：{exc}") from exc
+        return {"ok": True, "message": "文本模型连接成功"}
 
-    @app.post("/api/v1/model-config/chapter-agent/test")
-    async def test_chapter_agent_model_link(
-        payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        supplied = (payload or {}).get("chapter_agent") or {}
-        config = {
-            **_state(app)["model_config"]["chapter_agent"],
-            **{key: value for key, value in supplied.items() if key in {"base_url", "model"}},
-            "api_key": _api_key_lookup_from_config(app)("DEEPSEEK_API_KEY"),
+    @app.post("/api/v1/model-config/tts/test")
+    async def test_tts_model_connection(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        supplied_tts = (payload or {}).get("tts") or {}
+        tts_updates = {
+            key: value
+            for key, value in supplied_tts.items()
+            if key in {"base_url", "model_path", "voice_design_model_path"}
         }
-        try:
-            await _test_model_link(config, deepseek_compatible=True)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"小说解析 Agent 连接失败：{exc}") from exc
-        return {"ok": True, "message": "小说解析 Agent 连接成功"}
+        config = {**_state(app)["model_config"]["tts"], **tts_updates}
+        _state(app)["model_config"]["tts"] = config
+        base_url = str(config.get("base_url") or "http://127.0.0.1:7811")
+        health = await asyncio.to_thread(_fetch_tts_health, base_url)
+        if not _is_tts_ready(health):
+            raise HTTPException(status_code=503, detail=_format_tts_not_ready_message(health))
+        return {
+            "ok": True,
+            "message": "TTS模型连接成功，VoiceDesign 已就绪",
+            "health": health,
+            "progress": 100,
+        }
 
     @app.post("/api/v1/model-config/tts/start")
     async def start_local_tts_service(payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1299,7 +1406,7 @@ async def _run_ai_chapter_split(app: FastAPI, text: str) -> dict[str, Any]:
     except MissingProviderCredential as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail="小说解析 Agent 执行失败") from exc
+        raise HTTPException(status_code=502, detail="文本模型执行失败") from exc
     if not result.validation.ok:
         raise HTTPException(
             status_code=422,
@@ -1473,8 +1580,12 @@ def _paragraph_from_payload(payload: Any, index: int) -> ParagraphModule:
 
 
 def _segmentation_provider_from_config(app: FastAPI) -> dict[str, Any]:
-    provider = default_provider_registry()["siliconflow-qwen3-8b"]
-    config = _state(app)["model_config"]["llm"]
+    return _text_model_provider_from_config(app)
+
+
+def _text_model_provider_from_config(app: FastAPI) -> dict[str, Any]:
+    provider = default_provider_registry()["openai-compatible-text"]
+    config = _normalize_model_config(_state(app)["model_config"])["text_model"]
     provider["base_url"] = config.get("base_url") or provider["base_url"]
     provider["model"] = config.get("model") or provider["model"]
     return provider
@@ -1482,24 +1593,23 @@ def _segmentation_provider_from_config(app: FastAPI) -> dict[str, Any]:
 
 def _api_key_lookup_from_config(app: FastAPI):
     def lookup(name: str) -> str | None:
+        if name == "SHUYI_TEXT_MODEL_API_KEY":
+            return (
+                str(getattr(app.state, "text_model_api_key", "") or "").strip()
+                or os.environ.get("SHUYI_TEXT_MODEL_API_KEY")
+                or os.environ.get("OPENAI_API_KEY")
+            )
         return os.environ.get(name)
 
     return lookup
 
 
 def _chapter_agent_provider_from_config(app: FastAPI) -> dict[str, Any]:
-    provider = default_provider_registry()["deepseek-harness"]
-    config = _state(app)["model_config"]["chapter_agent"]
-    provider["base_url"] = _deepseek_base_url(config.get("base_url") or provider["base_url"])
-    provider["model"] = config.get("model") or provider["model"]
-    return provider
+    return _text_model_provider_from_config(app)
 
 
 def _chapter_agent_api_key_lookup_from_config(app: FastAPI):
-    def lookup(name: str) -> str | None:
-        return os.environ.get(name)
-
-    return lookup
+    return _api_key_lookup_from_config(app)
 
 
 def _safe_audio_filename(filename: str) -> str:
@@ -1521,20 +1631,15 @@ def _test_models_endpoint(request: urllib.request.Request) -> None:
         response.read()
 
 
-def _deepseek_base_url(base_url: str) -> str:
-    return str(base_url or "").rstrip("/").removesuffix("/v1")
-
-
-async def _test_model_link(config: dict[str, Any], *, deepseek_compatible: bool = False) -> None:
+async def _test_model_link(config: dict[str, Any]) -> None:
     base_url = str(config.get("base_url") or "").rstrip("/")
     if not base_url:
         raise HTTPException(status_code=400, detail="服务地址不能为空")
-    models_base_url = _deepseek_base_url(base_url) if deepseek_compatible else base_url
     headers = {"Content-Type": "application/json"}
     api_key = str(config.get("api_key") or "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(f"{models_base_url}/models", headers=headers, method="GET")
+    request = urllib.request.Request(f"{base_url}/models", headers=headers, method="GET")
     await asyncio.to_thread(_test_models_endpoint, request)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import sqlite3
 
 from fastapi.testclient import TestClient
@@ -20,6 +21,17 @@ def _auth() -> dict[str, str]:
     return {"Authorization": f"Bearer {API_TOKEN}"}
 
 
+def _encrypted_exchange(secret: str, challenge: dict[str, str]) -> dict[str, object]:
+    secret_bytes = secret.encode("utf-8")
+    pad = base64.b64decode(challenge["pad_b64"])
+    cipher = bytes(value ^ pad[index] for index, value in enumerate(secret_bytes))
+    return {
+        "secret_id": challenge["secret_id"],
+        "ciphertext_b64": base64.b64encode(cipher).decode("ascii"),
+        "length": len(secret_bytes),
+    }
+
+
 def test_v0_4_health_probes_are_public_and_report_release(monkeypatch):
     """Covers v0.4 unauthenticated liveness, startup, and readiness probes."""
     with _client(monkeypatch) as client:
@@ -29,7 +41,68 @@ def test_v0_4_health_probes_are_public_and_report_release(monkeypatch):
             payload = response.json()
             assert payload["status"] == "ok"
             assert payload["service"] == "shuyi-agent"
-            assert payload["version"] == "0.4.0"
+            assert payload["version"] == "0.4.1"
+
+
+def test_v0_4_1_defaults_have_no_bundled_roles_or_voice_resources(monkeypatch):
+    """v0.4.1 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
+    with _client(monkeypatch) as client:
+        characters = client.get("/api/v1/characters", headers=_auth())
+        voices = client.get("/api/v1/voice-profiles", headers=_auth())
+
+    assert characters.status_code == 200
+    assert characters.json()["roles"] == []
+    assert characters.json()["role_options"] == []
+    assert voices.status_code == 200
+    assert voices.json()["voices"] == []
+
+
+def test_v0_4_1_text_model_config_is_openai_compatible_and_uses_ephemeral_secret(
+    monkeypatch,
+    tmp_path,
+):
+    """Text model secrets are sent obfuscated once, kept only in memory, and never echoed."""
+    monkeypatch.setenv("SHUYI_DATA_DIR", str(tmp_path))
+    provider_secret = "sk-runtime-only"
+    with _client(monkeypatch) as client:
+        fetched = client.get("/api/v1/model-config", headers=_auth())
+        assert fetched.status_code == 200
+        config = fetched.json()["config"]
+        assert "text_model" in config
+        assert "llm" not in config
+        assert "chapter_agent" not in config
+        assert config["text_model"]["has_api_key"] is False
+
+        challenge = client.post(
+            "/api/v1/model-config/secret-exchange",
+            headers=_auth(),
+            json={"byte_length": 128},
+        )
+        assert challenge.status_code == 200
+        exchange = _encrypted_exchange(provider_secret, challenge.json())
+        assert provider_secret not in str(exchange)
+
+        configured = client.patch(
+            "/api/v1/model-config",
+            headers=_auth(),
+            json={
+                "text_model": {
+                    "base_url": "https://models.example.test/v1",
+                    "model": "openai-compatible-model",
+                },
+                "text_model_secret": exchange,
+            },
+        )
+        assert configured.status_code == 200
+        assert provider_secret not in configured.text
+        assert configured.json()["config"]["text_model"]["has_api_key"] is True
+
+    with _client(monkeypatch) as restarted:
+        fetched_after_restart = restarted.get("/api/v1/model-config", headers=_auth())
+
+    assert fetched_after_restart.status_code == 200
+    assert provider_secret not in fetched_after_restart.text
+    assert fetched_after_restart.json()["config"]["text_model"]["has_api_key"] is False
 
 
 def test_v0_4_readiness_returns_503_when_sqlite_ping_fails(monkeypatch):
@@ -167,7 +240,8 @@ def test_v0_4_role_crud_and_model_config_use_authenticated_v1_routes(monkeypatch
                 "role_id": "heroine",
                 "name": "女主角",
                 "description": "冷静果断",
-                "voice_resource_id": "voice-yujie",
+                "voice_mode": "voice_design",
+                "design_prompt": "冷静、清晰、果断",
             },
         )
         assert created.status_code == 200
@@ -182,10 +256,10 @@ def test_v0_4_role_crud_and_model_config_use_authenticated_v1_routes(monkeypatch
         configured = client.patch(
             "/api/v1/model-config",
             headers=_auth(),
-            json={"llm": {"model": "new-model", "api_key": "must-not-be-stored"}},
+            json={"text_model": {"model": "new-model", "api_key": "must-not-be-stored"}},
         )
         assert configured.status_code == 200
-        assert configured.json()["config"]["llm"]["model"] == "new-model"
+        assert configured.json()["config"]["text_model"]["model"] == "new-model"
         assert '"api_key":' not in configured.text
         assert "must-not-be-stored" not in configured.text
 
@@ -214,6 +288,20 @@ def test_v0_4_generated_audio_uses_authenticated_download_route(monkeypatch):
 
     monkeypatch.setattr("backend.app.api.app.synthesize_local_qwen3", unavailable_tts)
     with _client(monkeypatch) as client:
+        role = client.post(
+            "/api/v1/characters",
+            headers=_auth(),
+            json={
+                "role_id": "narrator",
+                "name": "旁白",
+                "description": "测试旁白",
+                "voice_mode": "voice_cloning",
+                "reference_audio_path": "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
+                "reference_text": "测试参考文本。",
+                "design_prompt": None,
+            },
+        )
+        assert role.status_code == 200
         response = client.post(
             "/api/v1/dubbing-segments/u-001/dubbing-jobs",
             headers=_auth(),
@@ -231,12 +319,12 @@ def test_v0_4_generated_audio_uses_authenticated_download_route(monkeypatch):
 def test_v0_4_provider_keys_are_environment_only_and_never_echoed(monkeypatch):
     """Covers v0.4 environment-only provider secrets and redacted configuration reads."""
     provider_secret = "provider-secret-must-not-be-returned"
-    monkeypatch.setenv("SILICONFLOW_API_KEY", provider_secret)
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_API_KEY", provider_secret)
     with _client(monkeypatch) as client:
         fetched = client.get("/api/v1/model-config", headers=_auth())
         assert fetched.status_code == 200
         assert provider_secret not in fetched.text
         assert API_TOKEN not in fetched.text
-        llm = fetched.json()["config"]["llm"]
-        assert "api_key" not in llm
-        assert llm.get("has_api_key") is True
+        text_model = fetched.json()["config"]["text_model"]
+        assert "api_key" not in text_model
+        assert text_model.get("has_api_key") is True

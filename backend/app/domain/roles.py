@@ -3,9 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-DEFAULT_REFERENCE_AUDIO = "assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav"
-DEFAULT_REFERENCE_TEXT = "齐心协力"
-
 
 @dataclass(frozen=True)
 class RoleCard:
@@ -71,38 +68,7 @@ class RoleDeleteResult:
 
 
 def default_role_cards() -> list[RoleCard]:
-    return [
-        RoleCard(
-            role_id="narrator",
-            name="旁白",
-            description="用于叙述性文本，默认绑定男声旁白音色。",
-            voice_mode="voice_cloning",
-            reference_audio_path=DEFAULT_REFERENCE_AUDIO,
-            reference_text=DEFAULT_REFERENCE_TEXT,
-            design_prompt=None,
-            voice_resource_id="voice-male-narrator",
-        ),
-        RoleCard(
-            role_id="male_lead",
-            name="年轻男",
-            description="适合年轻男性角色对白。",
-            voice_mode="voice_cloning",
-            reference_audio_path=DEFAULT_REFERENCE_AUDIO,
-            reference_text=DEFAULT_REFERENCE_TEXT,
-            design_prompt=None,
-            voice_resource_id="voice-young-male",
-        ),
-        RoleCard(
-            role_id="female_lead",
-            name="御姐音",
-            description="适合成熟女性角色对白。",
-            voice_mode="voice_cloning",
-            reference_audio_path=DEFAULT_REFERENCE_AUDIO,
-            reference_text=DEFAULT_REFERENCE_TEXT,
-            design_prompt=None,
-            voice_resource_id="voice-yujie",
-        ),
-    ]
+    return []
 
 
 class RoleCollection:

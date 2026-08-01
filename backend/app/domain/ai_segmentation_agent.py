@@ -96,7 +96,7 @@ paragraph_id：{paragraph_id}
 
     def _chat_model(self):
         provider = self.provider
-        api_key_env = str(provider.get("api_key_env") or "SILICONFLOW_API_KEY")
+        api_key_env = str(provider.get("api_key_env") or "SHUYI_TEXT_MODEL_API_KEY")
         api_key = self.api_key_lookup(api_key_env)
         if not api_key:
             raise MissingProviderCredential(f"Missing API key environment variable: {api_key_env}")
@@ -105,8 +105,8 @@ paragraph_id：{paragraph_id}
 
         kwargs: dict[str, Any] = {
             "api_key": api_key,
-            "base_url": str(provider.get("base_url") or "https://api.siliconflow.cn/v1"),
-            "model": str(provider.get("model") or "Qwen/Qwen3-8B"),
+            "base_url": str(provider.get("base_url") or ""),
+            "model": str(provider.get("model") or ""),
             "temperature": 0,
             "timeout": int(provider.get("timeout_seconds", 60)),
         }

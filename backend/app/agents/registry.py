@@ -32,7 +32,7 @@ class AgentRegistry:
     @classmethod
     def default(cls) -> AgentRegistry:
         names = {
-            "novel_parser": "小说解析 Agent",
+            "novel_parser": "文本模型",
             "role_analyzer": "角色分析 Agent",
             "dubbing_director": "配音编排 Agent",
         }
@@ -46,7 +46,7 @@ class AgentRegistry:
                 AgentDefinition(
                     agent_id=agent_id,
                     display_name=display_name,
-                    release_version="0.4.0",
+                    release_version="0.4.1",
                     prompt_id=agent_id,
                     prompt_version=prompt_version,
                     prompt_text=prompt_text,

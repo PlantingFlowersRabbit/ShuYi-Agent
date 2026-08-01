@@ -219,20 +219,20 @@ class ChapterSplitSkill:
         system_prompt: str | None = None,
     ):
         self.provider = provider or {
-            "base_url": "https://api.deepseek.com",
-            "model": "deepseek-v4-flash",
-            "api_key_env": "DEEPSEEK_API_KEY",
+            "base_url": "",
+            "model": "",
+            "api_key_env": "SHUYI_TEXT_MODEL_API_KEY",
             "timeout_seconds": 120,
         }
         self.api_key_lookup = api_key_lookup or (lambda name: None)
         self.system_prompt = system_prompt or (
-            "你是书弈 Agent 的小说解析 Agent。只返回描述章节标题规则的 JSON。"
+            "你是书弈 Agent 的文本模型。只返回描述章节标题规则的 JSON。"
         )
 
     def _chat_model(self):
         provider = getattr(self, "provider", None) or {}
         api_key_lookup = getattr(self, "api_key_lookup", lambda name: None)
-        api_key_env = str(provider.get("api_key_env") or "DEEPSEEK_API_KEY")
+        api_key_env = str(provider.get("api_key_env") or "SHUYI_TEXT_MODEL_API_KEY")
         api_key = api_key_lookup(api_key_env)
         if not api_key:
             raise MissingProviderCredential(f"缺少 API 密钥环境变量：{api_key_env}")
@@ -241,8 +241,8 @@ class ChapterSplitSkill:
 
         return ChatOpenAI(
             api_key=api_key,
-            base_url=str(provider.get("base_url") or "https://api.deepseek.com"),
-            model=str(provider.get("model") or "deepseek-v4-flash"),
+            base_url=str(provider.get("base_url") or ""),
+            model=str(provider.get("model") or ""),
             temperature=0,
             timeout=int(provider.get("timeout_seconds", 120)),
         )
@@ -472,7 +472,7 @@ class AiChapterSplitAgent:
             )
 
         final_validation = ChapterSplitValidation(
-            False, failed_attempts or ["小说解析 Agent 执行失败"]
+            False, failed_attempts or ["文本模型执行失败"]
         )
         return ChapterSplitAgentResult([], "failed", None, final_validation, trace)
 
