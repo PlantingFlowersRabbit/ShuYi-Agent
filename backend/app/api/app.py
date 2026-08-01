@@ -18,7 +18,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from dotenv import dotenv_values
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -60,7 +59,6 @@ from backend.app.domain.voices import (
 from backend.app.repositories.sqlite import SQLiteRepository
 
 ROOT = Path(__file__).resolve().parents[3]
-LOCAL_DOTENV = dotenv_values(ROOT / ".env")
 
 
 def _service_env(name: str, default: str = "") -> str:
@@ -235,9 +233,7 @@ def _redacted_model_config(config: dict[str, Any]) -> dict[str, Any]:
         environment_name = secret_environments.get(section_name)
         if environment_name:
             configured = str(section.get("api_key") or "").strip()
-            environment_value = str(
-                os.environ.get(environment_name) or LOCAL_DOTENV.get(environment_name) or ""
-            ).strip()
+            environment_value = str(os.environ.get(environment_name) or "").strip()
             clean_section["has_api_key"] = bool(configured or environment_value)
         redacted[section_name] = clean_section
     return redacted
@@ -1486,8 +1482,7 @@ def _segmentation_provider_from_config(app: FastAPI) -> dict[str, Any]:
 
 def _api_key_lookup_from_config(app: FastAPI):
     def lookup(name: str) -> str | None:
-        dotenv_value = LOCAL_DOTENV.get(name)
-        return os.environ.get(name) or (str(dotenv_value).strip() if dotenv_value else None)
+        return os.environ.get(name)
 
     return lookup
 
@@ -1502,8 +1497,7 @@ def _chapter_agent_provider_from_config(app: FastAPI) -> dict[str, Any]:
 
 def _chapter_agent_api_key_lookup_from_config(app: FastAPI):
     def lookup(name: str) -> str | None:
-        dotenv_value = LOCAL_DOTENV.get(name)
-        return os.environ.get(name) or (str(dotenv_value).strip() if dotenv_value else None)
+        return os.environ.get(name)
 
     return lookup
 

@@ -8,6 +8,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       SHUYI_DATA_DIR: /data
       SHUYI_DEVICE: cuda
+      SHUYI_REQUIRE_TTS_READY: "1"
       SHUYI_MODEL_AUTO_DOWNLOAD: "${SHUYI_MODEL_AUTO_DOWNLOAD:-1}"
       SHUYI_MODEL_DIR: /models
       QWEN3_TTS_DEVICE: cuda

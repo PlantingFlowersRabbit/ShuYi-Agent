@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""确认公开 API 与回环 TTS 模型服务均已就绪。"""
+"""通过公开 API 的 readiness 结果确认容器是否可接收请求。"""
 
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ def get_json(url: str) -> dict:
 
 def main() -> int:
     api = get_json("http://127.0.0.1:8000/health/ready")
-    tts = get_json("http://127.0.0.1:7811/health")
-    if api.get("status") != "ok" or tts.get("ok") is not True:
-        raise RuntimeError("API 或 TTS 服务尚未就绪")
+    if api.get("status") != "ok":
+        raise RuntimeError("书弈 Agent 服务尚未就绪")
     return 0
 
 
