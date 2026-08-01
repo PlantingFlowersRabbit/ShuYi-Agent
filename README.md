@@ -67,7 +67,7 @@ npm --prefix frontend run dev
 - 健康检查：`GET /health/live`、`/health/startup`、`/health/ready`
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 - Swagger UI：`http://127.0.0.1:8000/docs`
-- v1 接口使用 `Authorization: Bearer <SHUYI_API_TOKEN>`；文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
+- v1 接口使用 `Authorization: Bearer <SHUYI_API_TOKEN>`；后端读取启动环境中的访问令牌并校验请求，前端顶部的“访问令牌”输入框填写同一个令牌后即可连接。文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
 
 ## Docker CPU / GPU
 
@@ -83,7 +83,7 @@ CUDA 启动需要 NVIDIA 驱动、Docker Engine 和 NVIDIA Container Toolkit：
 docker compose -f compose.cuda.yaml up --build
 ```
 
-两个配置都以非 root 用户运行，公开 `8000` 端口，并使用命名卷持久化 `/data` 与 `/models`。监督器同时启动 FastAPI 和只监听 `127.0.0.1:7811` 的 TTS；任一进程退出都会终止另一进程，容器健康检查要求两者都就绪。健康检查留出 5 分钟模型初始化时间。
+两个配置都以非 root 用户运行，默认通过宿主机 `8000` 端口公开容器内 FastAPI `8000` 端口；可用 `SHUYI_HOST_PORT=8686` 改为其他宿主机端口。命名卷会持久化 `/data` 与 `/models`。监督器同时启动 FastAPI 和只监听 `127.0.0.1:7811` 的 TTS；任一进程退出都会终止另一进程，容器健康检查要求两者都就绪。健康检查留出 5 分钟模型初始化时间。
 
 首次启动按固定 commit revision 优先从 ModelScope 下载 Base 与 VoiceDesign 模型，失败后回退 Hugging Face。每个模型使用独立文件锁，下载到同一文件系统的临时目录，完成 SHA-256 校验和标记后再原子切换；后续启动重新校验缓存。设置 `SHUYI_MODEL_AUTO_DOWNLOAD=0` 可禁用下载并自行挂载模型。
 
@@ -93,8 +93,9 @@ docker compose -f compose.cuda.yaml up --build
 
 | 变量 | 用途 | 默认值 |
 | --- | --- | --- |
-| `SHUYI_API_TOKEN` | v1 API Bearer token | 空，调用受保护接口会被拒绝 |
+| `SHUYI_API_TOKEN` | v1 API Bearer token；CNB 启动脚本未检测到时会自动生成 | 空，直接 Docker 启动时受保护接口会被拒绝 |
 | `SHUYI_CORS_ORIGINS` | 允许的浏览器来源，逗号分隔 | 空 |
+| `SHUYI_HOST_PORT` | Docker 暴露到宿主机的后端端口；CNB 启动脚本默认用 `8686` | `8000` |
 | `SHUYI_DEVICE` | `auto`、`cpu` 或 `cuda` | `auto` |
 | `SHUYI_DATA_DIR` | 持久数据目录 | 容器内 `/data` |
 | `SHUYI_MODEL_DIR` | 模型缓存根目录 | 容器内 `/models` |
@@ -113,6 +114,30 @@ docker compose -f compose.cuda.yaml up --build
 | `VITE_API_BASE_URL` | 前端构建时 API 地址 | 本地为 `/api/v1` |
 
 全部环境变量示例见 `.env.example`。
+
+## CNB 启动、公网访问与访问令牌
+
+CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会把容器内 FastAPI `8000` 端口映射到 CNB 工作区的 `8686` 端口，并在启动日志中打印公网访问地址：
+
+```text
+后端公网访问地址：https://...cnb.run
+前端 API Base URL 可填写：https://...cnb.run/api/v1
+```
+
+身份验证链路是：启动环境先提供后端访问令牌，后端读取 `SHUYI_API_TOKEN` 并校验 `Authorization: Bearer ...`，前端顶部“访问令牌”输入框填写同一个令牌后才会连接成功。
+
+后端访问令牌有两种获取方式：
+
+1. 推荐在 CNB 环境变量或本地 `.env` 中预先设置 `SHUYI_API_TOKEN`。这种方式不会在日志中显示令牌；你使用自己设置的值作为 Bearer token，并在前端“访问令牌”输入框中填写它。
+2. 如果没有设置 `SHUYI_API_TOKEN`，CNB 启动脚本会在后端启动前自动生成一个令牌，写入工作区 `.shuyi-api-token`，传给后端容器，并在启动日志中打印：
+
+```text
+后端访问令牌（自动生成，已写入 .shuyi-api-token）：
+<token>
+请求头格式：Authorization: Bearer <上方后端访问令牌>
+```
+
+如果 CNB 界面没有自动弹出公网端口，在 WebIDE 的 Ports/端口面板中手动添加 `8686`。本地 Docker 启动默认仍使用 `http://127.0.0.1:8000`；CNB 场景使用日志中的公网地址。
 
 ## GitHub Pages
 

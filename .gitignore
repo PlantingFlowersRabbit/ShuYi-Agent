@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.shuyi-api-token
 
 # Python / uv
 .venv/
