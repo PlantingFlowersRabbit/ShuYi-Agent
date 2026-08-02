@@ -76,7 +76,7 @@ def validate_request_text(text: str) -> None:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"当前语句文本长度 {len(text)} 字，超过本地 TTS 单条上限 {max_chars} 字；"
+                f"当前台词文本长度 {len(text)} 字，超过本地 TTS 单条上限 {max_chars} 字；"
                 f"已使用最大 max_new_tokens={tts_max_new_tokens()}，未发现可继续安全提高的请求长度参数。"
                 "请手动缩短文本或拆成多条音频生成。"
             ),

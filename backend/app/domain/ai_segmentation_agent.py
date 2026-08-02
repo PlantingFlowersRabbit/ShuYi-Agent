@@ -63,7 +63,7 @@ class LangChainSegmentationSkill:
     ) -> str:
         roles_json = json.dumps(known_roles, ensure_ascii=False, indent=2)
         reflection_prompt = f"""
-第一次 AI语句划分没有通过校验，请基于 reflection 修正输出。
+第一次 AI台词划分没有通过校验，请基于 reflection 修正输出。
 
 反思重点：
 - 失败类型：{validation.error_code or "unknown"}。
@@ -88,7 +88,7 @@ paragraph_id：{paragraph_id}
             [
                 {
                     "role": "system",
-                    "content": "你是小说配音语句划分 reflection agent，只返回修正后的严格 JSON。",
+                    "content": "你是小说配音台词划分 reflection agent，只返回修正后的严格 JSON。",
                 },
                 {"role": "user", "content": reflection_prompt},
             ]

@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.5 application shell", () => {
+describe("v0.5.1 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.5.0 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.5.1 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.5 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.5.0");
+    expect(markup).toContain("v0.5.1");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.5 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.5.0 model configuration with TTS download deployment progress", async () => {
+  it("renders v0.5.1 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -45,6 +45,7 @@ describe("v0.5 application shell", () => {
     expect(markup).toContain("文本模型");
     expect(markup).toContain("TTS模型");
     expect(markup).toContain("测试连接");
+    expect(markup).toContain("测试模型");
     expect(markup).toContain("下载并部署");
     expect(markup).toContain('aria-label="文本模型 API Key"');
     expect(markup).toContain('placeholder="eg: https://api.deepseek.com"');
@@ -56,7 +57,7 @@ describe("v0.5 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.5.0 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.5.1 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -71,7 +72,7 @@ describe("v0.5 application shell", () => {
     expect(markup).toContain("生成音色");
   });
 
-  it("keeps statement insertion available after existing utterances and sidebar toggle floating", async () => {
+  it("renames user-facing statement controls to dialogue copy", async () => {
     const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
       import("node:fs"),
       import("node:url"),
@@ -79,7 +80,13 @@ describe("v0.5 application shell", () => {
     const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
     const cssSource = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf-8");
 
-    expect(appSource).toContain("在此后添加语句");
+    expect(appSource).toContain("划分台词与角色匹配");
+    expect(appSource).toContain("添加第一条台词");
+    expect(appSource).toContain("在此后添加台词");
+    expect(appSource).toContain("台词文本");
+    expect(appSource).toContain("生成配音");
+    expect(appSource).not.toContain("在此后添加语句");
+    expect(appSource).not.toContain("划分语句与角色匹配");
     expect(appSource).toContain("addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)");
     expect(cssSource).toMatch(/\.chapter-sidebar:not\(\.collapsed\) \.sidebar-toggle\s*{[^}]*position:\s*absolute/s);
     expect(cssSource).toMatch(/\.role-stack\s*{[^}]*min-height:\s*clamp\(240px, 42vh, 520px\)/s);
@@ -118,5 +125,20 @@ describe("v0.5 application shell", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("formats disconnected backend failures as ApiRequestError while keeping reachable API details", async () => {
+    const { ApiRequestError, apiFailureMessage, documentParseFallbackMessage } = await import("./App");
+
+    const disconnected = new ApiRequestError(0, "后端不可连接");
+    const staticHostNotFound = new ApiRequestError(404, "Not Found");
+    const reachableFailure = new ApiRequestError(503, "TTS模型尚未就绪");
+
+    expect(apiFailureMessage("音频生成失败", disconnected)).toBe("音频生成失败：ApiRequestError");
+    expect(apiFailureMessage("测试连接失败", staticHostNotFound)).toBe("测试连接失败：ApiRequestError");
+    expect(apiFailureMessage("测试模型失败", reachableFailure)).toBe("测试模型失败：TTS模型尚未就绪");
+    expect(documentParseFallbackMessage(disconnected)).toBe(
+      "没有连接后端，解析失败，采用前端默认简易解析策略：ApiRequestError",
+    );
   });
 });

@@ -163,7 +163,7 @@ def _tts_request_timeout_seconds(text: str) -> float:
 
 def _tts_text_limit_message(text: str, max_chars: int) -> str:
     return (
-        f"当前语句文本长度 {len(text)} 字，超过本地 TTS 单条上限 {max_chars} 字；"
+        f"当前台词文本长度 {len(text)} 字，超过本地 TTS 单条上限 {max_chars} 字；"
         f"已使用最大 max_new_tokens={tts_max_new_tokens()}，未发现可继续安全提高的请求长度参数。"
         "请手动缩短文本或拆成多条音频生成。"
     )
@@ -177,7 +177,7 @@ def validate_tts_text_length(text: str) -> None:
 
 def _timeout_text_limit_message(text: str, timeout_seconds: float) -> str:
     return (
-        f"本地 TTS 生成超时（已等待 {timeout_seconds:.0f} 秒）；当前语句文本长度 {len(text)} 字，"
+        f"本地 TTS 生成超时（已等待 {timeout_seconds:.0f} 秒）；当前台词文本长度 {len(text)} 字，"
         f"已使用最大 max_new_tokens={tts_max_new_tokens()}。"
         "模型仍未返回可播放音频，请手动缩短文本或拆成多条音频生成。"
     )
@@ -379,7 +379,7 @@ def synthesize_local_qwen3(
         detail = _http_error_detail(exc)
         if not detail or detail == "服务未返回错误详情":
             detail = (
-                f"{detail}；当前语句文本长度 {len(text)} 字，"
+                f"{detail}；当前台词文本长度 {len(text)} 字，"
                 f"max_new_tokens={tts_max_new_tokens()}，可尝试缩短文本或拆成多条音频生成。"
             )
         raise TTSServiceError(f"本地 Qwen3-TTS 请求失败：HTTP {exc.code}：{detail}") from exc
@@ -675,7 +675,7 @@ def export_chapter_audio(
     message = (
         "导出完成，已包含完整拼接音频。"
         if full_audio_path
-        else f"导出完成；还有 {missing_count} 条语句未完成配音，未生成完整拼接音频。"
+        else f"导出完成；还有 {missing_count} 条台词未完成配音，未生成完整拼接音频。"
     )
     return ChapterAudioExportReport(
         status="completed",

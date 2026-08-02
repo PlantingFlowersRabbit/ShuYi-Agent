@@ -92,9 +92,9 @@ def test_v0_5_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
         "--gpus all",
         "--target cpu-runtime",
         "--target cuda-runtime",
-        "v0.5.0-cpu",
+        "v0.5.1-cpu",
         "CNB_TAG:-}",
-        "v0.5.0-cuda",
+        "v0.5.1-cuda",
         "CNB_COMMIT_SHA",
     ]:
         assert required in pipeline
@@ -108,10 +108,14 @@ def test_v0_5_cnb_workspace_launch_button_starts_shuyi_agent():
     assert "启动 ShuYi-Agent" in settings
     assert "CNB_WELCOME_CMD" in cnb_config
     assert "bash scripts/cnb/start-shuyi-agent.sh" in cnb_config
+    vscode_settings = (ROOT / ".vscode/settings.json").read_text(encoding="utf-8")
+
     assert "SHUYI_HOST_PORT:=8000" in launcher
     assert "docker compose -f compose.cuda.yaml down --remove-orphans" in launcher
     assert "CNB_VSCODE_PROXY_URI" in launcher
     assert "后端公网访问地址" in launcher
+    assert "remote.autoForwardPorts" in vscode_settings
+    assert "8000" in vscode_settings
     assert ".shuyi-api-token" not in launcher
     assert "Authorization: Bearer" not in launcher
     assert "docker compose -f compose.cuda.yaml up --build" in launcher

@@ -533,7 +533,7 @@ class BatchRoleSelectionService:
                         _failure(
                             paragraph_id,
                             "split_and_select_required",
-                            "配音编排 Agent已合并语句划分；请在同一次批量响应中返回 action=split_and_select",
+                            "配音编排 Agent已合并台词划分；请在同一次批量响应中返回 action=split_and_select",
                         )
                     )
                     return BatchRoleSelectionReport(
@@ -668,7 +668,7 @@ class BatchRoleSelectionService:
         roles: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
         if self.segmentation_service is None:
-            return _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用")
+            return _failure(paragraph_id, "segmentation_unavailable", "AI台词划分服务不可用")
         paragraph = paragraph_by_id.get(paragraph_id, {})
         segmentation = self.segmentation_service.segment_paragraph(
             chapter_title=chapter_title,
@@ -1050,7 +1050,7 @@ class DubbingWorkflow:
                 if self.segmentation_service is None:
                     return (
                         utterances,
-                        _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用"),
+                        _failure(paragraph_id, "segmentation_unavailable", "AI台词划分服务不可用"),
                         role_selection_events,
                     )
                 segmentation = self.segmentation_service.segment_paragraph(
@@ -1084,7 +1084,7 @@ class DubbingWorkflow:
                 if self.segmentation_service is None:
                     return (
                         utterances,
-                        _failure(paragraph_id, "segmentation_unavailable", "AI语句划分服务不可用"),
+                        _failure(paragraph_id, "segmentation_unavailable", "AI台词划分服务不可用"),
                         role_selection_events,
                     )
                 segmentation = self.segmentation_service.segment_paragraph(
@@ -1295,11 +1295,11 @@ def _build_role_selection_prompt(
     roles_json = json.dumps(roles, ensure_ascii=False, indent=2)
     utterance_json = json.dumps(utterance, ensure_ascii=False, indent=2)
     return f"""
-请判断当前语句是否可以由单一角色配音，并在可以时选择最合适的已知角色。
+请判断当前台词是否可以由单一角色配音，并在可以时选择最合适的已知角色。
 
 要求：
 - 只输出严格 JSON，不要 Markdown。
-- 如果语句包含多人对白、对白 + 旁白动作 + 对白，或角色归属不确定，segmentation_required=true。
+- 如果台词包含多人对白、对白 + 旁白动作 + 对白，或角色归属不确定，segmentation_required=true。
 - role_id 只能使用已知角色 role_id；无法判断时为 null，needs_human_review=true。
 - 不要改写 utterance.text。
 - 返回结构：
@@ -1315,7 +1315,7 @@ def _build_role_selection_prompt(
 章节标题：{chapter_title}
 原段落：
 {paragraph_text}
-语句：
+台词：
 {utterance_json}
 已知角色：
 {roles_json}
@@ -1334,17 +1334,17 @@ def _build_batch_role_selection_prompt(
     statements_json = json.dumps(statements, ensure_ascii=False, indent=2)
     paragraphs_json = json.dumps(paragraphs, ensure_ascii=False, indent=2)
     return f"""
-请批量判断当前章节多条语句的配音角色；如果语句需要拆分，请在同一次响应中完成语句划分和角色匹配。
+请批量判断当前章节多条台词的配音角色；如果台词需要拆分，请在同一次响应中完成台词划分和角色匹配。
 
 硬性要求：
 - 只输出严格 JSON，不要 Markdown。
 - 只能从已知角色 role_id 中选择；旁白也必须是一个已有角色。
 - 只处理传入 statements 中的 statement_id；不要改写原文内容。
-- 如果某条语句不是单人配音文本，包含多人对白、对白 + 说话动作/旁白、对白 + 旁白动作 + 对白，返回 action=\"split_and_select\"，并给出 utterances。
+- 如果某条台词不是单人配音文本，包含多人对白、对白 + 说话动作/旁白、对白 + 旁白动作 + 对白，返回 action=\"split_and_select\"，并给出 utterances。
 - split_and_select 的 utterances 文本按原顺序拼接后必须与原 statement.text 完全一致（允许空白差异），每个子句都要直接给出 role_id/confidence/reason。
 - 引号外的“他说/问/怒道/林舟低声说”等说话动作属于旁白，不属于被提到的说话人。
 - 如果角色归属不确定，返回 action=\"uncertain\"，role_id=null，不要乱选。
-- 已有 role_id 的语句不会传给你；不要推测未提供语句。
+- 已有 role_id 的台词不会传给你；不要推测未提供台词。
 
 返回结构：
 {{
@@ -1380,7 +1380,7 @@ chapter_id：{chapter_id}
 {roles_json}
 当前段落上下文：
 {paragraphs_json}
-待判断语句：
+待判断台词：
 {statements_json}
 """.strip()
 

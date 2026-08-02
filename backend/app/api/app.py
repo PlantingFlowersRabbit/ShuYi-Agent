@@ -78,7 +78,7 @@ REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.5.0"
+SERVICE_VERSION = "0.5.1"
 MAX_NOVEL_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -685,6 +685,20 @@ def create_app() -> FastAPI:
             "tts": "ready" if tts_ready else "not_ready",
         }
         return payload if ready else JSONResponse(status_code=503, content=payload)
+
+    @app.get("/api/v1/connection-test")
+    async def connection_test() -> dict[str, Any]:
+        try:
+            repository.ping()
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=503, detail=f"后端 API 连接失败：{exc}") from exc
+        return {
+            "ok": True,
+            "status": "ok",
+            "service": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+            "message": "后端 API 连接成功",
+        }
 
     def role_payload() -> dict[str, Any]:
         collection = _state(app)["roles"]
@@ -1311,6 +1325,56 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"文本模型连接失败：{exc}") from exc
         return {"ok": True, "message": "文本模型连接成功"}
+
+    @app.post("/api/v1/model-config/models/test")
+    async def test_model_apis(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        if payload.get("text_model_secret"):
+            _set_text_model_api_key_from_exchange(app, payload["text_model_secret"])
+
+        supplied_text = payload.get("text_model") or {}
+        text_config = {
+            **_state(app)["model_config"]["text_model"],
+            **{key: value for key, value in supplied_text.items() if key in {"base_url", "model"}},
+            "api_key": _api_key_lookup_from_config(app)("SHUYI_TEXT_MODEL_API_KEY"),
+        }
+        supplied_tts = payload.get("tts") or {}
+        tts_config = {
+            **_state(app)["model_config"]["tts"],
+            **{key: value for key, value in supplied_tts.items() if key in {"base_url", "model_path", "voice_design_model_path"}},
+        }
+        _state(app)["model_config"]["tts"] = tts_config
+
+        models: dict[str, Any] = {}
+        failures: list[str] = []
+        try:
+            await _test_model_link(text_config)
+            models["text_model"] = {"ok": True, "message": "文本模型 API 正常"}
+        except HTTPException as exc:
+            message = f"文本模型 API 测试失败：{exc.detail}"
+            models["text_model"] = {"ok": False, "message": message}
+            failures.append(message)
+        except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError) as exc:
+            message = f"文本模型 API 测试失败：{exc}"
+            models["text_model"] = {"ok": False, "message": message}
+            failures.append(message)
+
+        base_url = str(tts_config.get("base_url") or "http://127.0.0.1:7811")
+        health = await asyncio.to_thread(_fetch_tts_health, base_url)
+        if _is_tts_ready(health):
+            models["tts"] = {"ok": True, "message": "TTS模型 API 正常，Base 与 VoiceDesign 均已就绪", "health": health}
+        else:
+            message = f"TTS模型 API 测试失败：{_format_tts_not_ready_message(health)}"
+            models["tts"] = {"ok": False, "message": message, "health": health}
+            failures.append(message)
+
+        if failures:
+            raise HTTPException(status_code=503, detail="；".join(failures))
+        return {
+            "ok": True,
+            "message": "模型 API 测试成功：文本模型与 TTS模型均可用",
+            "models": models,
+        }
 
     @app.get("/api/v1/model-config/tts/deployment")
     async def get_tts_deployment_status() -> dict[str, Any]:

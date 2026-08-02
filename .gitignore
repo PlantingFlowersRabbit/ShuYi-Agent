@@ -44,7 +44,8 @@ outputs/**/*
 # OS / editor
 .DS_Store
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 
 # Local Codex agent operating notes; do not publish.
 AGENT_REMOTE_SYNC.md

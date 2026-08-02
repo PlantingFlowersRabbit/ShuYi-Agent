@@ -104,7 +104,7 @@ class RoleCollection:
         references = _role_references(role_id, utterances_by_paragraph)
         if not references:
             self.remove(role_id)
-            return RoleDeleteResult(role_id, True, 0, "delete", "角色未被语句引用，已删除。")
+            return RoleDeleteResult(role_id, True, 0, "delete", "角色未被台词引用，已删除。")
 
         if action == "unbind":
             for utterance in references:
@@ -119,7 +119,7 @@ class RoleCollection:
                 True,
                 len(references),
                 "unbind",
-                f"已解除 {len(references)} 条语句的角色绑定并删除角色。",
+                f"已解除 {len(references)} 条台词的角色绑定并删除角色。",
             )
 
         if action == "migrate":
@@ -143,7 +143,7 @@ class RoleCollection:
                 True,
                 len(references),
                 "migrate",
-                f"已将 {len(references)} 条语句迁移到 {target.name} 并删除角色。",
+                f"已将 {len(references)} 条台词迁移到 {target.name} 并删除角色。",
             )
 
         return RoleDeleteResult(
@@ -151,7 +151,7 @@ class RoleCollection:
             False,
             len(references),
             "block",
-            f"角色正在被 {len(references)} 条语句引用；请选择取消、解除绑定或迁移到其他角色。",
+            f"角色正在被 {len(references)} 条台词引用；请选择取消、解除绑定或迁移到其他角色。",
         )
 
     def utterance_role_options(self) -> list[dict[str, str]]:

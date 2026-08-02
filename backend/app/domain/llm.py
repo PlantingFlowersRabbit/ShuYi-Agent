@@ -23,7 +23,7 @@ def build_segmentation_messages(
 ) -> list[dict[str, str]]:
     roles_json = json.dumps(known_roles, ensure_ascii=False, indent=2)
     user_prompt = f"""
-请使用已配置的 OpenAI SDK 兼容文本模型，把已由用户确认的小说段落拆成配音子语句。
+请使用已配置的 OpenAI SDK 兼容文本模型，把已由用户确认的小说段落拆成配音子台词。
 
 要求：
 - 输出严格 JSON，不允许 Markdown、解释文字或代码围栏。
@@ -76,7 +76,7 @@ paragraph_id：{paragraph_id}
     return [
         {
             "role": "system",
-            "content": "你是小说配音语句划分助手，只返回符合合约的严格 JSON。",
+            "content": "你是小说配音台词划分助手，只返回符合合约的严格 JSON。",
         },
         {"role": "user", "content": user_prompt},
     ]

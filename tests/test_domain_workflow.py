@@ -684,7 +684,7 @@ def test_v0_25_workflow_resume_preserves_existing_roles_segments_ambiguous_parag
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI台词划分 service")
 
     events = []
     role_skill = FakeRoleSkill()
@@ -761,7 +761,7 @@ def test_v0_25_workflow_returns_readable_failure_when_split_and_select_text_cons
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI台词划分 service")
 
     workflow = DubbingWorkflow(
         role_skill=FakeRoleSkill(), segmentation_service=ForbiddenSegmentationService()
@@ -1524,7 +1524,7 @@ def test_fastapi_v0_21_long_tts_text_returns_user_actionable_error(tmp_path):
 
     def text_limit(request, *, output_path, service_base_url=None):
         raise TTSTextLimitError(
-            "当前语句文本长度 167 字，超过本地 TTS 单条建议上限 120 字；"
+            "当前台词文本长度 167 字，超过本地 TTS 单条建议上限 120 字；"
             "已使用最大 max_new_tokens=8192，仍不适合继续等待。请手动缩短文本或拆成多条音频生成。"
         )
 
@@ -1547,7 +1547,7 @@ def test_fastapi_v0_21_long_tts_text_returns_user_actionable_error(tmp_path):
 
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert "当前语句文本长度" in detail
+    assert "当前台词文本长度" in detail
     assert "max_new_tokens=8192" in detail
     assert "请手动缩短文本或拆成多条音频生成" in detail
 
@@ -1572,7 +1572,7 @@ def test_synthesize_local_qwen3_preflights_configurable_text_limit(tmp_path, mon
         )
 
     message = str(exc_info.value)
-    assert "当前语句文本长度" in message
+    assert "当前台词文本长度" in message
     assert "单条上限 12 字" in message
     assert "请手动缩短文本或拆成多条音频生成" in message
 

@@ -1,5 +1,5 @@
 export const APP_BRAND = "书弈 Agent";
-export const APP_VERSION = "0.5.0";
+export const APP_VERSION = "0.5.1";
 
 type RuntimeEnv = {
   BASE_URL?: string;
@@ -19,7 +19,7 @@ function normalizePagesBase(value: string | undefined): string {
 }
 
 function normalizeApiBase(value: string | undefined): string {
-  const rawBase = value?.trim() || "/api/v1";
+  const rawBase = sanitizeApiBaseInput(value?.trim() || "/api/v1");
   if (rawBase === "/") return "";
   if (rawBase.startsWith("/")) return rawBase.replace(/\/+$/, "");
 
@@ -33,6 +33,15 @@ function normalizeApiBase(value: string | undefined): string {
   } catch {
     return normalized;
   }
+}
+
+function sanitizeApiBaseInput(value: string): string {
+  const trimmed = value.trim().replace(/^[<\[(（「『"'“‘]+/, "").replace(/[>\])） 」』"'”’]+$/, "");
+  const urlMatch = trimmed.match(/https?:\/\/[^\s<>\])）"'“”‘’]+/i);
+  if (urlMatch) return urlMatch[0].replace(/[>\])）"'”’]+$/, "");
+  const domainMatch = trimmed.match(/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/[^\s<>\])）"'“”‘’]*)?/i);
+  if (domainMatch) return domainMatch[0].replace(/[>\])）"'”’]+$/, "");
+  return trimmed;
 }
 
 export function resolveRuntimeConfig(env: RuntimeEnv): RuntimeConfig {

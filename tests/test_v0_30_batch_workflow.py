@@ -129,7 +129,7 @@ def test_v0_33_batch_role_selection_splits_and_selects_roles_in_one_agent_respon
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI台词划分 service")
 
     utterances_by_paragraph = {"p-0002": [_utterance("p-0002-u-001", "p-0002", "“走。”他说。")]}
     role_skill = SplitAndSelectBatchSkill()
@@ -194,7 +194,7 @@ def test_v0_32_batch_role_selection_keeps_speech_tag_narration_as_narrator_after
 
     class ForbiddenSegmentationService:
         def segment_paragraph(self, **kwargs):
-            raise AssertionError("配音编排 Agent must not call the standalone AI语句划分 service")
+            raise AssertionError("配音编排 Agent must not call the standalone AI台词划分 service")
 
     utterances_by_paragraph = {
         "p-0003": [_utterance("p-0003-u-001", "p-0003", "“都怪你多嘴，她认出我们了。”佩罗恼火道。")]

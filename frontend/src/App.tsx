@@ -28,6 +28,28 @@ function formatApiErrorDetail(detail: unknown): string {
   return String(detail || "请求失败");
 }
 
+export function apiFailureDetail(error: unknown): string {
+  if (error instanceof ApiRequestError) {
+    const message = error.message || "ApiRequestError";
+    if (error.status === 0 || (error.status === 404 && ["Not Found", "请求失败"].includes(message))) {
+      return "ApiRequestError";
+    }
+    return message;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function apiFailureMessage(prefix: string, error: unknown): string {
+  return `${prefix}：${apiFailureDetail(error)}`;
+}
+
+export function documentParseFallbackMessage(error: unknown): string {
+  if (error instanceof ApiRequestError && error.status === 0) {
+    return "没有连接后端，解析失败，采用前端默认简易解析策略：ApiRequestError";
+  }
+  return apiFailureMessage("文档解析失败，已使用本地章节索引兜底", error);
+}
+
 export function isRoleDeleteReferenceConflict(error: unknown): error is ApiRequestError {
   if (!(error instanceof ApiRequestError) || error.status !== 409) return false;
   const detail = error.detail as { delete_result?: { referenced_count?: unknown } } | null;
@@ -257,6 +279,14 @@ type ModelConfig = {
 type ConnectionTestResponse = {
   message: string;
   progress?: number;
+};
+
+type ModelApisTestResponse = {
+  message: string;
+  models?: {
+    text_model?: { ok: boolean; message: string };
+    tts?: { ok: boolean; message: string };
+  };
 };
 
 type TtsDeploymentStatus = {
@@ -631,16 +661,30 @@ function createBlankRole(roleId: string, name: string): RoleCard {
   };
 }
 
+async function fetchApi(path: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(runtimeConfig.apiUrl(path), init);
+  } catch {
+    throw new ApiRequestError(0, "后端不可连接");
+  }
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const isMultipart = init?.body instanceof FormData;
-  const response = await fetch(runtimeConfig.apiUrl(path), {
+  const response = await fetchApi(path, {
     ...init,
     headers: {
       ...(isMultipart ? {} : { "Content-Type": "application/json" }),
       ...(init?.headers ?? {}),
     },
   });
-  const data = await response.json().catch(() => ({}));
+  let data: any;
+  try {
+    data = await response.json();
+  } catch {
+    if (response.ok) throw new ApiRequestError(0, "后端响应不是 JSON API");
+    data = {};
+  }
   if (!response.ok) {
     throw new ApiRequestError(response.status, data.detail ?? data.error ?? response.statusText);
   }
@@ -960,11 +1004,11 @@ function App() {
   useEffect(() => {
     requestJson<{ voices: ApiVoiceResource[] }>("/voice-profiles")
       .then((data) => setVoices(data.voices.map(fromApiVoice)))
-      .catch((error) => setApiStatus(`音色库载入失败，已保持空列表：${String(error)}`));
+      .catch((error) => setApiStatus(apiFailureMessage("音色库载入失败，已保持空列表", error)));
 
     requestJson<{ roles: ApiRoleCard[] }>("/characters")
       .then((data) => setRoles(data.roles.map(fromApiRole)))
-      .catch((error) => setApiStatus(`角色列表载入失败，已保持空列表：${String(error)}`));
+      .catch((error) => setApiStatus(apiFailureMessage("角色列表载入失败，已保持空列表", error)));
 
     requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
@@ -986,7 +1030,7 @@ function App() {
           if (status.status !== "running") setApiStatus(status.message);
         })
         .catch((error) => {
-          if (!cancelled) setApiStatus(`TTS模型部署进度读取失败：${String(error)}`);
+          if (!cancelled) setApiStatus(apiFailureMessage("TTS模型部署进度读取失败", error));
         });
     };
     poll();
@@ -1037,7 +1081,7 @@ function App() {
       const parsed = data.chapters.map(fromApiChapter);
       applyChapters(parsed, "小说已上传并由后端划分章节");
     } catch (error) {
-      applyChapters(parseChapters(text), `后端导入失败，已使用本地章节预览：${String(error)}`);
+      applyChapters(parseChapters(text), apiFailureMessage("后端导入失败，已使用本地章节预览", error));
     }
   }
 
@@ -1111,7 +1155,7 @@ function App() {
     } catch (error) {
       setChapterSplitProgress(76);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
-      applyChapters(parsed, `文档解析失败，已使用本地章节索引兜底：${String(error)}`);
+      applyChapters(parsed, documentParseFallbackMessage(error));
     } finally {
       setChapterSplitProgress(100);
     }
@@ -1207,7 +1251,7 @@ function App() {
       (paragraph) => (utterancesByParagraph[paragraph.paragraphId] ?? []).length > 0,
     );
     if (confirmed && hasStatementDrafts) return utterancesByParagraph;
-    setApiStatus("正在同步当前章节并准备可匹配语句草稿");
+    setApiStatus("正在同步当前章节并准备可匹配台词草稿");
     const synced = await syncCurrentChapterParagraphs(true);
     const draftsByParagraph = Object.fromEntries(
       synced.paragraphs.map((paragraph) => [
@@ -1237,7 +1281,7 @@ function App() {
     } catch (error) {
       setConfirmed(false);
       setChapterBackendSynced(false);
-      setApiStatus(`段落确认失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("段落确认失败", error));
     }
   }
 
@@ -1286,7 +1330,7 @@ function App() {
     requestJson(`/characters/${roleId}`, {
       method: "PATCH",
       body: JSON.stringify(toApiRole(updatedRole)),
-    }).catch((error) => setApiStatus(`角色同步失败：${String(error)}`));
+    }).catch((error) => setApiStatus(apiFailureMessage("角色同步失败", error)));
   }
 
   async function addRole() {
@@ -1303,7 +1347,7 @@ function App() {
       setRoles(data.roles.map(fromApiRole));
       setApiStatus(`已新增角色：${role.name}`);
     } catch (error) {
-      setApiStatus(`新增角色同步失败，已保留本地角色：${String(error)}`);
+      setApiStatus(apiFailureMessage("新增角色同步失败，已保留本地角色", error));
     }
   }
 
@@ -1319,16 +1363,16 @@ function App() {
       setApiStatus("角色删除成功");
     } catch (error) {
       if (!isRoleDeleteReferenceConflict(error)) {
-        setApiStatus(`角色删除失败：${String(error)}`);
+        setApiStatus(apiFailureMessage("角色删除失败", error));
         return;
       }
       const detail = error.detail as { delete_result?: { referenced_count?: number } };
       const referencedCount = detail.delete_result?.referenced_count ?? 0;
       const shouldUnbind = window.confirm(
-        `角色正在被 ${referencedCount} 条语句引用，是否解除这些语句的角色绑定并删除？`,
+        `角色正在被 ${referencedCount} 条台词引用，是否解除这些台词的角色绑定并删除？`,
       );
       if (!shouldUnbind) {
-        setApiStatus("角色删除已取消：仍保留角色和语句绑定");
+        setApiStatus("角色删除已取消：仍保留角色和台词绑定");
         return;
       }
       try {
@@ -1339,9 +1383,9 @@ function App() {
         const nextRoles = data.roles.map(fromApiRole);
         setRoles(nextRoles);
         setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, nextRoles));
-        setApiStatus("已解除引用语句的角色绑定并删除角色");
+        setApiStatus("已解除引用台词的角色绑定并删除角色");
       } catch (secondError) {
-        setApiStatus(`角色删除失败：${String(secondError)}`);
+        setApiStatus(apiFailureMessage("角色删除失败", secondError));
       }
     }
   }
@@ -1360,7 +1404,7 @@ function App() {
       await audio.play();
       setApiStatus(`正在播放音色：${voice.name}`);
     } catch (error) {
-      setApiStatus(`播放音色失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("播放音色失败", error));
     }
   }
 
@@ -1392,7 +1436,7 @@ function App() {
     } catch (error) {
       resetAgentRunState();
       setRoleMatchingProgress(100);
-      setApiStatus(`角色分析 Agent 失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("角色分析 Agent 失败", error));
     } finally {
       setAgentRunRunning(false);
     }
@@ -1415,17 +1459,14 @@ function App() {
       let terminalReceived = false;
       for (let attempt = 0; attempt < 3 && !terminalReceived; attempt += 1) {
         try {
-          const response = await fetch(
-            runtimeConfig.apiUrl(`/agent-runs/${agentRunThreadId}/events`),
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                ...(lastEventId ? { "Last-Event-ID": String(lastEventId) } : {}),
-              },
-              body: requestBody,
+          const response = await fetchApi(`/agent-runs/${agentRunThreadId}/events`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(lastEventId ? { "Last-Event-ID": String(lastEventId) } : {}),
             },
-          );
+            body: requestBody,
+          });
           if (!response.ok) throw new Error(await response.text());
           if (!response.body) throw new Error("配音编排 Agent 没有返回进度流");
           const reader = response.body.getReader();
@@ -1455,7 +1496,7 @@ function App() {
     } catch (error) {
       setAgentRunWaitingForRoles(true);
       setRoleMatchingProgress(100);
-      setApiStatus(`配音编排 Agent 失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("配音编排 Agent 失败", error));
     } finally {
       setAgentRunRunning(false);
     }
@@ -1618,8 +1659,7 @@ function App() {
       }));
       setVoiceGenerationProgress(100);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", `音频生成失败：${message}`);
+      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", apiFailureMessage("音频生成失败", error));
       setVoiceGenerationProgress(100);
     } finally {
       setGeneratingUtteranceIds((current) => ({ ...current, [utterance.utteranceId]: false }));
@@ -1664,7 +1704,7 @@ function App() {
       setWorkflowState((current) => transitionWorkflow(current, { type: "AGENT_COMPLETED" }));
     } catch (error) {
       setVoiceGenerationProgress(100);
-      setApiStatus(`批量生成配音失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("批量生成配音失败", error));
     } finally {
       dubbingInFlightRef.current = false;
     }
@@ -1703,7 +1743,7 @@ function App() {
       URL.revokeObjectURL(objectUrl);
       setApiStatus(`制作包导出完成：${data.item_count} 条；${data.message}`);
     } catch (error) {
-      setApiStatus(`导出制作包失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("导出制作包失败", error));
     }
   }
 
@@ -1717,7 +1757,7 @@ function App() {
       setApiStatus(`保存音色成功：${data.voice.name}`);
       return true;
     } catch (error) {
-      setApiStatus(`保存音色失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("保存音色失败", error));
       return false;
     }
   }
@@ -1731,7 +1771,7 @@ function App() {
       setVoices(data.voices.map(fromApiVoice));
       setApiStatus(`保存音色成功：${data.voice.name}`);
     } catch (error) {
-      setApiStatus(`保存音色失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("保存音色失败", error));
     }
   }
 
@@ -1739,20 +1779,28 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
     setApiStatus(`正在上传参考音频文件：${file.name}`);
-    const form = new FormData();
-    form.append("file", file);
-    const data = await requestJson<{ reference_audio_path: string }>("/voice-profiles/reference-audio", {
-      method: "POST",
-      body: form,
-    });
-    if (newVoiceAudioPreviewUrl) URL.revokeObjectURL(newVoiceAudioPreviewUrl);
-    setNewVoiceAudioPreviewUrl(URL.createObjectURL(file));
-    setNewVoice((current) => ({
-      ...current,
-      referenceAudioPath: data.reference_audio_path,
-      playableAudioPath: data.reference_audio_path,
-    }));
-    setApiStatus(`参考音频文件已选择：${file.name}`);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const data = await requestJson<{ reference_audio_path: string }>("/voice-profiles/reference-audio", {
+        method: "POST",
+        body: form,
+      });
+      if (newVoiceAudioPreviewUrl) URL.revokeObjectURL(newVoiceAudioPreviewUrl);
+      setNewVoiceAudioPreviewUrl(URL.createObjectURL(file));
+      setNewVoice((current) => ({
+        ...current,
+        referenceAudioPath: data.reference_audio_path,
+        playableAudioPath: data.reference_audio_path,
+      }));
+      setApiStatus(`参考音频文件已选择：${file.name}`);
+    } catch (error) {
+      setApiStatus(
+        error instanceof ApiRequestError && error.status === 0
+          ? "没有连接后端，上传失败：ApiRequestError"
+          : apiFailureMessage("上传失败", error),
+      );
+    }
   }
 
   async function generateVoiceResource() {
@@ -1788,7 +1836,7 @@ function App() {
       setApiStatus(`${prefix}：${data.generation_note}`);
     } catch (error) {
       setGeneratedVoiceProgress(100);
-      setApiStatus(`生成音色失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("生成音色失败", error));
     }
   }
 
@@ -1822,7 +1870,7 @@ function App() {
       setSelectedVoiceIds({});
       setApiStatus(`删除选中音色成功：${selected.length} 个`);
     } catch (error) {
-      setApiStatus(`删除选中音色失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("删除选中音色失败", error));
     }
   }
 
@@ -1840,7 +1888,7 @@ function App() {
       setTextModelApiKey("");
       setApiStatus("文本模型配置保存成功；密钥仅保存在后端内存中");
     } catch (error) {
-      setApiStatus(`文本模型配置保存失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("文本模型配置保存失败", error));
     }
   }
 
@@ -1853,24 +1901,39 @@ function App() {
       setModelConfig(normalizeModelConfig(data.config));
       setApiStatus("TTS模型配置保存成功");
     } catch (error) {
-      setApiStatus(`TTS模型配置保存失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("TTS模型配置保存失败", error));
     }
   }
 
-  async function testTextModelLink() {
+  async function testBackendConnection() {
+    try {
+      const data = await requestJson<ConnectionTestResponse>("/connection-test");
+      setApiStatus(data.message || "后端 API 连接成功");
+    } catch (error) {
+      setApiStatus(apiFailureMessage("测试连接失败", error));
+    }
+  }
+
+  async function testModelApis() {
+    if (localTtsStarting) return;
+    setLocalTtsStarting(true);
+    setApiStatus("正在测试文本模型与 TTS 模型 API");
     try {
       const secretPayload = await createSecretExchangePayload(textModelApiKey);
-      const data = await requestJson<{ message: string }>("/model-config/text-model/test", {
+      const data = await requestJson<ModelApisTestResponse>("/model-config/models/test", {
         method: "POST",
         body: JSON.stringify({
           text_model: modelConfig.text_model,
+          tts: modelConfig.tts,
           ...(secretPayload ? { text_model_secret: secretPayload } : {}),
         }),
       });
       setTextModelApiKey("");
-      setApiStatus(data.message || "文本模型连接成功");
+      setApiStatus(data.message || "模型 API 测试成功");
     } catch (error) {
-      setApiStatus(`测试连接失败：${String(error)}`);
+      setApiStatus(apiFailureMessage("测试模型失败", error));
+    } finally {
+      setLocalTtsStarting(false);
     }
   }
 
@@ -1885,24 +1948,7 @@ function App() {
       const status = applyTtsDeployment(data.deployment);
       setApiStatus(status.message);
     } catch (error) {
-      setApiStatus(`TTS模型下载并部署启动失败：${String(error)}`);
-    }
-  }
-
-  async function testTtsModelConnection() {
-    if (localTtsStarting) return;
-    setLocalTtsStarting(true);
-    setApiStatus("正在测试 TTS 模型连接");
-    try {
-      const data = await requestJson<ConnectionTestResponse>("/model-config/tts/test", {
-        method: "POST",
-        body: JSON.stringify({ tts: modelConfig.tts }),
-      });
-      setApiStatus(data.message || "TTS模型连接成功");
-    } catch (error) {
-      setApiStatus(`TTS模型测试连接失败：${String(error)}`);
-    } finally {
-      setLocalTtsStarting(false);
+      setApiStatus(apiFailureMessage("TTS模型下载并部署启动失败", error));
     }
   }
 
@@ -2142,20 +2188,20 @@ function App() {
                   <div className="chapter-reader-body">{currentChapterText || "当前章节正文为空。"}</div>
                 </article>
 
-                <article className="panel statement-panel" aria-label="划分语句与角色匹配">
+                <article className="panel statement-panel" aria-label="划分台词与角色匹配">
                   <div className="section-heading">
-                    <div className="section-title">划分语句与角色匹配</div>
+                    <div className="section-title">划分台词与角色匹配</div>
                   </div>
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
-                      <span>当前章节可手动添加语句、选择角色并生成音频；也可以稍后使用配音编排 Agent 自动辅助。</span>
+                      <span>当前章节可手动添加台词、选择角色并生成配音；也可以稍后使用配音编排 Agent 自动辅助。</span>
                       {primaryStatementParagraphId && (
                         <button
                           className="tool-button amber"
                           type="button"
                           onClick={() => addUtteranceAfter(primaryStatementParagraphId)}
                         >
-                          添加第一条语句
+                          添加第一条台词
                         </button>
                       )}
                     </div>
@@ -2170,20 +2216,20 @@ function App() {
                               type="button"
                               onClick={() => addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)}
                             >
-                              在此后添加语句
+                              在此后添加台词
                             </button>
                             <button type="button" onClick={() => deleteUtterance(utterance.paragraphId, utterance.utteranceId)}>
-                              删除音频生成
+                              删除台词
                             </button>
                           </div>
                           <label className="utterance-wide">
-                            语句文本
+                            台词文本
                             <input
                               value={utterance.text}
                               onChange={(event) =>
                                 updateUtterance(utterance.paragraphId, utterance.utteranceId, "text", event.target.value)
                               }
-                              aria-label={`${utterance.utteranceId} 语句文本`}
+                              aria-label={`${utterance.utteranceId} 台词文本`}
                             />
                           </label>
                           <label>
@@ -2229,7 +2275,7 @@ function App() {
                                 disabled={isGeneratingThisUtterance}
                                 onClick={() => void generateAudio(utterance)}
                               >
-                                {isGeneratingThisUtterance ? "正在生成" : "音频生成"}
+                                {isGeneratingThisUtterance ? "正在生成" : "生成配音"}
                               </button>
                             );
                           })()}
@@ -2509,8 +2555,11 @@ function App() {
             <button className="tool-button teal" type="button" onClick={() => void saveTextModelConfig()}>
               保存模型配置
             </button>
-            <button className="tool-button sky" type="button" onClick={() => void testTextModelLink()}>
+            <button className="tool-button sky" type="button" onClick={() => void testBackendConnection()}>
               测试连接
+            </button>
+            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testModelApis()}>
+              {localTtsStarting ? "测试中" : "测试模型"}
             </button>
           </div>
         </section>
@@ -2561,8 +2610,8 @@ function App() {
             >
               {ttsDeployment.status === "running" ? "部署中" : "下载并部署"}
             </button>
-            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testTtsModelConnection()}>
-              {localTtsStarting ? "测试中" : "测试连接"}
+            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testModelApis()}>
+              {localTtsStarting ? "测试中" : "测试模型"}
             </button>
           </div>
         </section>

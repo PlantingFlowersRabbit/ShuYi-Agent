@@ -52,11 +52,96 @@ def test_v0_5_health_probes_are_public_and_report_release(monkeypatch):
             payload = response.json()
             assert payload["status"] == "ok"
             assert payload["service"] == "shuyi-agent"
-            assert payload["version"] == "0.5.0"
+            assert payload["version"] == "0.5.1"
+
+
+def test_v0_5_connection_test_is_a_backend_api_smoke_test(monkeypatch):
+    """模型配置页的“测试连接”只验证后端普通 API 是否可达。"""
+    with _client(monkeypatch) as client:
+        response = client.get("/api/v1/connection-test")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["service"] == "shuyi-agent"
+    assert payload["version"] == "0.5.1"
+    assert payload["message"] == "后端 API 连接成功"
+
+
+def test_v0_5_models_test_checks_text_and_tts_model_apis(monkeypatch):
+    """模型配置页的“测试模型”同时验证文本模型 API 与 TTS 模型 API。"""
+    import backend.app.api.app as app_module
+
+    tested: dict[str, str] = {}
+
+    async def fake_test_model_link(config: dict[str, str]) -> None:
+        tested["text_model"] = config["base_url"]
+
+    def fake_fetch_tts_health(base_url: str) -> dict[str, object]:
+        tested["tts"] = base_url
+        return {
+            "ok": True,
+            "voice_clone": True,
+            "voice_design": True,
+            "voice_design_capable": True,
+        }
+
+    monkeypatch.setattr(app_module, "_test_model_link", fake_test_model_link)
+    monkeypatch.setattr(app_module, "_fetch_tts_health", fake_fetch_tts_health)
+    with TestClient(app_module.create_app()) as client:
+        response = client.post(
+            "/api/v1/model-config/models/test",
+            json={
+                "text_model": {
+                    "base_url": "https://models.example.test/v1",
+                    "model": "demo-model",
+                },
+                "tts": {"base_url": "http://127.0.0.1:7811"},
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["models"]["text_model"]["ok"] is True
+    assert payload["models"]["tts"]["ok"] is True
+    assert tested == {
+        "text_model": "https://models.example.test/v1",
+        "tts": "http://127.0.0.1:7811",
+    }
+
+
+def test_v0_5_models_test_reports_tts_model_api_failure_separately(monkeypatch):
+    """TTS 模型 API 未就绪时，应区别于普通后端 API 连接失败。"""
+    import backend.app.api.app as app_module
+
+    async def fake_test_model_link(_config: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr(app_module, "_test_model_link", fake_test_model_link)
+    monkeypatch.setattr(
+        app_module,
+        "_fetch_tts_health",
+        lambda _base_url: {"reachable": False, "ready": False, "error": "connection refused"},
+    )
+    with TestClient(app_module.create_app()) as client:
+        response = client.post(
+            "/api/v1/model-config/models/test",
+            json={
+                "text_model": {
+                    "base_url": "https://models.example.test/v1",
+                    "model": "demo-model",
+                },
+                "tts": {"base_url": "http://127.0.0.1:7811"},
+            },
+        )
+
+    assert response.status_code == 503
+    assert "TTS模型 API 测试失败" in response.json()["detail"]
 
 
 def test_v0_5_defaults_have_no_bundled_roles_or_voice_resources(monkeypatch):
-    """v0.5.0 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
+    """v0.5.1 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
     with _client(monkeypatch) as client:
         characters = client.get("/api/v1/characters")
         voices = client.get("/api/v1/voice-profiles")

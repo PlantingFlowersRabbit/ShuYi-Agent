@@ -1,0 +1,10 @@
+{
+  "remote.autoForwardPorts": true,
+  "remote.portsAttributes": {
+    "8000": {
+      "label": "ShuYi-Agent 后端 API",
+      "onAutoForward": "notify",
+      "protocol": "http"
+    }
+  }
+}
