@@ -221,6 +221,7 @@ def test_v0_5_legacy_environment_does_not_re_enable_old_api(monkeypatch):
     """服务只读取统一 SHUYI_* 配置；旧 /api 路径仍关闭，v1 不再需要访问令牌。"""
     legacy_prefix = "NOVEL" + "VOICE"
     monkeypatch.delenv("SHUYI_CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("SHUYI_CORS_ORIGIN_REGEX", raising=False)
     monkeypatch.setenv(f"{legacy_prefix}_API_TOKEN", "legacy-token")
     monkeypatch.setenv(f"{legacy_prefix}_CORS_ORIGINS", ALLOWED_ORIGIN)
     from backend.app.api.app import create_app
@@ -230,7 +231,7 @@ def test_v0_5_legacy_environment_does_not_re_enable_old_api(monkeypatch):
         assert response.status_code == 200
         cors = client.get("/api/v1/characters", headers={"Origin": ALLOWED_ORIGIN})
         assert cors.status_code == 200
-        assert "access-control-allow-origin" not in cors.headers
+        assert cors.headers["access-control-allow-origin"] == "*"
         assert client.get("/api/model-config").status_code == 404
         assert client.patch("/api/model-config", json={"llm": {"api_key": "secret"}}).status_code == 404
 
@@ -270,52 +271,32 @@ def test_v0_5_all_business_routes_use_v1_without_auth(monkeypatch):
         assert client.get("/outputs/audio/missing.wav").status_code == 404
 
 
-def test_v0_5_cors_allows_only_configured_browser_origin(monkeypatch):
-    """Covers v0.5 browser CORS preflight without broad wildcard access."""
+def test_v0_5_cors_allows_public_browser_preflight_without_workspace_whitelist(monkeypatch):
+    """CNB forwarded domains are ephemeral, so public API CORS must not rely on a per-run whitelist."""
     with _client(monkeypatch) as client:
-        allowed = client.options(
-            "/api/v1/characters",
-            headers={
-                "Origin": ALLOWED_ORIGIN,
-                "Access-Control-Request-Method": "GET",
-                "Access-Control-Request-Headers": "content-type",
-            },
-        )
-        assert allowed.status_code in {200, 204}
-        assert allowed.headers["access-control-allow-origin"] == ALLOWED_ORIGIN
-        assert "content-type" in allowed.headers["access-control-allow-headers"].lower()
-
-        rejected = client.options(
-            "/api/v1/characters",
-            headers={
-                "Origin": "https://attacker.example.test",
-                "Access-Control-Request-Method": "GET",
-            },
-        )
-        assert rejected.headers.get("access-control-allow-origin") is None
-
-
-def test_v0_5_cors_defaults_allow_pages_and_variable_cnb_when_env_is_missing(monkeypatch):
-    monkeypatch.delenv("SHUYI_CORS_ORIGINS", raising=False)
-    monkeypatch.delenv("SHUYI_CORS_ORIGIN_REGEX", raising=False)
-    from backend.app.api.app import create_app
-
-    with TestClient(create_app()) as client:
-        for origin in ("https://plantingflowersrabbit.github.io", "https://ip3somvmrr-8000.cnb.run"):
-            allowed = client.options(
-                "/api/v1/connection-test",
+        for origin in (
+            "https://plantingflowersrabbit.github.io",
+            "https://ip3somvmrr-8000.cnb.run",
+            "https://attacker.example.test",
+        ):
+            response = client.options(
+                "/api/v1/characters",
                 headers={
                     "Origin": origin,
                     "Access-Control-Request-Method": "GET",
+                    "Access-Control-Request-Headers": "content-type,x-custom-header",
                 },
             )
-            assert allowed.status_code in {200, 204}
-            assert allowed.headers["access-control-allow-origin"] == origin
+            assert response.status_code in {200, 204}
+            assert response.headers["access-control-allow-origin"] == "*"
+            assert response.headers["access-control-allow-methods"] == "*"
+            assert response.headers["access-control-allow-headers"] == "*"
+            assert response.headers["access-control-allow-credentials"] == "false"
 
 
-def test_v0_5_cors_can_allow_variable_cnb_forwarded_domains_with_regex(monkeypatch):
-    monkeypatch.delenv("SHUYI_CORS_ORIGINS", raising=False)
-    monkeypatch.setenv("SHUYI_CORS_ORIGIN_REGEX", r"https://.*\.cnb\.run")
+def test_v0_5_cors_environment_cannot_break_pages_to_cnb_preflight(monkeypatch):
+    monkeypatch.setenv("SHUYI_CORS_ORIGINS", "https://old.example.test")
+    monkeypatch.setenv("SHUYI_CORS_ORIGIN_REGEX", r"https://old-[0-9]+\.example\.test")
     from backend.app.api.app import create_app
 
     with TestClient(create_app()) as client:
@@ -327,16 +308,7 @@ def test_v0_5_cors_can_allow_variable_cnb_forwarded_domains_with_regex(monkeypat
             },
         )
         assert allowed.status_code in {200, 204}
-        assert allowed.headers["access-control-allow-origin"] == "https://faho62u6pf-8000.cnb.run"
-
-        rejected = client.options(
-            "/api/v1/connection-test",
-            headers={
-                "Origin": "https://attacker.example.test",
-                "Access-Control-Request-Method": "GET",
-            },
-        )
-        assert rejected.headers.get("access-control-allow-origin") is None
+        assert allowed.headers["access-control-allow-origin"] == "*"
 
 
 def test_v0_5_role_crud_and_model_config_use_public_v1_routes(monkeypatch):

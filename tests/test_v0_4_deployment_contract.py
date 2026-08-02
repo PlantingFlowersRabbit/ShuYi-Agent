@@ -128,25 +128,16 @@ def test_v0_5_cnb_workspace_launch_button_starts_shuyi_agent():
     assert "docker compose -f compose.cuda.yaml up --build" in launcher
 
 
-def test_v0_5_cnb_launch_sets_browser_cors_for_pages_local_and_workspace_frontends():
+def test_v0_5_cnb_launch_uses_public_browser_cors_without_workspace_whitelist():
     launcher = (ROOT / "scripts/cnb/start-shuyi-agent.sh").read_text(encoding="utf-8")
     compose_files = [
         (ROOT / "compose.cpu.yaml").read_text(encoding="utf-8"),
         (ROOT / "compose.cuda.yaml").read_text(encoding="utf-8"),
     ]
 
-    assert "SHUYI_CORS_ORIGINS" in launcher
-    assert "https://plantingflowersrabbit.github.io" in launcher
-    assert "http://127.0.0.1:5173" in launcher
-    assert "http://localhost:5173" in launcher
-    assert "SHUYI_CORS_ORIGIN_REGEX" in launcher
-    assert "https://.*\\.cnb\\.run" in launcher
-    assert "浏览器 CORS 允许来源" in launcher
-    assert "浏览器 CORS 来源正则" in launcher
+    assert "浏览器 CORS：公开 API 已统一允许跨域预检" in launcher
+    assert "SHUYI_CORS_ORIGINS" not in launcher
+    assert "SHUYI_CORS_ORIGIN_REGEX" not in launcher
     for compose_text in compose_files:
-        assert "SHUYI_CORS_ORIGINS:" in compose_text
-        assert "http://127.0.0.1:5173" in compose_text
-        assert "http://localhost:5173" in compose_text
-        assert "https://plantingflowersrabbit.github.io" in compose_text
-        assert "SHUYI_CORS_ORIGIN_REGEX:" in compose_text
-        assert "https://.*\\.cnb\\.run" in compose_text
+        assert "SHUYI_CORS_ORIGINS:" not in compose_text
+        assert "SHUYI_CORS_ORIGIN_REGEX:" not in compose_text

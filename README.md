@@ -93,8 +93,6 @@ docker compose -f compose.cuda.yaml up --build
 
 | 变量 | 用途 | 默认值 |
 | --- | --- | --- |
-| `SHUYI_CORS_ORIGINS` | 允许的固定浏览器来源，逗号分隔；CNB/Docker 默认加入本地前端和 GitHub Pages | 本地前端与 Pages |
-| `SHUYI_CORS_ORIGIN_REGEX` | 允许的浏览器来源正则；用于匹配 CNB 每次变化的 `*.cnb.run` 转发域名 | `https://.*\.cnb\.run` |
 | `SHUYI_HOST_PORT` | Docker 暴露到宿主机的后端端口；CNB 启动脚本默认用 `8000` | `8000` |
 | `SHUYI_DEVICE` | `auto`、`cpu` 或 `cuda` | `auto` |
 | `SHUYI_DATA_DIR` | 持久数据目录 | 容器内 `/data` |
@@ -119,11 +117,11 @@ docker compose -f compose.cuda.yaml up --build
 
 CNB 仓库页点击 **启动 ShuYi-Agent** 后会执行 `scripts/cnb/start-shuyi-agent.sh`。脚本会先停止旧的同名 Compose 服务，再把容器内 FastAPI `0.0.0.0:8000` 显式映射到 CNB 工作区的 `0.0.0.0:8000`，满足 WebIDE/VS Code PORTS 面板要求服务监听 `0.0.0.0` 的访问条件。仓库同时提供 `.devcontainer/devcontainer.json` 的 `forwardPorts: [8000]` 和 `.vscode/settings.json` 的端口侦测设置，用于让 VS Code/CNB 自动转发 8000。CNB 的公网 Forwarded Address 每次可能变化，脚本不再猜测或打印具体公网域名；请以 VS Code PORTS 面板显示的 Forwarded Address 为准。
 
-GitHub Pages 访问 CNB 后端时，可把 PORTS 面板显示的公网地址填到页面“模型配置 > 后端 API”，例如 `https://faho62u6pf-8000.cnb.run/api/v1`；也可只填裸域名，前端会自动解析为 `https://<域名>/api/v1`。如果希望构建产物默认指向固定后端，也可以把同一地址配置为仓库变量 `VITE_API_BASE_URL`。模型配置页的 TTS 默认值按 CNB/Docker 后端显示为 `http://127.0.0.1:7811`、`/models/Qwen3-TTS-12Hz-1.7B-Base`、`/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`；这是后端容器内部连接 TTS 服务和读取模型权重的配置，不是前端连接 FastAPI 后端的地址。
+GitHub Pages 访问 CNB 后端时，可把 PORTS 面板显示的公网地址填到页面“模型配置 > 后端 API”，例如 `https://faho62u6pf-8000.cnb.run/api/v1`；也可只填裸域名，前端会自动解析为 `https://<域名>/api/v1`。后端业务 API 不再使用访问令牌和浏览器来源白名单，会统一允许无凭据跨域预检，因此 CNB Forwarded Address 每次变化时只需要更新前端填写的后端 API 地址。如果希望构建产物默认指向固定后端，也可以把同一地址配置为仓库变量 `VITE_API_BASE_URL`。模型配置页的 TTS 默认值按 CNB/Docker 后端显示为 `http://127.0.0.1:7811`、`/models/Qwen3-TTS-12Hz-1.7B-Base`、`/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign`；这是后端容器内部连接 TTS 服务和读取模型权重的配置，不是前端连接 FastAPI 后端的地址。
 
 ## GitHub Pages
 
-`.github/workflows/pages.yml` 在 `main` 分支每次更新时构建静态站点并发布到 `gh-pages` 分支。先在仓库 Settings > Pages 中选择从 `gh-pages` 分支发布，再按需配置仓库变量 `VITE_API_BASE_URL`；临时 CNB 后端也可以直接在页面“模型配置 > 后端 API”中保存。Pages 只托管前端，不提供 FastAPI 或模型服务；生产 API 应启用 HTTPS，并把 Pages 域名加入准确的 CORS 来源。
+`.github/workflows/pages.yml` 在 `main` 分支每次更新时构建静态站点并发布到 `gh-pages` 分支。先在仓库 Settings > Pages 中选择从 `gh-pages` 分支发布，再按需配置仓库变量 `VITE_API_BASE_URL`；临时 CNB 后端也可以直接在页面“模型配置 > 后端 API”中保存。Pages 只托管前端，不提供 FastAPI 或模型服务；生产 API 应启用 HTTPS，当前公开 API 模式下无需额外维护 Pages 或 CNB 的 CORS 白名单。
 
 ## CNB 镜像发布模板
 

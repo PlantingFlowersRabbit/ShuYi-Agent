@@ -36,6 +36,5 @@ npm run preview
 Pages 只能部署静态前端。远程 API 必须：
 
 1. 可从公网通过 HTTPS 访问；
-2. 将 Pages 域名加入 `SHUYI_CORS_ORIGINS`；
-3. 在页面“模型配置 > 后端 API”或构建变量 `VITE_API_BASE_URL` 中指向 `/api/v1` 后端；
-4. 不在仓库变量或前端 bundle 中暴露模型服务密钥。
+2. 在页面“模型配置 > 后端 API”或构建变量 `VITE_API_BASE_URL` 中指向 `/api/v1` 后端；
+3. 不在仓库变量或前端 bundle 中暴露模型服务密钥。

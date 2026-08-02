@@ -19,8 +19,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from backend.app.agents.registry import AgentRegistry
@@ -79,10 +78,21 @@ DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
 SERVICE_VERSION = "0.5.2"
-DEFAULT_CORS_ORIGINS = "http://127.0.0.1:5173,http://localhost:5173,https://plantingflowersrabbit.github.io"
-DEFAULT_CORS_ORIGIN_REGEX = r"https://.*\.cnb\.run"
+PUBLIC_BROWSER_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "*",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Credentials": "false",
+    "Access-Control-Max-Age": "600",
+}
 MAX_NOVEL_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024
+
+
+def _with_public_browser_cors(response: Response) -> Response:
+    for header, value in PUBLIC_BROWSER_CORS_HEADERS.items():
+        response.headers[header] = value
+    return response
 
 
 def _default_model_dir() -> Path:
@@ -590,12 +600,6 @@ def create_app() -> FastAPI:
         description="基于 Agent 的多人有声书自动配音工作台后端接口",
         version=SERVICE_VERSION,
     )
-    allowed_origins = [
-        origin.strip()
-        for origin in _service_env("SHUYI_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
-        if origin.strip()
-    ]
-    allowed_origin_regex = _service_env("SHUYI_CORS_ORIGIN_REGEX", DEFAULT_CORS_ORIGIN_REGEX).strip() or None
     data_root_value = _service_env("SHUYI_DATA_DIR").strip()
     data_root = Path(data_root_value).expanduser() if data_root_value else None
     repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3" if data_root else ":memory:")
@@ -627,14 +631,11 @@ def create_app() -> FastAPI:
                 app.state.startup_ready = False
         return response
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_origin_regex=allowed_origin_regex,
-        allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Last-Event-ID"],
-    )
+    @app.middleware("http")
+    async def public_browser_cors(request: Request, call_next):
+        if request.method == "OPTIONS":
+            return Response(status_code=200, headers=PUBLIC_BROWSER_CORS_HEADERS)
+        return _with_public_browser_cors(await call_next(request))
 
     OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_VOICE_RESOURCE_DIR.mkdir(parents=True, exist_ok=True)

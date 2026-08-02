@@ -7,17 +7,6 @@ cd "$ROOT_DIR"
 : "${SHUYI_HOST_PORT:=8000}"
 export SHUYI_HOST_PORT
 
-default_cors_origins="http://127.0.0.1:5173,http://localhost:5173,https://plantingflowersrabbit.github.io"
-default_cors_origin_regex='https://.*\.cnb\.run'
-
-if [ -z "${SHUYI_CORS_ORIGINS:-}" ] && ! { [ -f .env ] && grep -Eq '^[[:space:]]*SHUYI_CORS_ORIGINS[[:space:]]*=' .env; }; then
-  export SHUYI_CORS_ORIGINS="$default_cors_origins"
-fi
-
-if [ -z "${SHUYI_CORS_ORIGIN_REGEX:-}" ] && ! { [ -f .env ] && grep -Eq '^[[:space:]]*SHUYI_CORS_ORIGIN_REGEX[[:space:]]*=' .env; }; then
-  export SHUYI_CORS_ORIGIN_REGEX="$default_cors_origin_regex"
-fi
-
 echo "=================================================="
 echo "  ShuYi-Agent CNB backend launcher"
 echo "=================================================="
@@ -36,8 +25,7 @@ echo "后端本地访问地址：http://localhost:${SHUYI_HOST_PORT}"
 echo "后端公网访问地址以 VS Code PORTS 面板显示的 Forwarded Address 为准。"
 echo "GitHub Pages 的后端 API 可填写：<PORTS 面板 Forwarded Address>/api/v1"
 echo "容器内 FastAPI 端口为 8000；CNB 工作区对外预览端口为 ${SHUYI_HOST_PORT}。"
-echo "浏览器 CORS 允许来源：${SHUYI_CORS_ORIGINS:-使用 .env 中的 SHUYI_CORS_ORIGINS}"
-echo "浏览器 CORS 来源正则：${SHUYI_CORS_ORIGIN_REGEX:-使用 .env 中的 SHUYI_CORS_ORIGIN_REGEX}"
+echo "浏览器 CORS：公开 API 已统一允许跨域预检，无需配置临时 CNB 域名白名单。"
 echo "TTS 模型默认由前端“模型配置 > 下载并部署”按钮后台下载和启动。"
 
 if [ "${SHUYI_CNB_LAUNCH_DRY_RUN:-0}" = "1" ]; then

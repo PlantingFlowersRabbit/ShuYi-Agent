@@ -9,8 +9,6 @@ services:
       SHUYI_DATA_DIR: /data
       SHUYI_DEVICE: cuda
       SHUYI_REQUIRE_TTS_READY: "0"
-      SHUYI_CORS_ORIGINS: "${SHUYI_CORS_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173,https://plantingflowersrabbit.github.io}"
-      SHUYI_CORS_ORIGIN_REGEX: '${SHUYI_CORS_ORIGIN_REGEX:-https://.*\.cnb\.run}'
       SHUYI_MODEL_AUTO_DOWNLOAD: "${SHUYI_MODEL_AUTO_DOWNLOAD:-0}"
       SHUYI_MODEL_DIR: /models
       QWEN3_TTS_DEVICE: cuda
