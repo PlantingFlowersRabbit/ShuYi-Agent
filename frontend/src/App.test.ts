@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.5.1 application shell", () => {
+describe("v0.5.2 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.5.1 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.5.2 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.5.1 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.5.1");
+    expect(markup).toContain("v0.5.2");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.5.1 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.5.1 model configuration with separate backend and model tests", async () => {
+  it("renders v0.5.2 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -57,7 +57,7 @@ describe("v0.5.1 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.5.1 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.5.2 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -93,6 +93,43 @@ describe("v0.5.1 application shell", () => {
     expect(cssSource).toMatch(/\.empty-state\s*{[^}]*min-height:\s*100%/s);
     expect(cssSource).toMatch(/\.brand-logo\s*{[^}]*height:\s*clamp\(38px, 5vw, 52px\)/s);
     expect(cssSource).not.toContain(".access-token-field");
+  });
+
+  it("checks backend connectivity before sending large document parse payloads", async () => {
+    const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
+      import("node:fs"),
+      import("node:url"),
+    ]);
+    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
+    const splitFunction = appSource.slice(
+      appSource.indexOf("async function runAiChapterSplit()"),
+      appSource.indexOf("async function selectChapter"),
+    );
+
+    expect(splitFunction).toContain('requestJson<ConnectionTestResponse>("/connection-test")');
+    expect(splitFunction.indexOf('"/connection-test"')).toBeLessThan(
+      splitFunction.indexOf('"/books/agent-chapter-split"'),
+    );
+  });
+
+  it("places role deletion after voice matching details and removes the inline voice play button", async () => {
+    const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
+      import("node:fs"),
+      import("node:url"),
+    ]);
+    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
+    const roleCard = appSource.slice(
+      appSource.indexOf('<article className="role-card"'),
+      appSource.indexOf("{aiRoleCandidates.length > 0"),
+    );
+
+    expect(roleCard).not.toContain('aria-label="播放音色"');
+    expect(roleCard).not.toContain("onClick={() => playVoicePreview(voice)}");
+    expect(roleCard).toContain("<strong>音色匹配</strong>");
+    expect(roleCard.indexOf("<strong>音色匹配</strong>")).toBeLessThan(roleCard.indexOf("删除角色"));
+    expect(roleCard.indexOf("<AuthorizedAudio source={voiceAudioSrc(voice)} />")).toBeLessThan(
+      roleCard.indexOf("删除角色"),
+    );
   });
 
   it("parses numbered SSE frames and keeps an incomplete tail", async () => {

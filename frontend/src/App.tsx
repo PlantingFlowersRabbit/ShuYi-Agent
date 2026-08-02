@@ -1126,6 +1126,7 @@ function App() {
     setChapterSplitProgress(12);
     setApiStatus("文档解析正在检查可复用规则");
     try {
+      await requestJson<ConnectionTestResponse>("/connection-test");
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
         ? await requestJson<ApiChapterSplitResponse>("/books/agent-chapter-split-file", (() => {
@@ -1387,24 +1388,6 @@ function App() {
       } catch (secondError) {
         setApiStatus(apiFailureMessage("角色删除失败", secondError));
       }
-    }
-  }
-
-  async function playVoicePreview(voice?: VoiceResource) {
-    if (!voice) {
-      setApiStatus("播放音色失败：该角色尚未选择音色");
-      return;
-    }
-    try {
-      const response = await fetch(mediaRequestUrl(voiceAudioSrc(voice)));
-      if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
-      const objectUrl = URL.createObjectURL(await response.blob());
-      const audio = new Audio(objectUrl);
-      audio.addEventListener("ended", () => URL.revokeObjectURL(objectUrl), { once: true });
-      await audio.play();
-      setApiStatus(`正在播放音色：${voice.name}`);
-    } catch (error) {
-      setApiStatus(apiFailureMessage("播放音色失败", error));
     }
   }
 
@@ -2069,19 +2052,7 @@ function App() {
                               ))}
                             </select>
                           </label>
-                          <button
-                            aria-label="播放音色"
-                            className="icon-button"
-                            type="button"
-                            title="播放音色"
-                            onClick={() => playVoicePreview(voice)}
-                          >
-                            ▶
-                          </button>
                         </div>
-                        <button className="tool-button amber" type="button" onClick={() => void deleteRole(role.roleId)}>
-                          删除角色
-                        </button>
                         <p>
                           <strong>音色描述</strong>
                           {voice?.description || role.voiceDescription || role.description || "未选择音色"}
@@ -2095,6 +2066,9 @@ function App() {
                           {role.voiceMatchReason ?? "用户可手动调整"}
                         </p>
                         {voice && <AuthorizedAudio source={voiceAudioSrc(voice)} />}
+                        <button className="tool-button amber" type="button" onClick={() => void deleteRole(role.roleId)}>
+                          删除角色
+                        </button>
                       </article>
                     );
                   })}

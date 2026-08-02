@@ -52,7 +52,7 @@ def test_v0_5_health_probes_are_public_and_report_release(monkeypatch):
             payload = response.json()
             assert payload["status"] == "ok"
             assert payload["service"] == "shuyi-agent"
-            assert payload["version"] == "0.5.1"
+            assert payload["version"] == "0.5.2"
 
 
 def test_v0_5_connection_test_is_a_backend_api_smoke_test(monkeypatch):
@@ -64,7 +64,7 @@ def test_v0_5_connection_test_is_a_backend_api_smoke_test(monkeypatch):
     payload = response.json()
     assert payload["ok"] is True
     assert payload["service"] == "shuyi-agent"
-    assert payload["version"] == "0.5.1"
+    assert payload["version"] == "0.5.2"
     assert payload["message"] == "后端 API 连接成功"
 
 
@@ -141,7 +141,7 @@ def test_v0_5_models_test_reports_tts_model_api_failure_separately(monkeypatch):
 
 
 def test_v0_5_defaults_have_no_bundled_roles_or_voice_resources(monkeypatch):
-    """v0.5.1 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
+    """v0.5.2 ships with empty role and voice libraries to avoid bundled copyrighted assets."""
     with _client(monkeypatch) as client:
         characters = client.get("/api/v1/characters")
         voices = client.get("/api/v1/voice-profiles")
