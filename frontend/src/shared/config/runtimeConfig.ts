@@ -38,8 +38,15 @@ function normalizeApiBase(value: string | undefined): string {
   }
 }
 
+function normalizeCopiedUrlText(value: string): string {
+  return value.replace(/[‐-―−﹘﹣－]/g, "-");
+}
+
 function sanitizeApiBaseInput(value: string): string {
-  const trimmed = value.trim().replace(/^[<\[(（「『"'“‘]+/, "").replace(/[>\])） 」』"'”’]+$/, "");
+  const trimmed = normalizeCopiedUrlText(value)
+    .trim()
+    .replace(/^[<\[(（「『"'“‘]+/, "")
+    .replace(/[>\])） 」』"'”’]+$/, "");
   const urlMatch = trimmed.match(/https?:\/\/[^\s<>\])）"'“”‘’]+/i);
   if (urlMatch) return urlMatch[0].replace(/[>\])）"'”’]+$/, "");
   const domainMatch = trimmed.match(/[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:\/[^\s<>\])）"'“”‘’]*)?/i);

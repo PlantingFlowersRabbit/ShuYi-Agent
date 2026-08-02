@@ -295,6 +295,24 @@ def test_v0_5_cors_allows_only_configured_browser_origin(monkeypatch):
         assert rejected.headers.get("access-control-allow-origin") is None
 
 
+def test_v0_5_cors_defaults_allow_pages_and_variable_cnb_when_env_is_missing(monkeypatch):
+    monkeypatch.delenv("SHUYI_CORS_ORIGINS", raising=False)
+    monkeypatch.delenv("SHUYI_CORS_ORIGIN_REGEX", raising=False)
+    from backend.app.api.app import create_app
+
+    with TestClient(create_app()) as client:
+        for origin in ("https://plantingflowersrabbit.github.io", "https://ip3somvmrr-8000.cnb.run"):
+            allowed = client.options(
+                "/api/v1/connection-test",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+            assert allowed.status_code in {200, 204}
+            assert allowed.headers["access-control-allow-origin"] == origin
+
+
 def test_v0_5_cors_can_allow_variable_cnb_forwarded_domains_with_regex(monkeypatch):
     monkeypatch.delenv("SHUYI_CORS_ORIGINS", raising=False)
     monkeypatch.setenv("SHUYI_CORS_ORIGIN_REGEX", r"https://.*\.cnb\.run")

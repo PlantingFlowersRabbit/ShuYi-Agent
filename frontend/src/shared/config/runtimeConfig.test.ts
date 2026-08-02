@@ -50,6 +50,19 @@ describe("v0.5.2 runtime configuration", () => {
     );
   });
 
+  it("normalizes copied forwarded addresses that contain Unicode dash characters", async () => {
+    const { resolveRuntimeConfig } = await import("./runtimeConfig");
+    const config = resolveRuntimeConfig({
+      BASE_URL: "/ShuYi-Agent/",
+      VITE_API_BASE_URL: "https://ip3somvmrr–8000.cnb.run/api/v1",
+    });
+
+    expect(config.apiBase).toBe("https://ip3somvmrr-8000.cnb.run/api/v1");
+    expect(config.apiUrl("/connection-test")).toBe(
+      "https://ip3somvmrr-8000.cnb.run/api/v1/connection-test",
+    );
+  });
+
   it("can update the backend API base at runtime for a freshly forwarded CNB backend", async () => {
     const { resolveRuntimeConfig } = await import("./runtimeConfig");
     const config = resolveRuntimeConfig({

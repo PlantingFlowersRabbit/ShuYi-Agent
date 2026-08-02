@@ -79,6 +79,8 @@ DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
 SERVICE_VERSION = "0.5.2"
+DEFAULT_CORS_ORIGINS = "http://127.0.0.1:5173,http://localhost:5173,https://plantingflowersrabbit.github.io"
+DEFAULT_CORS_ORIGIN_REGEX = r"https://.*\.cnb\.run"
 MAX_NOVEL_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_REFERENCE_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -589,9 +591,11 @@ def create_app() -> FastAPI:
         version=SERVICE_VERSION,
     )
     allowed_origins = [
-        origin.strip() for origin in _service_env("SHUYI_CORS_ORIGINS").split(",") if origin.strip()
+        origin.strip()
+        for origin in _service_env("SHUYI_CORS_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+        if origin.strip()
     ]
-    allowed_origin_regex = _service_env("SHUYI_CORS_ORIGIN_REGEX").strip() or None
+    allowed_origin_regex = _service_env("SHUYI_CORS_ORIGIN_REGEX", DEFAULT_CORS_ORIGIN_REGEX).strip() or None
     data_root_value = _service_env("SHUYI_DATA_DIR").strip()
     data_root = Path(data_root_value).expanduser() if data_root_value else None
     repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3" if data_root else ":memory:")
