@@ -295,6 +295,32 @@ def test_v0_5_cors_allows_only_configured_browser_origin(monkeypatch):
         assert rejected.headers.get("access-control-allow-origin") is None
 
 
+def test_v0_5_cors_can_allow_variable_cnb_forwarded_domains_with_regex(monkeypatch):
+    monkeypatch.delenv("SHUYI_CORS_ORIGINS", raising=False)
+    monkeypatch.setenv("SHUYI_CORS_ORIGIN_REGEX", r"https://.*\.cnb\.run")
+    from backend.app.api.app import create_app
+
+    with TestClient(create_app()) as client:
+        allowed = client.options(
+            "/api/v1/connection-test",
+            headers={
+                "Origin": "https://faho62u6pf-8000.cnb.run",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert allowed.status_code in {200, 204}
+        assert allowed.headers["access-control-allow-origin"] == "https://faho62u6pf-8000.cnb.run"
+
+        rejected = client.options(
+            "/api/v1/connection-test",
+            headers={
+                "Origin": "https://attacker.example.test",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert rejected.headers.get("access-control-allow-origin") is None
+
+
 def test_v0_5_role_crud_and_model_config_use_public_v1_routes(monkeypatch):
     """角色写操作和配置保存不能被 v1 路由代理破坏。"""
     with _client(monkeypatch) as client:

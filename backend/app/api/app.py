@@ -591,6 +591,7 @@ def create_app() -> FastAPI:
     allowed_origins = [
         origin.strip() for origin in _service_env("SHUYI_CORS_ORIGINS").split(",") if origin.strip()
     ]
+    allowed_origin_regex = _service_env("SHUYI_CORS_ORIGIN_REGEX").strip() or None
     data_root_value = _service_env("SHUYI_DATA_DIR").strip()
     data_root = Path(data_root_value).expanduser() if data_root_value else None
     repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3" if data_root else ":memory:")
@@ -625,6 +626,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
+        allow_origin_regex=allowed_origin_regex,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "Last-Event-ID"],

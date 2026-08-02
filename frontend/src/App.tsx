@@ -942,6 +942,7 @@ function App() {
   const [generatedVoicePreviewUrl, setGeneratedVoicePreviewUrl] = useState("");
   const [modelConfig, setModelConfig] = useState<ModelConfig>(defaultModelConfig);
   const [textModelApiKey, setTextModelApiKey] = useState("");
+  const [backendApiBase, setBackendApiBase] = useState(runtimeConfig.apiBase || "/api/v1");
   const [apiStatus, setApiStatus] = useState("等待上传小说");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
@@ -1857,7 +1858,19 @@ function App() {
     }
   }
 
+  function applyBackendApiBaseInput(): string {
+    const normalized = runtimeConfig.setApiBase(backendApiBase);
+    setBackendApiBase(normalized || "/api/v1");
+    return normalized;
+  }
+
+  function saveBackendApiBase() {
+    const normalized = applyBackendApiBaseInput();
+    setApiStatus(`后端地址已保存：${normalized || "/api/v1"}`);
+  }
+
   async function saveTextModelConfig() {
+    applyBackendApiBaseInput();
     try {
       const secretPayload = await createSecretExchangePayload(textModelApiKey);
       const data = await requestJson<{ config: ModelConfig }>("/model-config", {
@@ -1876,6 +1889,7 @@ function App() {
   }
 
   async function saveLocalModelConfig() {
+    applyBackendApiBaseInput();
     try {
       const data = await requestJson<{ config: ModelConfig }>("/model-config", {
         method: "PATCH",
@@ -1889,6 +1903,7 @@ function App() {
   }
 
   async function testBackendConnection() {
+    applyBackendApiBaseInput();
     try {
       const data = await requestJson<ConnectionTestResponse>("/connection-test");
       setApiStatus(data.message || "后端 API 连接成功");
@@ -1899,6 +1914,7 @@ function App() {
 
   async function testModelApis() {
     if (localTtsStarting) return;
+    applyBackendApiBaseInput();
     setLocalTtsStarting(true);
     setApiStatus("正在测试文本模型与 TTS 模型 API");
     try {
@@ -1922,6 +1938,7 @@ function App() {
 
   async function deployTtsModels() {
     if (ttsDeployment.status === "running") return;
+    applyBackendApiBaseInput();
     setApiStatus("已开始后台下载并部署 TTS 模型；其他不依赖 TTS 的功能可继续使用");
     try {
       const data = await requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deploy", {
@@ -2485,8 +2502,29 @@ function App() {
     return (
       <main className="model-page">
         <section className="panel">
-          <div className="section-title">文本模型</div>
+          <div className="section-title">后端 API</div>
           <small className="status-message" aria-label="模型配置反馈">{apiStatus}</small>
+          <label>
+            Base URL
+            <input
+              aria-label="后端 API Base URL"
+              placeholder="eg: https://faho62u6pf-8000.cnb.run/api/v1"
+              value={backendApiBase}
+              onChange={(event) => setBackendApiBase(event.target.value)}
+            />
+          </label>
+          <div className="toolbar-row">
+            <button className="tool-button teal" type="button" onClick={() => saveBackendApiBase()}>
+              保存后端地址
+            </button>
+            <button className="tool-button sky" type="button" onClick={() => void testBackendConnection()}>
+              测试连接
+            </button>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="section-title">文本模型</div>
           <label>
             Base URL
             <input

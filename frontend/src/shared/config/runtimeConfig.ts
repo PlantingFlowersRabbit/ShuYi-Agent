@@ -9,9 +9,12 @@ type RuntimeEnv = {
 export type RuntimeConfig = {
   pagesBase: string;
   apiBase: string;
+  setApiBase: (value: string) => string;
   apiUrl: (path: string) => string;
   mediaUrl: (path: string) => string;
 };
+
+export const API_BASE_STORAGE_KEY = "shuyi-agent-api-base-url";
 
 function normalizePagesBase(value: string | undefined): string {
   const base = value?.trim() || "/";
@@ -44,13 +47,38 @@ function sanitizeApiBaseInput(value: string): string {
   return trimmed;
 }
 
+function readStoredApiBase(): string | undefined {
+  if (typeof window === "undefined" || !("localStorage" in window)) return undefined;
+  try {
+    return window.localStorage.getItem(API_BASE_STORAGE_KEY) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeStoredApiBase(value: string): void {
+  if (typeof window === "undefined" || !("localStorage" in window)) return;
+  try {
+    window.localStorage.setItem(API_BASE_STORAGE_KEY, value);
+  } catch {
+    // Ignore storage failures; the in-memory runtime config still updates.
+  }
+}
+
 export function resolveRuntimeConfig(env: RuntimeEnv): RuntimeConfig {
   const pagesBase = normalizePagesBase(env.BASE_URL);
-  const apiBase = normalizeApiBase(env.VITE_API_BASE_URL);
+  let apiBase = normalizeApiBase(env.VITE_API_BASE_URL);
 
   return {
     pagesBase,
-    apiBase,
+    get apiBase() {
+      return apiBase;
+    },
+    setApiBase(value: string) {
+      apiBase = normalizeApiBase(value);
+      writeStoredApiBase(apiBase);
+      return apiBase;
+    },
     apiUrl(path: string) {
       if (/^https?:\/\//i.test(path)) return path;
       const endpoint = path.replace(/^\/+/, "");
@@ -65,4 +93,7 @@ export function resolveRuntimeConfig(env: RuntimeEnv): RuntimeConfig {
   };
 }
 
-export const runtimeConfig = resolveRuntimeConfig(import.meta.env);
+export const runtimeConfig = resolveRuntimeConfig({
+  ...import.meta.env,
+  VITE_API_BASE_URL: readStoredApiBase() || import.meta.env.VITE_API_BASE_URL,
+});

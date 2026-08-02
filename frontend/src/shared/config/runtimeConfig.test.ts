@@ -49,4 +49,20 @@ describe("v0.5.2 runtime configuration", () => {
       "https://q0owelusgf-8000.cnb.run/api/v1/model-config",
     );
   });
+
+  it("can update the backend API base at runtime for a freshly forwarded CNB backend", async () => {
+    const { resolveRuntimeConfig } = await import("./runtimeConfig");
+    const config = resolveRuntimeConfig({
+      BASE_URL: "/ShuYi-Agent/",
+      VITE_API_BASE_URL: "/api/v1",
+    });
+
+    const normalized = config.setApiBase("[https://faho62u6pf-8000.cnb.run”点击“测试连接”");
+
+    expect(normalized).toBe("https://faho62u6pf-8000.cnb.run/api/v1");
+    expect(config.apiBase).toBe("https://faho62u6pf-8000.cnb.run/api/v1");
+    expect(config.apiUrl("/connection-test")).toBe(
+      "https://faho62u6pf-8000.cnb.run/api/v1/connection-test",
+    );
+  });
 });

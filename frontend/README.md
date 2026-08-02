@@ -15,7 +15,9 @@ npm run dev
 VITE_API_BASE_URL=api.example.com
 ```
 
-不要把 provider 密钥写进 `VITE_*` 变量；它们会进入浏览器静态文件。`VITE_API_BASE_URL` 可填完整 `/api/v1` URL，也可填裸域名。
+不要把 provider 密钥写进 `VITE_*` 变量；它们会进入浏览器静态文件。`VITE_API_BASE_URL` 可填完整 `/api/v1` URL，也可填裸域名。GitHub Pages 或临时 CNB 后端地址变化时，也可以在页面“模型配置 > 后端 API”里直接粘贴新的 FastAPI 地址并保存；这个地址不同于 TTS 模型的 `Base URL`。
+
+CNB/VS Code 环境会通过 `.devcontainer/devcontainer.json` 请求自动转发 8000 端口，并通过 `.vscode/settings.json` 识别启动脚本打印的 `http://localhost:8000`。公网地址以 PORTS 面板的 Forwarded Address 为准，不要使用启动日志里的模板地址。
 
 ## 测试与构建
 
@@ -35,4 +37,5 @@ Pages 只能部署静态前端。远程 API 必须：
 
 1. 可从公网通过 HTTPS 访问；
 2. 将 Pages 域名加入 `SHUYI_CORS_ORIGINS`；
-3. 不在仓库变量或前端 bundle 中暴露模型服务密钥。
+3. 在页面“模型配置 > 后端 API”或构建变量 `VITE_API_BASE_URL` 中指向 `/api/v1` 后端；
+4. 不在仓库变量或前端 bundle 中暴露模型服务密钥。

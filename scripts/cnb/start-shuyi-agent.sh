@@ -7,10 +7,15 @@ cd "$ROOT_DIR"
 : "${SHUYI_HOST_PORT:=8000}"
 export SHUYI_HOST_PORT
 
-proxy_template="${CNB_VSCODE_PROXY_URI:-}"
-backend_public_url=""
-if [ -n "$proxy_template" ]; then
-  backend_public_url="${proxy_template//\{\{port\}\}/$SHUYI_HOST_PORT}"
+default_cors_origins="http://127.0.0.1:5173,http://localhost:5173,https://plantingflowersrabbit.github.io"
+default_cors_origin_regex='https://.*\.cnb\.run'
+
+if [ -z "${SHUYI_CORS_ORIGINS:-}" ] && ! { [ -f .env ] && grep -Eq '^[[:space:]]*SHUYI_CORS_ORIGINS[[:space:]]*=' .env; }; then
+  export SHUYI_CORS_ORIGINS="$default_cors_origins"
+fi
+
+if [ -z "${SHUYI_CORS_ORIGIN_REGEX:-}" ] && ! { [ -f .env ] && grep -Eq '^[[:space:]]*SHUYI_CORS_ORIGIN_REGEX[[:space:]]*=' .env; }; then
+  export SHUYI_CORS_ORIGIN_REGEX="$default_cors_origin_regex"
 fi
 
 echo "=================================================="
@@ -27,14 +32,12 @@ if ! docker compose version >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ -n "$backend_public_url" ]; then
-  echo "后端公网访问地址：$backend_public_url"
-  echo "GitHub Pages 的 VITE_API_BASE_URL 可填写：${backend_public_url%/}/api/v1"
-else
-  echo "后端已映射到工作区端口 ${SHUYI_HOST_PORT}；公网地址请在 VS Code PORTS 面板查看。"
-  echo "GitHub Pages 的 VITE_API_BASE_URL 可填写：<PORTS 面板公网地址>/api/v1"
-fi
+echo "后端本地访问地址：http://localhost:${SHUYI_HOST_PORT}"
+echo "后端公网访问地址以 VS Code PORTS 面板显示的 Forwarded Address 为准。"
+echo "GitHub Pages 的后端 API 可填写：<PORTS 面板 Forwarded Address>/api/v1"
 echo "容器内 FastAPI 端口为 8000；CNB 工作区对外预览端口为 ${SHUYI_HOST_PORT}。"
+echo "浏览器 CORS 允许来源：${SHUYI_CORS_ORIGINS:-使用 .env 中的 SHUYI_CORS_ORIGINS}"
+echo "浏览器 CORS 来源正则：${SHUYI_CORS_ORIGIN_REGEX:-使用 .env 中的 SHUYI_CORS_ORIGIN_REGEX}"
 echo "TTS 模型默认由前端“模型配置 > 下载并部署”按钮后台下载和启动。"
 
 if [ "${SHUYI_CNB_LAUNCH_DRY_RUN:-0}" = "1" ]; then

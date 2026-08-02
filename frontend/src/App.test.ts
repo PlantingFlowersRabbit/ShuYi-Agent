@@ -42,6 +42,10 @@ describe("v0.5.2 application shell", () => {
 
     const markup = renderToStaticMarkup(createElement(App));
 
+    expect(markup).toContain("后端 API");
+    expect(markup).toContain('aria-label="后端 API Base URL"');
+    expect(markup).toContain('value="https://api.example.test/api/v1"');
+    expect(markup).toContain("保存后端地址");
     expect(markup).toContain("文本模型");
     expect(markup).toContain("TTS模型");
     expect(markup).toContain("测试连接");
