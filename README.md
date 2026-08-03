@@ -20,18 +20,56 @@ src="https://img.shields.io/badge/Code_License-MIT-f5de53?&color=f5de53"/></a>
 ## 目录
 
 1. [简介](#简介)
-2. [项目结构](#项目结构)
-3. [本地开发](#本地开发)
-4. [API 与 OpenAPI](#api-与-openapi)
-5. [Docker CPU / GPU](#docker-cpu--gpu)
-6. [环境变量](#环境变量)
-7. [GitHub Pages](#github-pages)
-8. [CNB 镜像发布模板](#cnb-镜像发布模板)
-9. [验证](#验证)
+2. [快速开始](#快速开始)
+3. [项目结构](#项目结构)
+4. [本地开发](#本地开发)
+5. [API 与 OpenAPI](#api-与-openapi)
+6. [Docker CPU / GPU](#docker-cpu--gpu)
+7. [环境变量](#环境变量)
+8. [GitHub Pages](#github-pages)
+9. [CNB 镜像发布模板](#cnb-镜像发布模板)
+10. [验证](#验证)
 
 ## 简介
 
 书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.5.2 取消后端访问令牌流程，支持前端一键后台下载并部署 TTS 模型，同时保留 OpenAI SDK 兼容文本模型配置；运行时不会生成或执行模型返回的 Python 代码。
+
+## 快速开始
+
+本地 uv 脚本默认面向中国网络环境，使用阿里 PyPI 源与 npmmirror。需要 Python 3.11+、Node.js 22+；Linux 环境下脚本会尝试安装 `ffmpeg`、`libsndfile1` 与 `sox`。
+
+CPU 启动：
+
+```bash
+bash scripts/local/start-uv-cpu.sh
+```
+
+GPU 启动：
+
+```bash
+bash scripts/local/start-uv-gpu.sh
+```
+
+GPU 脚本默认使用 `TORCH_BACKEND=cu128`，会创建独立的 `.venv-gpu`，不覆盖 CPU 脚本使用的 `.venv`。如需切换 PyTorch CUDA 后端，可在启动前覆盖环境变量：
+
+```bash
+TORCH_BACKEND=cu126 bash scripts/local/start-uv-gpu.sh
+```
+
+两个脚本都会以前台方式启动后端 `0.0.0.0:8000` 与前端 `0.0.0.0:5173`，不写日志文件，按 `Ctrl-C` 会同时停止前后端。TTS 模型默认不随主应用启动下载，首次使用可在前端“模型配置”中点击下载并部署；模型尚未部署前 `/health/ready` 中 `tts` 会显示 `not_ready`。
+
+如果只想临时启动后端并改端口，可以直接运行 uvicorn，例如把后端监听到 `6006`：
+
+```bash
+.venv/bin/python -m uvicorn backend.app.api.app:app --host 0.0.0.0 --port 6006
+```
+
+GPU 环境只启动后端时可使用：
+
+```bash
+SHUYI_DEVICE=cuda QWEN3_TTS_DEVICE=cuda \
+  .venv-gpu/bin/python -m uvicorn backend.app.api.app:app --host 0.0.0.0 --port 6006
+```
 
 ## 项目结构
 

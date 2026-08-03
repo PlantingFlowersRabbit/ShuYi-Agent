@@ -43,6 +43,7 @@ outputs/**/*
 
 # OS / editor
 .DS_Store
+.ipynb_checkpoints/
 .idea/
 .vscode/*
 !.vscode/settings.json
