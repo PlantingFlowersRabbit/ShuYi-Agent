@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.5.2 application shell", () => {
+describe("v0.5.4 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.5.2 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.5.4 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.5.2 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.5.2");
+    expect(markup).toContain("v0.5.4");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.5.2 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.5.2 model configuration with separate backend and model tests", async () => {
+  it("renders v0.5.4 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -61,7 +61,7 @@ describe("v0.5.2 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.5.2 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.5.4 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -72,6 +72,7 @@ describe("v0.5.2 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain("音色列表");
+    expect(markup).toContain("导出音色库");
     expect(markup).toContain("添加音色");
     expect(markup).toContain("生成音色");
   });
@@ -89,6 +90,10 @@ describe("v0.5.2 application shell", () => {
     expect(appSource).toContain("在此后添加台词");
     expect(appSource).toContain("台词文本");
     expect(appSource).toContain("生成配音");
+    expect(appSource).toContain("跳转到未确认");
+    expect(appSource).toContain("确认已选台词与角色");
+    expect(appSource).toContain("mergeApiAudioByUtteranceId");
+    expect(appSource).toContain("dubbingQueueRef");
     expect(appSource).not.toContain("在此后添加语句");
     expect(appSource).not.toContain("划分语句与角色匹配");
     expect(appSource).toContain("addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)");

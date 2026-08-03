@@ -9,7 +9,7 @@ on:
       tag:
         description: "Tag to publish"
         required: true
-        default: "v0.5.2"
+        default: "v0.5.4"
 
 permissions:
   contents: write

@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import sys
+import threading
 import time
 import types
 import wave
@@ -211,6 +212,52 @@ def test_v0_11_voice_resources_load_real_samples_and_support_crud():
     with pytest.raises(KeyError):
         collection.get("voice-test")
 
+
+
+def test_fastapi_v0_54_exports_voice_library_archive(tmp_path):
+    pytest.importorskip("fastapi")
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    reference_audio = tmp_path / "reference.wav"
+    write_valid_wav(reference_audio)
+    with (
+        patch.object(app_module, "OUTPUT_VOICE_RESOURCE_DIR", tmp_path / "voices"),
+        patch.object(app_module, "OUTPUT_EXPORT_DIR", tmp_path / "exports"),
+    ):
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+        created = client.post(
+            "/api/v1/voice-profiles",
+            json={
+                "voice_id": "voice-export",
+                "name": "导出音色",
+                "description": "用于导出测试",
+                "reference_text": "参考文本。",
+                "reference_audio_path": str(reference_audio),
+            },
+        )
+        assert created.status_code == 200
+        exported = client.post("/api/v1/voice-profiles/export")
+        assert exported.status_code == 200
+        payload = exported.json()
+        assert payload["voice_count"] == 1
+        assert payload["audio_count"] == 1
+        archive = client.get(payload["download_url"])
+        assert archive.status_code == 200
+        archive_path = tmp_path / "voice-library.zip"
+        archive_path.write_bytes(archive.content)
+
+    with zipfile.ZipFile(archive_path) as package:
+        names = set(package.namelist())
+        assert "manifest.json" in names
+        assert "voice-profiles/voice-export.wav" in names
+        manifest = json.loads(package.read("manifest.json").decode("utf-8"))
+        assert manifest["voices"][0]["voice_id"] == "voice-export"
+        assert manifest["voices"][0]["exported_audio_file"] == "voice-profiles/voice-export.wav"
 
 def test_v0_11_generated_voice_content_is_deterministic_substitute():
     """覆盖生成音色内容的确定性替身边界。"""
@@ -540,6 +587,80 @@ def test_segmentation_schema_text_conservation_and_unknown_role_review():
     assert broken.error_code == "text_conservation_failed"
     assert broken.raw_output == broken_raw
 
+
+
+def test_v0_54_segmentation_filters_decorative_separator_utterances():
+    """Pure separator lines such as em dashes and ellipses are not dubbing lines."""
+    paragraph = "————\n“你好。”\n……"
+    raw = json.dumps(
+        {
+            "paragraph_id": "p-0001",
+            "utterances": [
+                {
+                    "utterance_id": "p-0001-u-001",
+                    "speaker_name": "旁白",
+                    "speaker_role_id": "narrator",
+                    "voice_mode": "voice_cloning",
+                    "text": "————",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.9,
+                    "needs_human_review": False,
+                },
+                {
+                    "utterance_id": "p-0001-u-002",
+                    "speaker_name": "林清",
+                    "speaker_role_id": "hero",
+                    "voice_mode": "voice_cloning",
+                    "text": "“你好。”",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.9,
+                    "needs_human_review": False,
+                },
+                {
+                    "utterance_id": "p-0001-u-003",
+                    "speaker_name": "旁白",
+                    "speaker_role_id": "narrator",
+                    "voice_mode": "voice_cloning",
+                    "text": "……",
+                    "emotion": "neutral",
+                    "speed": 1.0,
+                    "volume": 1.0,
+                    "design_prompt": None,
+                    "confidence": 0.9,
+                    "needs_human_review": False,
+                },
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    result = validate_segmentation_result(
+        paragraph_id="p-0001",
+        paragraph_text=paragraph,
+        raw_output=raw,
+        known_roles=[{"role_id": "narrator", "name": "旁白"}, {"role_id": "hero", "name": "林清"}],
+    )
+
+    assert result.ok is True
+    assert [item["text"] for item in result.utterances] == ["“你好。”"]
+
+
+def test_v0_54_whole_paragraph_drafts_strip_decorative_separator_lines():
+    from backend.app.domain.dubbing_workflow import create_whole_paragraph_utterance_drafts
+    from backend.app.domain.novel import ParagraphModule
+
+    drafts = create_whole_paragraph_utterance_drafts(
+        [ParagraphModule(paragraph_id="p-0001", text="————\n旁白正文。\n……", confirmed=True)]
+    )
+
+    assert len(drafts) == 1
+    assert drafts[0]["text"] == "旁白正文。"
 
 def test_segmentation_allows_one_json_repair_attempt_only():
     """Covers AC-LLM-02 and AC-LLM-05."""
@@ -1941,6 +2062,125 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
     assert data["duration_seconds"] == 0.75
     assert calls[0]["request"]["input"] == "待合成文本"
 
+
+
+def test_fastapi_v0_54_batch_tts_keeps_successes_when_one_line_fails(tmp_path):
+    """v0.5.4: one failed utterance must not poison the whole batch."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    calls: list[str] = []
+
+    def fake_synthesize(request, *, output_path, service_base_url=None):
+        calls.append(request["input"])
+        if "过长" in request["input"]:
+            raise TTSTextLimitError("当前台词文本长度 150 字，请手动缩短文本或拆成多条音频生成。")
+        write_valid_wav(output_path)
+        return 0.75
+
+    with (
+        patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path),
+        patch.object(app_module, "synthesize_local_qwen3", fake_synthesize),
+    ):
+        client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+        reference_audio = tmp_path / "narrator-reference.wav"
+        write_valid_wav(reference_audio)
+        _post_test_role(client, reference_audio_path=reference_audio)
+        response = client.post(
+            "/api/v1/dubbing-jobs/chapter-0001",
+            json={
+                "utterances_by_paragraph": {
+                    "p-0001": [
+                        {
+                            "utterance_id": "p-0001-u-001",
+                            "paragraph_id": "p-0001",
+                            "text": "这条过长，需要拆分。",
+                            "speaker_name": "旁白",
+                            "speaker_role_id": "narrator",
+                            "needs_human_review": False,
+                        },
+                        {
+                            "utterance_id": "p-0001-u-002",
+                            "paragraph_id": "p-0001",
+                            "text": "这条正常。",
+                            "speaker_name": "旁白",
+                            "speaker_role_id": "narrator",
+                            "needs_human_review": False,
+                        },
+                    ]
+                }
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed_with_errors"
+    assert payload["success_count"] == 1
+    assert payload["failed_count"] == 1
+    failed, succeeded = payload["utterances_by_paragraph"]["p-0001"]
+    assert failed["audio_status"] == "failed"
+    assert "拆成多条音频生成" in failed["audio_error"]
+    assert succeeded["audio_status"] == "success"
+    assert succeeded["audio_path"].endswith("p-0001-u-002.wav")
+    assert calls == ["这条过长，需要拆分。", "这条正常。"]
+
+
+def test_fastapi_v0_54_single_tts_requests_are_serialized(tmp_path):
+    """v0.5.4: concurrent manual clicks enter the backend TTS queue in order."""
+    pytest.importorskip("fastapi")
+    httpx = pytest.importorskip("httpx")
+
+    from backend.app.api import app as app_module
+    from backend.app.api.app import create_app
+
+    reference_audio = tmp_path / "reference.wav"
+    write_valid_wav(reference_audio)
+    active = 0
+    max_active = 0
+    calls: list[str] = []
+    lock = threading.Lock()
+
+    def slow_synthesize(request, *, output_path, service_base_url=None):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            calls.append(request["input"])
+        time.sleep(0.05)
+        write_valid_wav(output_path)
+        with lock:
+            active -= 1
+        return 0.75
+
+    async def scenario():
+        with (
+            patch.object(app_module, "OUTPUT_AUDIO_DIR", tmp_path / "audio"),
+            patch.object(app_module, "synthesize_local_qwen3", slow_synthesize),
+        ):
+            app = create_app()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                await _apost_test_role(client, reference_audio_path=reference_audio)
+                responses = await asyncio.gather(
+                    client.post(
+                        "/api/v1/dubbing-segments/p-0001-u-001/dubbing-jobs",
+                        json={"role_id": "narrator", "text": "第一条", "voice_mode": "voice_cloning"},
+                    ),
+                    client.post(
+                        "/api/v1/dubbing-segments/p-0001-u-002/dubbing-jobs",
+                        json={"role_id": "narrator", "text": "第二条", "voice_mode": "voice_cloning"},
+                    ),
+                )
+                return responses
+
+    responses = asyncio.run(scenario())
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert max_active == 1
+    assert calls == ["第一条", "第二条"]
 
 def test_fastapi_v0_21_speech_synthesis_does_not_block_voice_resource_reads(tmp_path):
     """Covers v0.21: one running TTS job must not block already playable resources."""

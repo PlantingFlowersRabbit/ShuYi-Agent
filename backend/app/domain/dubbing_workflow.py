@@ -10,7 +10,12 @@ from typing import Any, TypedDict
 from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangChainSegmentationSkill
 from backend.app.domain.llm import ApiKeyLookup, MissingProviderCredential
 from backend.app.domain.roles import RoleCard, RoleCollection
-from backend.app.domain.segmentation import SegmentationValidationResult, repair_json_output_once
+from backend.app.domain.segmentation import (
+    SegmentationValidationResult,
+    is_decorative_separator_text,
+    repair_json_output_once,
+    strip_decorative_separators,
+)
 from backend.app.domain.voices import (
     VoiceResource,
     VoiceResourceCollection,
@@ -123,7 +128,7 @@ def create_whole_paragraph_utterance_drafts(paragraphs: list[Any]) -> list[dict[
     drafts: list[dict[str, Any]] = []
     for paragraph in paragraphs:
         paragraph_id = _get_text_field(paragraph, "paragraph_id", "paragraphId")
-        text = _get_text_field(paragraph, "text")
+        text = strip_decorative_separators(_get_text_field(paragraph, "text")).strip()
         if not paragraph_id or not text:
             continue
         drafts.append(
@@ -1611,7 +1616,8 @@ def _pending_role_statements(
     for paragraph_id, utterances in utterances_by_paragraph.items():
         paragraph = paragraph_by_id.get(paragraph_id, {})
         for order, utterance in enumerate(utterances, start=1):
-            if _has_role(utterance) or not str(utterance.get("text") or "").strip():
+            text = str(utterance.get("text") or "").strip()
+            if _has_role(utterance) or not text or is_decorative_separator_text(text):
                 continue
             statements.append(
                 {
@@ -1621,7 +1627,7 @@ def _pending_role_statements(
                     "paragraph_id": paragraph_id,
                     "paragraph_order": _first_number(paragraph_id),
                     "statement_order": order,
-                    "text": str(utterance.get("text") or ""),
+                    "text": text,
                     "context": str(paragraph.get("text") or ""),
                     "_utterance": utterance,
                 }

@@ -20,6 +20,7 @@ REQUIRED_UTTERANCE_FIELDS = {
     "needs_human_review",
 }
 VOICE_MODES = {"voice_cloning", "voice_design"}
+DECORATIVE_SEPARATOR_RE = re.compile(r"^[\s\-—–－―…\.·・~～*＊_＿=＝—]+$")
 
 
 @dataclass
@@ -34,7 +35,7 @@ class SegmentationValidationResult:
 
 
 def normalize_text_for_conservation(text: str) -> str:
-    normalized = text
+    normalized = strip_decorative_separators(text)
     replacements = {
         "“": '"',
         "”": '"',
@@ -48,6 +49,22 @@ def normalize_text_for_conservation(text: str) -> str:
     for source, target in replacements.items():
         normalized = normalized.replace(source, target)
     return re.sub(r"\s+", "", normalized)
+
+
+def is_decorative_separator_text(text: str) -> bool:
+    stripped = re.sub(r"\s+", "", text)
+    if len(stripped) < 2:
+        return False
+    return bool(DECORATIVE_SEPARATOR_RE.fullmatch(stripped))
+
+
+def strip_decorative_separators(text: str) -> str:
+    kept_lines = [
+        line
+        for line in text.splitlines()
+        if not is_decorative_separator_text(line)
+    ]
+    return "\n".join(kept_lines)
 
 
 def _parse_json_once(raw_output: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -184,7 +201,18 @@ def validate_segmentation_result(
             else:
                 item["speaker_role_id"] = None
                 item["needs_human_review"] = True
-        normalized_utterances.append(item)
+        if not is_decorative_separator_text(str(item.get("text") or "")):
+            normalized_utterances.append(item)
+
+    if not normalized_utterances:
+        return SegmentationValidationResult(
+            ok=False,
+            paragraph_id=paragraph_id,
+            raw_output=raw_output,
+            error_code="invalid_schema",
+            error="utterances must include at least one non-decorative text item",
+            repaired=repaired,
+        )
 
     original = normalize_text_for_conservation(paragraph_text)
     generated = normalize_text_for_conservation(

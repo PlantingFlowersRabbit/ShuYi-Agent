@@ -1,5 +1,5 @@
 export const APP_BRAND = "书弈 Agent";
-export const APP_VERSION = "0.5.2";
+export const APP_VERSION = "0.5.4";
 
 type RuntimeEnv = {
   BASE_URL?: string;

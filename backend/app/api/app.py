@@ -35,7 +35,6 @@ from backend.app.domain.audio import (
     export_chapter_audio,
     generate_chapter_audio_batch,
     synthesize_local_qwen3,
-    synthesize_local_qwen3_batch,
     synthesize_voice_design_qwen3,
 )
 from backend.app.domain.dubbing_workflow import (
@@ -77,7 +76,7 @@ REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.5.2"
+SERVICE_VERSION = "0.5.4"
 PUBLIC_BROWSER_CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "*",
@@ -615,6 +614,7 @@ def create_app() -> FastAPI:
     app.state.text_model_api_key = ""
     app.state.tts_deployment_lock = threading.Lock()
     app.state.tts_deployment = _idle_tts_deployment_status(_default_model_config()["tts"])
+    app.state.tts_synthesis_lock = threading.Lock()
 
     @app.middleware("http")
     async def versioned_api_boundary(request: Request, call_next):
@@ -1221,6 +1221,49 @@ def create_app() -> FastAPI:
             "model_requirement": model_requirement,
         }
 
+    @app.post("/api/v1/voice-profiles/export")
+    async def export_voice_resources() -> dict[str, Any]:
+        export_dir = OUTPUT_EXPORT_DIR / f"voice-library-{int(time.time())}"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        media_dir = export_dir / "voice-profiles"
+        media_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest: dict[str, Any] = {
+            "service": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+            "exported_at": time.time(),
+            "voices": [],
+        }
+        copied_count = 0
+        for voice in _state(app)["voices"].list():
+            item = voice.to_dict()
+            audio_path = _resolve_audio_path(str(voice.reference_audio_path or ""))
+            if audio_path.is_file() and _is_allowed_audio_path(audio_path):
+                filename = _safe_audio_filename(f"{voice.voice_id}{audio_path.suffix}")
+                target = media_dir / filename
+                shutil.copy2(audio_path, target)
+                item["exported_audio_file"] = f"voice-profiles/{filename}"
+                copied_count += 1
+            else:
+                item["exported_audio_file"] = None
+                item["export_error"] = "参考音频不存在或不在受控目录内"
+            manifest["voices"].append(item)
+
+        (export_dir / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        archive_path = Path(
+            await asyncio.to_thread(shutil.make_archive, str(export_dir), "zip", export_dir)
+        )
+        return {
+            "status": "completed",
+            "voice_count": len(manifest["voices"]),
+            "audio_count": copied_count,
+            "download_url": f"/api/v1/downloads/exports/{archive_path.name}",
+            "message": f"音色库导出完成：{len(manifest['voices'])} 个音色，{copied_count} 个音频资源。",
+        }
+
     @app.patch("/api/v1/voice-profiles/{voice_id}")
     async def update_voice_resource(voice_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         voices = _state(app)["voices"]
@@ -1577,10 +1620,10 @@ def create_app() -> FastAPI:
         )
         try:
             duration_seconds = await asyncio.to_thread(
-                synthesize_local_qwen3,
+                _synthesize_local_qwen3_serialized,
+                app,
                 request,
-                output_path=output_path,
-                service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
+                output_path,
             )
         except TTSTextLimitError as exc:
             error_job = VoiceJob(
@@ -1593,6 +1636,17 @@ def create_app() -> FastAPI:
             _state(app)["voice_jobs"][job_id] = error_job
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except TTSServiceError as exc:
+            if not _should_return_substitute_tts_audio(exc):
+                message = _single_utterance_tts_error_message(exc)
+                error_job = VoiceJob(
+                    **{
+                        **job.to_dict(),
+                        "status": "failed",
+                        "error": message,
+                    }
+                )
+                _state(app)["voice_jobs"][job_id] = error_job
+                raise HTTPException(status_code=422, detail=message) from exc
             duration_seconds = _write_substitute_wav(output_path)
             substitute_job = VoiceJob(
                 **{
@@ -1628,26 +1682,39 @@ def create_app() -> FastAPI:
                 output_dir / _safe_audio_filename(f"{statement_id}.wav")
                 for statement_id in request["statement_ids"]
             ]
-            try:
-                return synthesize_local_qwen3_batch(
-                    request,
-                    output_paths=output_paths,
-                    service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
-                )
-            except TTSServiceError:
-                results: list[dict[str, Any]] = []
-                for statement_id, output_path in zip(request["statement_ids"], output_paths):
-                    duration = _write_substitute_wav(output_path)
+            results: list[dict[str, Any]] = []
+            languages = list(request.get("languages") or [])
+            for index, (statement_id, text, output_path) in enumerate(
+                zip(request["statement_ids"], request["texts"], output_paths, strict=True)
+            ):
+                line_request = {
+                    "input": text,
+                    "audio_sample_path": request.get("reference_audio_path"),
+                    "ref_text": request.get("reference_text") or "",
+                    "language": languages[index] if index < len(languages) else "Auto",
+                    "response_format": "wav",
+                    "x_vector_only": bool(request.get("x_vector_only", False)),
+                }
+                try:
+                    duration = _synthesize_local_qwen3_serialized(app, line_request, output_path)
+                except (TTSTextLimitError, TTSServiceError, ValueError, RuntimeError, OSError) as exc:
                     results.append(
                         {
                             "statement_id": statement_id,
-                            "audio_path": str(output_path),
-                            "audio_duration": duration,
-                            "provider": "local-qwen3-tts-substitute",
-                            "model": "deterministic-substitute",
+                            "error": _single_utterance_tts_error_message(exc),
                         }
                     )
-                return results
+                    continue
+                results.append(
+                    {
+                        "statement_id": statement_id,
+                        "audio_path": str(output_path),
+                        "audio_duration": duration,
+                        "provider": "local-qwen3-tts",
+                        "model": "Qwen3-TTS",
+                    }
+                )
+            return results
 
         report = await asyncio.to_thread(
             generate_chapter_audio_batch,
@@ -1862,6 +1929,43 @@ def _write_substitute_wav(
         wav_file.setframerate(sample_rate)
         wav_file.writeframes(b"\x00\x00" * frame_count)
     return duration_seconds
+
+
+def _synthesize_local_qwen3_serialized(
+    app: FastAPI,
+    request: dict[str, Any],
+    output_path: Path,
+) -> float:
+    with app.state.tts_synthesis_lock:
+        return synthesize_local_qwen3(
+            request,
+            output_path=output_path,
+            service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
+        )
+
+
+def _should_return_substitute_tts_audio(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "connection refused",
+            "connection reset",
+            "failed to establish",
+            "name or service not known",
+            "no route to host",
+            "本地 qwen3-tts 不可用",
+            "不启动 tts",
+        )
+    )
+
+
+def _single_utterance_tts_error_message(exc: Exception) -> str:
+    message = str(exc)
+    if isinstance(exc, TTSTextLimitError):
+        return message
+    suffix = "这条台词生成失败，请拆分台词生成后重试。"
+    return message if suffix in message else f"{message}；{suffix}"
 
 
 def _find_workbench_for_paragraph(app: FastAPI, paragraph_id: str) -> ChapterWorkbench:

@@ -312,6 +312,14 @@ small {
   flex-wrap: wrap;
 }
 
+.toolbar-row.compact {
+  justify-content: flex-end;
+}
+
+.toolbar-row.compact .tool-button {
+  padding: 6px 10px;
+}
+
 .tool-button,
 .icon-button,
 .paragraph-toolbar button {
@@ -653,6 +661,11 @@ small {
   border-radius: 8px;
   background: #ffffff;
   padding: 10px;
+}
+
+.utterance-card.attention {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
 }
 
 .utterance-card .utterance-wide,
