@@ -138,7 +138,7 @@ v0.7.0 将项目从“生成片段”推进到“可交付制作包”。项目�
 
 制作包包含逐句音频、`manifest.json`、完整 `chapter_full.wav`，并在请求 `export_formats=["wav","mp3"]` 时尝试通过 ffmpeg 生成 `chapter_full.mp3`；若本机缺少 ffmpeg，manifest 会记录 `mp3_error`，WAV 和其他交付物仍可使用。包内还会生成 `script.csv`、`subtitles.srt`、`subtitles.lrc`、`roles.csv`、`voices.csv` 和 `failures.csv`，便于交付给剪辑、审稿和后期流程。
 
-音频后期参数随 manifest 记录：`pause_ms` 控制片段间停顿，`trim_silence` 对 16-bit WAV 做头尾静音裁剪，`normalize_audio` 按目标峰值做简单响度归一化。前端整章播放列表支持播放、暂停、继续、上一句、下一句，并继续高亮当前播放台词。这个阶段的面试讲解重点是：如何把 Agent 输出变成可交付资产、如何管理后端文件生成/下载、以及如何用项目路径隔离导出包。
+音频后期参数随 manifest 记录：`pause_ms` 控制片段间停顿，`trim_silence` 对 16-bit WAV 做头尾静音裁剪，`normalize_audio` 按目标峰值做简单响度归一化。前端整章播放列表支持播放、暂停、继续、上一句、下一句，并继续高亮当前播放台词。
 
 ## 长句拆分与台词编辑增强
 
@@ -146,7 +146,7 @@ v0.6.6 聚焦 TTS 文本长度限制和失败恢复。`/utterances/long-text/det
 
 拆分结果必须通过文本守恒：后端返回 `text_conservation.matches`、原文长度、拼接长度和段数；不改写、不丢字、不调整顺序。`/utterances/merge` 可把同一段内连续台词合回首个 ID，`/utterances/bulk-role` 支持审稿队列批量改角色，`/utterances/retry-queue` 会清空失败原因并准备重新配音。
 
-前端审稿队列新增 **批量拆分超长台词**，台词工具栏新增 **一键拆分长台词** 和 **合并相邻台词**。拆分成功后，前端会把返回的新片段加入配音重试队列；批量重试会先调用 retry-queue API，再按现有配音队列顺序生成音频。这个阶段的面试讲解重点是：模型/规则边界、TTS 限制恢复、文本守恒校验、稳定 ID 和失败后可恢复工作流。
+前端审稿队列新增 **批量拆分超长台词**，台词工具栏新增 **一键拆分长台词** 和 **合并相邻台词**。拆分成功后，前端会把返回的新片段加入配音重试队列；批量重试会先调用 retry-queue API，再按现有配音队列顺序生成音频。
 
 ## 制作任务 Planner
 
@@ -154,7 +154,7 @@ v0.6.5 新增制作任务 Planner，把“把当前章节处理到可导出”�
 
 Planner run 会写入 SQLite `planner_runs`，同时同步到 `agent_runs` checkpoint、短期 Run Memory 和 `planner_step_*` events。`POST /planner/execute` 支持从已保存 `run_id` 继续执行，也支持 `max_steps` 做分批执行；工具失败后状态转为 `waiting_for_user`，并返回 `recovery_suggestions`。`POST /planner/review` 会输出 remaining issues、是否需要人工介入，以及“修正输入后从失败步骤继续”的恢复建议。
 
-前端主页面侧栏新增 **制作任务 Planner** 面板，默认目标为“把当前章节处理到可导出”，支持生成计划、执行计划和复盘计划，并展示每一步的状态、工具名、失败原因与恢复建议。这个阶段的面试讲解重点是：目标拆解、受控工具执行、暂停/继续、失败恢复、Reviewer 复盘和 Human-in-the-loop。
+前端主页面侧栏新增 **制作任务 Planner** 面板，默认目标为“把当前章节处理到可导出”，支持生成计划、执行计划和复盘计划，并展示每一步的状态、工具名、失败原因与恢复建议。
 
 ## 短期与长期记忆机制
 
@@ -209,8 +209,6 @@ v0.6.1 将一次性上传流程升级为可恢复的项目工作区雏形。后�
 - 质量检查汇总当前章节/整本书生产阻塞项：未划分、未选角色、未配音、配音失败、超长台词、重复音色、角色无音色和 `needs_human_review`。
 - 生成前检查重点判断是否可以继续批量配音；导出前检查要求配音、角色、音色和人工复核项全部清理。
 - 审稿队列集中展示需要 Human-in-the-loop 的台词与失败项，并提供跳转、批量确认、批量改角色和批量重试入口。
-
-这个阶段的面试讲解重点是：为什么需要 `project_id` 隔离、GitHub Pages 多人访问时如何避免数据串线、以及如何把模型低置信度/失败状态产品化为可审核工作流。
 
 ## Agent 追踪与上下文报告
 

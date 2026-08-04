@@ -50,3 +50,4 @@ outputs/**/*
 
 # Local Codex agent operating notes; do not publish.
 AGENT_REMOTE_SYNC.md
+LOCAL_AGENT_QA.md
