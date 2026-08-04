@@ -57,6 +57,15 @@ from backend.app.domain.dubbing_workflow import (
     create_whole_paragraph_utterance_drafts,
 )
 from backend.app.domain.llm import MissingProviderCredential
+from backend.app.domain.long_text_splitter import (
+    bulk_update_role,
+    detect_long_utterances,
+    merge_utterance_groups,
+    prepare_retry_queue,
+    split_long_utterance_groups,
+    split_text_for_tts,
+    text_conservation_report,
+)
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
 from backend.app.domain.novel_files import NovelFileError, extract_novel_file
 from backend.app.domain.production_planner import (
@@ -127,7 +136,7 @@ REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.6.5"
+SERVICE_VERSION = "0.6.6"
 PUBLIC_BROWSER_CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "*",
@@ -1011,6 +1020,79 @@ def create_app() -> FastAPI:
             quality_report=report,
             filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else {},
         )
+
+    @app.post("/api/v1/projects/{project_id}/utterances/long-text/detect")
+    async def detect_project_long_utterances(
+        project_id: str, payload: dict[str, Any] | None = None
+    ):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        max_chars = int(payload.get("max_utterance_chars") or payload.get("max_chars") or 120)
+        items = detect_long_utterances(
+            _utterances_by_paragraph_from_payload(payload),
+            max_chars=max_chars,
+        )
+        return {"project_id": safe_id, "items": items, "total_count": len(items)}
+
+    @app.post("/api/v1/projects/{project_id}/utterances/{utterance_id}/split-long-text")
+    async def split_project_long_utterance(
+        project_id: str,
+        utterance_id: str,
+        payload: dict[str, Any] | None = None,
+    ):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        try:
+            result = split_long_utterance_groups(
+                _utterances_by_paragraph_from_payload(payload),
+                utterance_id=utterance_id,
+                max_chars=int(payload.get("max_utterance_chars") or payload.get("max_chars") or 120),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"project_id": safe_id, **result}
+
+    @app.post("/api/v1/projects/{project_id}/utterances/merge")
+    async def merge_project_utterances(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        try:
+            result = merge_utterance_groups(
+                _utterances_by_paragraph_from_payload(payload),
+                paragraph_id=str(payload.get("paragraph_id") or ""),
+                utterance_ids=[str(item) for item in payload.get("utterance_ids") or []],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"project_id": safe_id, **result}
+
+    @app.post("/api/v1/projects/{project_id}/utterances/bulk-role")
+    async def bulk_update_project_utterance_role(
+        project_id: str, payload: dict[str, Any] | None = None
+    ):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        result = bulk_update_role(
+            _utterances_by_paragraph_from_payload(payload),
+            utterance_ids=[str(item) for item in payload.get("utterance_ids") or []],
+            role_id=str(payload.get("role_id") or ""),
+            speaker_name=str(payload.get("speaker_name") or ""),
+        )
+        return {"project_id": safe_id, **result}
+
+    @app.post("/api/v1/projects/{project_id}/utterances/retry-queue")
+    async def prepare_project_utterance_retry_queue(
+        project_id: str, payload: dict[str, Any] | None = None
+    ):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        result = prepare_retry_queue(
+            _utterances_by_paragraph_from_payload(payload),
+            utterance_ids=[str(item) for item in payload.get("utterance_ids") or []]
+            if isinstance(payload.get("utterance_ids"), list)
+            else None,
+        )
+        return {"project_id": safe_id, **result}
 
     @app.post("/api/v1/projects/{project_id}/memory/index")
     async def index_project_memory(project_id: str, payload: dict[str, Any] | None = None):
@@ -2878,53 +2960,18 @@ def _tool_is_audio_failed(utterance: dict[str, Any]) -> bool:
 def _tool_suggest_long_text_split(arguments: dict[str, Any]) -> dict[str, Any]:
     text = str(arguments.get("text") or "")
     max_chars = max(1, int(arguments.get("max_chars") or 120))
-    segments = _suggest_text_segments(text, max_chars=max_chars)
+    segments = split_text_for_tts(text, max_chars=max_chars)
     return {
         "segments": segments,
         "segment_count": len(segments),
-        "text_conservation": _text_conservation_report(text, segments),
+        "text_conservation": text_conservation_report(text, segments),
     }
-
-
-def _suggest_text_segments(text: str, *, max_chars: int) -> list[str]:
-    if len(text) <= max_chars:
-        return [text] if text else []
-    parts = re.findall(r".+?[。！？!?；;，,、]|.+$", text)
-    segments: list[str] = []
-    current = ""
-    for part in parts:
-        if len(part) > max_chars:
-            if current:
-                segments.append(current)
-                current = ""
-            segments.extend(
-                part[index : index + max_chars] for index in range(0, len(part), max_chars)
-            )
-            continue
-        if current and len(current) + len(part) > max_chars:
-            segments.append(current)
-            current = part
-        else:
-            current += part
-    if current:
-        segments.append(current)
-    return segments
 
 
 def _tool_check_text_conservation(arguments: dict[str, Any]) -> dict[str, Any]:
     original = str(arguments.get("original_text") or "")
     segments = [str(item) for item in arguments.get("segments") or []]
-    return _text_conservation_report(original, segments)
-
-
-def _text_conservation_report(original: str, segments: list[str]) -> dict[str, Any]:
-    joined = "".join(segments)
-    return {
-        "matches": joined == original,
-        "original_length": len(original),
-        "joined_length": len(joined),
-        "segment_count": len(segments),
-    }
+    return text_conservation_report(original, segments)
 
 
 def _tool_check_tts_health(app: FastAPI, arguments: dict[str, Any]) -> dict[str, Any]:

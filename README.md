@@ -24,21 +24,22 @@ src="https://img.shields.io/badge/Code_License-MIT-f5de53?&color=f5de53"/></a>
 3. [项目结构](#项目结构)
 4. [本地开发](#本地开发)
 5. [API 与 OpenAPI](#api-与-openapi)
-6. [制作任务 Planner](#制作任务-planner)
-7. [短期与长期记忆机制](#短期与长期记忆机制)
-8. [Tool Calling Registry](#tool-calling-registry)
-9. [Story Bible RAG 与 Qdrant](#story-bible-rag-与-qdrant)
-10. [项目工作区与审稿队列](#项目工作区与审稿队列)
-11. [Agent 追踪与上下文报告](#agent-追踪与上下文报告)
-12. [Docker CPU / GPU](#docker-cpu--gpu)
-13. [环境变量](#环境变量)
-14. [GitHub Pages](#github-pages)
-15. [CNB 镜像发布模板](#cnb-镜像发布模板)
-16. [验证](#验证)
+6. [长句拆分与台词编辑增强](#长句拆分与台词编辑增强)
+7. [制作任务 Planner](#制作任务-planner)
+8. [短期与长期记忆机制](#短期与长期记忆机制)
+9. [Tool Calling Registry](#tool-calling-registry)
+10. [Story Bible RAG 与 Qdrant](#story-bible-rag-与-qdrant)
+11. [项目工作区与审稿队列](#项目工作区与审稿队列)
+12. [Agent 追踪与上下文报告](#agent-追踪与上下文报告)
+13. [Docker CPU / GPU](#docker-cpu--gpu)
+14. [环境变量](#环境变量)
+15. [GitHub Pages](#github-pages)
+16. [CNB 镜像发布模板](#cnb-镜像发布模板)
+17. [验证](#验证)
 
 ## 简介
 
-书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.6.5 新增制作任务 Planner，可把“把当前章节处理到可导出”拆成可执行、可复盘、可恢复的工具计划；v0.6.4 新增短期 Run Memory、长期 Story Memory 可信度策略和错误记忆防污染；v0.6.3 新增 Tool Calling Registry、声明式工具 schema、JSON-plan fallback、项目级权限隔离和 Trace Viewer 工具调用审计；v0.6.2 新增 Story Bible RAG、OpenAI-compatible embedding、可选 Qdrant 向量库、SQLite 文本检索降级和带来源引用的角色证据；v0.6.1 增加项目/书籍工作区、按 `project_id` 隔离的输出路径、生成前/导出前质量检查和审稿队列；v0.6.0 已加入 Agent Run History、Prompt SHA、token/context 预算报告和可审计追踪详情。项目同时保留 v0.5.5 的公开 v1 API、前端一键后台下载并部署 TTS 模型、OpenAI SDK 兼容文本模型配置，以及“运行时不会生成或执行模型返回 Python 代码”的安全边界。
+书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.6.6 新增长句拆分与台词编辑增强，可检测 TTS 超长台词、按标点/窗口规则拆分并校验文本守恒，拆分后自动进入配音重试队列；v0.6.5 新增制作任务 Planner，可把“把当前章节处理到可导出”拆成可执行、可复盘、可恢复的工具计划；v0.6.4 新增短期 Run Memory、长期 Story Memory 可信度策略和错误记忆防污染；v0.6.3 新增 Tool Calling Registry、声明式工具 schema、JSON-plan fallback、项目级权限隔离和 Trace Viewer 工具调用审计；v0.6.2 新增 Story Bible RAG、OpenAI-compatible embedding、可选 Qdrant 向量库、SQLite 文本检索降级和带来源引用的角色证据；v0.6.1 增加项目/书籍工作区、按 `project_id` 隔离的输出路径、生成前/导出前质量检查和审稿队列；v0.6.0 已加入 Agent Run History、Prompt SHA、token/context 预算报告和可审计追踪详情。项目同时保留 v0.5.5 的公开 v1 API、前端一键后台下载并部署 TTS 模型、OpenAI SDK 兼容文本模型配置，以及“运行时不会生成或执行模型返回 Python 代码”的安全边界。
 
 ## 快速开始
 
@@ -112,6 +113,7 @@ npm --prefix frontend run dev
 - 项目工作区：`GET /api/v1/projects`、`POST /api/v1/projects`、`GET /api/v1/projects/{project_id}`、`DELETE /api/v1/projects/{project_id}`
 - 质量检查：`POST /api/v1/projects/{project_id}/quality-check`
 - 审稿队列：`POST /api/v1/projects/{project_id}/review-queue`
+- 台词编辑：`POST /api/v1/projects/{project_id}/utterances/long-text/detect`、`POST /utterances/{utterance_id}/split-long-text`、`POST /utterances/merge`、`POST /utterances/bulk-role`、`POST /utterances/retry-queue`
 - Story Memory 索引：`POST /api/v1/projects/{project_id}/memory/index`
 - Story Memory 检索：`POST /api/v1/projects/{project_id}/memory/search`
 - Story Bible 事实：`GET /api/v1/projects/{project_id}/story-bible`
@@ -127,6 +129,14 @@ npm --prefix frontend run dev
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 - Swagger UI：`http://127.0.0.1:8000/docs`
 - v1 接口默认公开访问，不再需要后端访问令牌；文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
+
+## 长句拆分与台词编辑增强
+
+v0.6.6 聚焦 TTS 文本长度限制和失败恢复。`/utterances/long-text/detect` 会基于当前项目台词 payload 找出超过 `max_utterance_chars` 的台词；`/utterances/{utterance_id}/split-long-text` 先按中文/英文标点、引号附近停顿和固定窗口做规则拆分，保留首个 `utterance_id`，新增片段使用 `-s002` 这类稳定后缀，所有片段都会清空旧音频字段并标记为 `pending_retry`。
+
+拆分结果必须通过文本守恒：后端返回 `text_conservation.matches`、原文长度、拼接长度和段数；不改写、不丢字、不调整顺序。`/utterances/merge` 可把同一段内连续台词合回首个 ID，`/utterances/bulk-role` 支持审稿队列批量改角色，`/utterances/retry-queue` 会清空失败原因并准备重新配音。
+
+前端审稿队列新增 **批量拆分超长台词**，台词工具栏新增 **一键拆分长台词** 和 **合并相邻台词**。拆分成功后，前端会把返回的新片段加入配音重试队列；批量重试会先调用 retry-queue API，再按现有配音队列顺序生成音频。这个阶段的面试讲解重点是：模型/规则边界、TTS 限制恢复、文本守恒校验、稳定 ID 和失败后可恢复工作流。
 
 ## 制作任务 Planner
 

@@ -46,7 +46,7 @@ class AgentRegistry:
                 AgentDefinition(
                     agent_id=agent_id,
                     display_name=display_name,
-                    release_version="0.6.5",
+                    release_version="0.6.6",
                     prompt_id=agent_id,
                     prompt_version=prompt_version,
                     prompt_text=prompt_text,

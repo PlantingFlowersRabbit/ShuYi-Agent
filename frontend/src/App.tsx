@@ -450,6 +450,19 @@ type PlannerRunResponse = {
   };
 };
 
+type UtteranceEditResponse = {
+  project_id: string;
+  utterances_by_paragraph: Record<string, ApiUtterance[]>;
+  retry_items?: { paragraph_id: string; utterance_id: string }[];
+  updated_count?: number;
+  split_report?: {
+    source_utterance_id?: string;
+    paragraph_id?: string;
+    segment_count?: number;
+  };
+  merge_report?: { target_utterance_id?: string };
+};
+
 type ProjectQualityPayload = {
   chapters: {
     chapter_id: string;
@@ -1286,6 +1299,30 @@ function mergeApiAudioByUtteranceId(
   return merged;
 }
 
+function fromApiUtteranceEditGroups(
+  groups: Record<string, ApiUtterance[]>,
+  paragraphs: ParagraphModule[],
+  roles: RoleCard[],
+): Record<string, UtteranceDraft[]> {
+  return apiUtterancesToGroups(groups, paragraphs, roles);
+}
+
+function splitRetryUtterances(
+  groups: Record<string, UtteranceDraft[]>,
+  sourceUtteranceId: string,
+  paragraphId?: string,
+): UtteranceDraft[] {
+  const candidates = paragraphId
+    ? groups[paragraphId] ?? []
+    : Object.values(groups).flat();
+  const splitPrefix = `${sourceUtteranceId}-s`;
+  return candidates.filter(
+    (utterance) =>
+      utterance.utteranceId === sourceUtteranceId ||
+      utterance.utteranceId.startsWith(splitPrefix),
+  );
+}
+
 function normalizeModelConfig(
   config: Partial<ModelConfig> & {
     llm?: Partial<ModelConfig["text_model"]>;
@@ -1925,46 +1962,127 @@ function App() {
     );
   }
 
-  function bulkChangeReviewRole() {
+  async function bulkChangeReviewRole() {
     const fallbackRole = roles.find((role) => role.voiceResourceId) ?? roles[0];
     if (!fallbackRole) {
       setQualityStatus("批量改角色失败：请先创建角色");
       return;
     }
-    const reviewIds = new Set(
-      reviewQueue.items
-        .filter(
-          (item) =>
-            item.issue_type === "unselected_role" ||
-            item.actions?.includes("change_role"),
-        )
-        .map((item) => item.utterance_id)
-        .filter(Boolean),
-    );
-    setUtterancesByParagraph((current) =>
-      Object.fromEntries(
-        Object.entries(current).map(([paragraphId, utterances]) => [
-          paragraphId,
-          utterances.map((utterance) =>
-            reviewIds.has(utterance.utteranceId)
-              ? {
-                  ...utterance,
-                  roleId: fallbackRole.roleId,
-                  speakerName: fallbackRole.name,
-                  needsHumanReview: false,
-                  audioStatus: "已批量改角色，待重新生成配音",
-                }
-              : utterance,
-          ),
-        ]),
+    const reviewIds = [
+      ...new Set(
+        reviewQueue.items
+          .filter(
+            (item) =>
+              item.issue_type === "unselected_role" ||
+              item.actions?.includes("change_role"),
+          )
+          .flatMap((item) => (item.utterance_id ? [item.utterance_id] : [])),
       ),
-    );
-    setQualityStatus(
-      `批量改角色完成：${reviewIds.size} 条台词已绑定到 ${fallbackRole.name}`,
-    );
+    ];
+    if (reviewIds.length === 0) {
+      setQualityStatus("审稿队列没有可批量改角色的台词");
+      return;
+    }
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    try {
+      const data = await requestJson<UtteranceEditResponse>(
+        `/projects/${encodeURIComponent(projectId)}/utterances/bulk-role`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...projectQualityPayload(),
+            utterance_ids: reviewIds,
+            role_id: fallbackRole.roleId,
+            speaker_name: fallbackRole.name,
+          }),
+        },
+      );
+      setUtterancesByParagraph(
+        fromApiUtteranceEditGroups(data.utterances_by_paragraph, paragraphs, roles),
+      );
+      setConfirmed(false);
+      setQualityStatus(
+        `批量改角色完成：${data.updated_count ?? reviewIds.length} 条台词已绑定到 ${fallbackRole.name}`,
+      );
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("批量改角色失败", error));
+    }
   }
 
-  function bulkRetryDubbing() {
+  async function bulkSplitLongUtterances() {
+    const longItems = reviewQueue.items.filter(
+      (item) => item.issue_type === "long_utterance" && item.utterance_id,
+    );
+    if (longItems.length === 0) {
+      setQualityStatus("审稿队列没有可批量拆分的超长台词");
+      return;
+    }
+    let currentGroups = utterancesByParagraph;
+    const retryUtterances: UtteranceDraft[] = [];
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    try {
+      for (const item of longItems) {
+        const data = await requestJson<UtteranceEditResponse>(
+          `/projects/${encodeURIComponent(projectId)}/utterances/${encodeURIComponent(
+            item.utterance_id ?? "",
+          )}/split-long-text`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              ...projectQualityPayload(),
+              utterances_by_paragraph: utteranceGroupsToApi(currentGroups),
+            }),
+          },
+        );
+        const nextGroups = fromApiUtteranceEditGroups(
+          data.utterances_by_paragraph,
+          paragraphs,
+          roles,
+        );
+        retryUtterances.push(
+          ...splitRetryUtterances(
+            nextGroups,
+            data.split_report?.source_utterance_id ?? item.utterance_id ?? "",
+            data.split_report?.paragraph_id ?? item.paragraph_id,
+          ),
+        );
+        currentGroups = nextGroups;
+      }
+      setUtterancesByParagraph(currentGroups);
+      setConfirmed(false);
+      retryUtterances.forEach((utterance) => void generateAudio(utterance));
+      setQualityStatus(
+        `批量拆分超长台词完成：${longItems.length} 条，已加入 ${retryUtterances.length} 条配音重试队列`,
+      );
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("批量拆分超长台词失败", error));
+    }
+  }
+
+  async function prepareRetryQueue(utteranceIds: string[]): Promise<UtteranceDraft[]> {
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    const data = await requestJson<UtteranceEditResponse>(
+      `/projects/${encodeURIComponent(projectId)}/utterances/retry-queue`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          ...projectQualityPayload(),
+          utterance_ids: utteranceIds,
+        }),
+      },
+    );
+    const nextGroups = fromApiUtteranceEditGroups(
+      data.utterances_by_paragraph,
+      paragraphs,
+      roles,
+    );
+    setUtterancesByParagraph(nextGroups);
+    return Object.values(nextGroups)
+      .flat()
+      .filter((utterance) => utteranceIds.includes(utterance.utteranceId));
+  }
+
+  async function bulkRetryDubbing() {
     const retryIds = new Set(
       reviewQueue.items
         .filter(
@@ -1982,10 +2100,83 @@ function App() {
       setQualityStatus("审稿队列没有可批量重试的配音失败台词");
       return;
     }
-    retryUtterances.forEach((utterance) => void generateAudio(utterance));
-    setQualityStatus(
-      `批量重试已加入队列：${retryUtterances.length} 条配音失败台词`,
-    );
+    try {
+      const prepared = await prepareRetryQueue(
+        retryUtterances.map((utterance) => utterance.utteranceId),
+      );
+      prepared.forEach((utterance) => void generateAudio(utterance));
+      setQualityStatus(
+        `批量重试已加入队列：${prepared.length} 条配音失败台词`,
+      );
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("批量重试准备失败", error));
+    }
+  }
+
+  async function splitLongUtterance(utterance: UtteranceDraft) {
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    try {
+      const data = await requestJson<UtteranceEditResponse>(
+        `/projects/${encodeURIComponent(projectId)}/utterances/${encodeURIComponent(
+          utterance.utteranceId,
+        )}/split-long-text`,
+        {
+          method: "POST",
+          body: JSON.stringify(projectQualityPayload()),
+        },
+      );
+      const nextGroups = fromApiUtteranceEditGroups(
+        data.utterances_by_paragraph,
+        paragraphs,
+        roles,
+      );
+      setUtterancesByParagraph(nextGroups);
+      setConfirmed(false);
+      const retryUtterances = splitRetryUtterances(
+        nextGroups,
+        data.split_report?.source_utterance_id ?? utterance.utteranceId,
+        data.split_report?.paragraph_id ?? utterance.paragraphId,
+      );
+      retryUtterances.forEach((retryUtterance) => void generateAudio(retryUtterance));
+      setQualityStatus(
+        `长台词已拆分：${data.split_report?.segment_count ?? 0} 段，已加入 ${retryUtterances.length} 条配音重试队列`,
+      );
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("一键拆分长台词失败", error));
+    }
+  }
+
+  async function mergeWithNextUtterance(utterance: UtteranceDraft) {
+    const list = utterancesByParagraph[utterance.paragraphId] ?? [];
+    const index = list.findIndex((item) => item.utteranceId === utterance.utteranceId);
+    const next = index >= 0 ? list[index + 1] : undefined;
+    if (!next) {
+      setQualityStatus("合并相邻台词失败：当前台词后面没有相邻台词");
+      return;
+    }
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    try {
+      const data = await requestJson<UtteranceEditResponse>(
+        `/projects/${encodeURIComponent(projectId)}/utterances/merge`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...projectQualityPayload(),
+            paragraph_id: utterance.paragraphId,
+            utterance_ids: [utterance.utteranceId, next.utteranceId],
+          }),
+        },
+      );
+      setUtterancesByParagraph(
+        fromApiUtteranceEditGroups(data.utterances_by_paragraph, paragraphs, roles),
+      );
+      setConfirmed(false);
+      setQualityStatus(
+        `相邻台词已合并：${data.merge_report?.target_utterance_id ?? utterance.utteranceId}`,
+      );
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("合并相邻台词失败", error));
+    }
   }
 
   async function loadAgentRunHistory() {
@@ -3818,14 +4009,21 @@ function App() {
                     <button
                       className="tool-button amber"
                       type="button"
-                      onClick={() => bulkChangeReviewRole()}
+                      onClick={() => void bulkChangeReviewRole()}
                     >
                       批量改角色
                     </button>
                     <button
                       className="tool-button sky"
                       type="button"
-                      onClick={() => bulkRetryDubbing()}
+                      onClick={() => void bulkSplitLongUtterances()}
+                    >
+                      批量拆分超长台词
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => void bulkRetryDubbing()}
                     >
                       批量重试
                     </button>
@@ -4319,6 +4517,20 @@ function App() {
                               }
                             >
                               在此后添加台词
+                            </button>
+                            <button
+                              className="tool-button sky"
+                              type="button"
+                              onClick={() => void splitLongUtterance(utterance)}
+                            >
+                              一键拆分长台词
+                            </button>
+                            <button
+                              className="tool-button teal"
+                              type="button"
+                              onClick={() => void mergeWithNextUtterance(utterance)}
+                            >
+                              合并相邻台词
                             </button>
                             <button
                               type="button"

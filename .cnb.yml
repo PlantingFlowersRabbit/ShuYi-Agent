@@ -42,11 +42,11 @@ pipeline:
         test -n "$CNB_COMMIT_SHA"
 
         image_root="$CNB_DOCKER_REGISTRY/$CNB_DOCKER_REPOSITORY"
-        cpu_version="$image_root:v0.6.5-cpu"
-        cuda_version="$image_root:v0.6.5-cuda"
+        cpu_version="$image_root:v0.6.6-cpu"
+        cuda_version="$image_root:v0.6.6-cuda"
         cpu_commit="$image_root:${CNB_COMMIT_SHA}-cpu"
         cuda_commit="$image_root:${CNB_COMMIT_SHA}-cuda"
-        test_container="shuyi-v065-gpu-test"
+        test_container="shuyi-v066-gpu-test"
 
         echo "$CNB_DOCKER_PASSWORD" | docker login "$CNB_DOCKER_REGISTRY" --username "$CNB_DOCKER_USERNAME" --password-stdin
         docker build --target cpu-runtime --tag "$cpu_version" --tag "$cpu_commit" .
@@ -80,9 +80,9 @@ pipeline:
 
         docker push "$cpu_commit"
         docker push "$cuda_commit"
-        if [ "${CNB_TAG:-}" = "v0.6.5" ]; then
+        if [ "${CNB_TAG:-}" = "v0.6.6" ]; then
           docker push "$cpu_version"
           docker push "$cuda_version"
         else
-          echo "当前不是 v0.6.5 标签流水线，跳过固定版本标签推送"
+          echo "当前不是 v0.6.6 标签流水线，跳过固定版本标签推送"
         fi

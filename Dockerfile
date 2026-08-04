@@ -2,7 +2,7 @@
 
 FROM python:3.11-slim AS cpu-runtime
 
-ARG APP_VERSION=0.6.5
+ARG APP_VERSION=0.6.6
 ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG TORCH_CPU_VERSION=2.11.0+cpu
 ARG TORCHAUDIO_CPU_VERSION=2.11.0+cpu
@@ -46,7 +46,7 @@ CMD []
 
 FROM pytorch/pytorch:2.7.1-cuda12.8-cudnn9-runtime AS cuda-runtime
 
-ARG APP_VERSION=0.6.5
+ARG APP_VERSION=0.6.6
 LABEL org.opencontainers.image.title="Shuyi Agent CUDA" \
       org.opencontainers.image.version="$APP_VERSION"
 ENV DEBIAN_FRONTEND=noninteractive \

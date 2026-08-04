@@ -1,6 +1,6 @@
 [project]
 name = "shuyi-agent"
-version = "0.6.5"
+version = "0.6.6"
 description = "Shuyi Agent novel dubbing assistant."
 readme = "README.md"
 requires-python = ">=3.11"

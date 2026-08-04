@@ -1,6 +1,6 @@
 # 书弈 Agent 前端
 
-前端使用 React 19、TypeScript 和 Vite，提供小说导入、角色确认、制作任务 Planner、配音编排与结果导出工作台。
+前端使用 React 19、TypeScript 和 Vite，提供小说导入、角色确认、长句台词拆分、制作任务 Planner、配音编排与结果导出工作台。
 
 ## 本地开发
 
@@ -26,9 +26,15 @@ v0.6.1 主页面侧栏新增 **项目工作区**、**质量检查面板** 和 **
 - 项目工作区调用 `/api/v1/projects`，支持新建、打开最近项目和删除非默认项目；最近项目顺序保存在浏览器 `localStorage`。
 - 质量检查面板向 `/api/v1/projects/{project_id}/quality-check` 发送当前章节、角色、台词与配音状态，展示生成前检查和导出前检查结果。
 - 制作任务 Planner 调用 `/api/v1/projects/{project_id}/planner/plan`、`/planner/execute` 和 `/planner/review`，展示“把当前章节处理到可导出”的计划树、步骤状态、失败原因和恢复建议。
-- 审稿队列调用 `/api/v1/projects/{project_id}/review-queue`，集中处理 `needs_human_review`、未选角色、超长台词和配音失败，并提供批量确认、批量改角色和批量重试入口。
+- 审稿队列调用 `/api/v1/projects/{project_id}/review-queue`，集中处理 `needs_human_review`、未选角色、超长台词和配音失败，并提供批量确认、批量改角色、批量拆分超长台词和批量重试入口。
 
 前端只保存最近项目 id 和后端地址等 UI 偏好；项目元数据、输出目录和质量检查结果以后端为准。
+
+## 长句拆分与配音重试
+
+v0.6.6 在审稿队列工具栏新增 **批量拆分超长台词**，在每条台词工具栏新增 **一键拆分长台词** 与 **合并相邻台词**。拆分接口返回后，前端会用稳定台词 ID 找到拆出的片段，并直接加入现有 `dubbingQueueRef` 配音队列；批量重试会先调用 `/api/v1/projects/{project_id}/utterances/retry-queue`，清掉旧失败状态后再生成音频。
+
+批量改角色现在调用 `/api/v1/projects/{project_id}/utterances/bulk-role`，由后端统一更新 `speaker_role_id`、角色名和人工复核状态。前端继续只保存 UI 偏好，不把编辑后的台词状态单独持久化到浏览器。
 
 ## Story Bible RAG
 

@@ -1,6 +1,6 @@
 # 书弈 Agent 后端
 
-后端基于 FastAPI，包含小说解析、角色/音色管理、配音工作流、制作任务 Planner、短期/长期记忆、Tool Calling Registry、Story Bible RAG、SQLite 仓储、可选 Qdrant 向量库和本地 Qwen3-TTS 服务。
+后端基于 FastAPI，包含小说解析、角色/音色管理、台词长句拆分、配音失败重试、制作任务 Planner、短期/长期记忆、Tool Calling Registry、Story Bible RAG、SQLite 仓储、可选 Qdrant 向量库和本地 Qwen3-TTS 服务。
 
 ## 本地启动
 
@@ -26,6 +26,18 @@ v0.6.1 新增项目工作区和 Human-in-the-loop 质量 API：
 - `POST /api/v1/projects/{project_id}/review-queue`：从质量报告中筛出可操作审稿项，支持按 issue、章节或角色过滤。
 
 这些接口仍使用 SQLite 持久化，所有新 API 都会校验并规范化 `project_id`，避免路径穿越和项目输出串线。
+
+## 长句拆分与台词编辑
+
+v0.6.6 新增项目级台词编辑 API，用于处理 TTS 单条文本长度限制和配音失败恢复：
+
+- `POST /api/v1/projects/{project_id}/utterances/long-text/detect`：检测超过 `max_utterance_chars` 的台词，并返回段落、台词 ID、字符数和角色信息。
+- `POST /api/v1/projects/{project_id}/utterances/{utterance_id}/split-long-text`：按标点和固定窗口规则拆分长台词，保留首个 ID，新增片段使用稳定 `-s002` 后缀，并返回文本守恒报告。
+- `POST /api/v1/projects/{project_id}/utterances/merge`：只允许合并同一段内连续台词，合并后保留第一条台词 ID 并重新置为 `pending_retry`。
+- `POST /api/v1/projects/{project_id}/utterances/bulk-role`：批量更新 `speaker_role_id` / `role_id` / `speaker_name`，并把人工复核状态清掉。
+- `POST /api/v1/projects/{project_id}/utterances/retry-queue`：清空旧音频错误和音频路径，把失败台词准备为配音重试项。
+
+拆分与合并都不会改写原文，`text_conservation.matches` 必须为 true 才能作为可靠结果进入后续配音。后端目前先使用确定性规则拆分，后续可在规则无法产生合格片段时接入长句拆分 Agent，但仍必须经过同一套文本守恒校验。
 
 ## Story Bible RAG
 

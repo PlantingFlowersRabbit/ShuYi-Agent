@@ -52,7 +52,7 @@ def test_v0_5_health_probes_are_public_and_report_release(monkeypatch):
             payload = response.json()
             assert payload["status"] == "ok"
             assert payload["service"] == "shuyi-agent"
-            assert payload["version"] == "0.6.5"
+            assert payload["version"] == "0.6.6"
 
 
 def test_v0_5_connection_test_is_a_backend_api_smoke_test(monkeypatch):
@@ -64,7 +64,7 @@ def test_v0_5_connection_test_is_a_backend_api_smoke_test(monkeypatch):
     payload = response.json()
     assert payload["ok"] is True
     assert payload["service"] == "shuyi-agent"
-    assert payload["version"] == "0.6.5"
+    assert payload["version"] == "0.6.6"
     assert payload["message"] == "后端 API 连接成功"
 
 
