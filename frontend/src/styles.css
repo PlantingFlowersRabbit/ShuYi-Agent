@@ -509,6 +509,7 @@ small {
 
 .chapter-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 16px;
   align-items: flex-start;
@@ -526,6 +527,43 @@ small {
 .gate span {
   color: #64748b;
   font-size: 13px;
+}
+
+.status-filter-bar {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-filter-bar > span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.status-pill strong {
+  min-width: 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.7);
+  padding: 1px 6px;
+  text-align: center;
+}
+
+.status-pill.active {
+  border-color: currentColor;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.08);
 }
 
 .chapter-workspace-grid {
@@ -562,8 +600,177 @@ small {
   font-size: 14px;
 }
 
+.status-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.status-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-legend-item i,
+.status-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+}
+
+.reader-paragraph {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e2e8f0;
+  border-left-width: 5px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  transition: opacity 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.reader-paragraph + .reader-paragraph {
+  margin-top: 10px;
+}
+
+.reader-paragraph p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.reader-paragraph-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.reader-paragraph-meta strong {
+  color: #334155;
+}
+
+.reader-paragraph.dimmed,
+.status-map-cell.dimmed {
+  opacity: 0.34;
+}
+
+.reader-paragraph.attention {
+  box-shadow: 0 0 0 3px rgba(15, 23, 42, 0.1);
+}
+
+.reader-paragraph.unsegmented,
+.status-pill.unsegmented,
+.status-map-cell.unsegmented {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.reader-paragraph.unselected-role,
+.status-pill.unselected-role,
+.status-map-cell.unselected-role {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.reader-paragraph.undubbed,
+.status-pill.undubbed,
+.status-map-cell.undubbed {
+  background: #dbeafe;
+  color: #2563eb;
+}
+
+.reader-paragraph.dubbed,
+.status-pill.dubbed,
+.status-map-cell.dubbed {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.reader-paragraph.failed,
+.status-pill.failed,
+.status-map-cell.failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.reader-paragraph.unsegmented {
+  border-left-color: #94a3b8;
+}
+
+.status-dot.unsegmented,
+.status-legend-item.unsegmented i {
+  background-color: #94a3b8;
+}
+
+.reader-paragraph.unselected-role {
+  border-left-color: #f59e0b;
+}
+
+.status-dot.unselected-role,
+.status-legend-item.unselected-role i {
+  background-color: #f59e0b;
+}
+
+.reader-paragraph.undubbed {
+  border-left-color: #2563eb;
+}
+
+.status-dot.undubbed,
+.status-legend-item.undubbed i {
+  background-color: #2563eb;
+}
+
+.reader-paragraph.dubbed {
+  border-left-color: #16a34a;
+}
+
+.status-dot.dubbed,
+.status-legend-item.dubbed i {
+  background-color: #16a34a;
+}
+
+.reader-paragraph.failed {
+  border-left-color: #dc2626;
+}
+
+.status-dot.failed,
+.status-legend-item.failed i {
+  background-color: #dc2626;
+}
+
 .statement-panel {
   align-content: start;
+}
+
+.chapter-status-map {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(28px, 1fr));
+  gap: 4px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+}
+
+.status-map-cell {
+  min-width: 0;
+  min-height: 24px;
+  border-radius: 5px;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.status-map-cell.attention,
+.status-map-cell:focus-visible {
+  outline: 2px solid #0f172a;
+  outline-offset: 1px;
 }
 
 .statement-list {
@@ -666,6 +873,15 @@ small {
 .utterance-card.attention {
   border-color: #f59e0b;
   box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+}
+
+.utterance-card.playing {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+}
+
+.chapter-playback-audio {
+  display: none;
 }
 
 .utterance-card .utterance-wide,

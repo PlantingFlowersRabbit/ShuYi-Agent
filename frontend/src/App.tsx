@@ -50,6 +50,15 @@ export function documentParseFallbackMessage(error: unknown): string {
   return apiFailureMessage("文档解析失败，已使用本地章节索引兜底", error);
 }
 
+export function formatBatchDubbingStatus(data: BatchDubbingStatusPayload): string {
+  const groupSummary = data.groups
+    .map((group) => `${group.voice_resource_id}×${group.count}`)
+    .join("，");
+  const failureSummary =
+    data.failed_count > 0 ? "；失败原因已标记在对应台词，请直接查看对应条目" : "";
+  return `批量生成配音完成：成功 ${data.success_count} 条，跳过 ${data.skipped_count} 条，失败 ${data.failed_count} 条；分组 ${groupSummary || "无待生成"}${failureSummary}`;
+}
+
 export function isRoleDeleteReferenceConflict(error: unknown): error is ApiRequestError {
   if (!(error instanceof ApiRequestError) || error.status !== 409) return false;
   const detail = error.detail as { delete_result?: { referenced_count?: unknown } } | null;
@@ -265,6 +274,37 @@ type DubbingArrangementResponse = {
   failure?: { paragraph_id: string; error_code: string; message: string } | null;
 };
 
+type BatchDubbingStatusPayload = {
+  success_count: number;
+  skipped_count: number;
+  failed_count: number;
+  groups: { voice_resource_id: string; count: number }[];
+  errors?: { statement_id: string; message: string }[];
+};
+
+export type ParagraphDubbingStatus =
+  | "unsegmented"
+  | "unselected-role"
+  | "undubbed"
+  | "dubbed"
+  | "failed";
+
+type ParagraphStatusUtterance = {
+  roleId?: string | null;
+  audioUrl?: string;
+  audioPath?: string;
+  audioError?: string | null;
+  audioStatus?: string;
+};
+
+type ParagraphStatusItem = {
+  paragraphId: string;
+  text: string;
+  status: ParagraphDubbingStatus;
+  label: string;
+  firstUtteranceId: string;
+};
+
 type ModelConfig = {
   text_model: {
     base_url: string;
@@ -310,6 +350,21 @@ const DEFAULT_BASE_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-Base";
 const DEFAULT_VOICE_DESIGN_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
 
 const defaultVoices: VoiceResource[] = [];
+
+const PARAGRAPH_STATUS_META: Record<ParagraphDubbingStatus, { label: string }> = {
+  unsegmented: { label: "未划分" },
+  "unselected-role": { label: "未选角色" },
+  undubbed: { label: "未配音" },
+  dubbed: { label: "已配音" },
+  failed: { label: "失败" },
+};
+
+const PARAGRAPH_STATUS_FILTERS: ParagraphDubbingStatus[] = [
+  "unsegmented",
+  "unselected-role",
+  "undubbed",
+  "failed",
+];
 
 const defaultModelConfig: ModelConfig = {
   text_model: {
@@ -845,6 +900,28 @@ function audioPathToUrl(path?: string): string | undefined {
   return index >= 0 ? path.slice(index) : undefined;
 }
 
+function utteranceAudioSource(utterance: Pick<UtteranceDraft, "audioUrl" | "audioPath">): string | undefined {
+  return utterance.audioUrl ?? audioPathToUrl(utterance.audioPath);
+}
+
+export function paragraphDubbingStatus(
+  utterances: ParagraphStatusUtterance[] | undefined,
+): ParagraphDubbingStatus {
+  const list = utterances ?? [];
+  if (list.length === 0) return "unsegmented";
+  if (
+    list.some(
+      (utterance) =>
+        Boolean(utterance.audioError) || String(utterance.audioStatus ?? "").includes("音频生成失败"),
+    )
+  ) {
+    return "failed";
+  }
+  if (list.some((utterance) => !utterance.roleId)) return "unselected-role";
+  if (list.some((utterance) => !utteranceAudioSource(utterance))) return "undubbed";
+  return "dubbed";
+}
+
 function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
   const role = roles.find((item) => item.roleId === utterance.speaker_role_id);
   const audioUrl = utterance.audio_url ?? audioPathToUrl(utterance.audio_path);
@@ -958,6 +1035,9 @@ function App() {
   const dubbingInFlightRef = useRef(false);
   const dubbingQueueRef = useRef(Promise.resolve());
   const queuedUtteranceIdsRef = useRef<Set<string>>(new Set());
+  const chapterPlayerRef = useRef<HTMLAudioElement>(null);
+  const chapterPlaybackQueueRef = useRef<UtteranceDraft[]>([]);
+  const chapterPlaybackIndexRef = useRef(0);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState("");
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -1000,6 +1080,8 @@ function App() {
   const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
   const [generatingUtteranceIds, setGeneratingUtteranceIds] = useState<Record<string, boolean>>({});
   const [highlightUtteranceId, setHighlightUtteranceId] = useState("");
+  const [highlightParagraphId, setHighlightParagraphId] = useState("");
+  const [activeParagraphStatusFilter, setActiveParagraphStatusFilter] = useState<ParagraphDubbingStatus | "">("");
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
   const [localTtsStarting, setLocalTtsStarting] = useState(false);
   const [ttsDeployment, setTtsDeployment] = useState<TtsDeploymentStatus>(defaultTtsDeployment);
@@ -1007,20 +1089,52 @@ function App() {
   const [agentRunThreadId, setAgentRunThreadId] = useState("");
   const [agentRunWaitingForRoles, setAgentRunWaitingForRoles] = useState(false);
   const [agentRunRunning, setAgentRunRunning] = useState(false);
+  const [chapterPlaybackState, setChapterPlaybackState] = useState<"idle" | "playing" | "paused">("idle");
+  const [chapterPlaybackUtteranceId, setChapterPlaybackUtteranceId] = useState("");
   const [workflowState, setWorkflowState] = useState(() => createWorkflowState("automatic"));
 
   const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
   const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
-  const currentChapterText = useMemo(
-    () => visibleParagraphs.map((paragraph) => paragraph.text).join("\n\n"),
-    [visibleParagraphs],
-  );
   const flattenedUtterances = useMemo(
     () => visibleParagraphs.flatMap((paragraph) => utterancesByParagraph[paragraph.paragraphId] ?? []),
     [utterancesByParagraph, visibleParagraphs],
   );
+  const paragraphStatusItems = useMemo<ParagraphStatusItem[]>(
+    () =>
+      visibleParagraphs.map((paragraph) => {
+        const utterances = utterancesByParagraph[paragraph.paragraphId] ?? [];
+        const status = paragraphDubbingStatus(utterances);
+        return {
+          paragraphId: paragraph.paragraphId,
+          text: paragraph.text,
+          status,
+          label: PARAGRAPH_STATUS_META[status].label,
+          firstUtteranceId: utterances[0]?.utteranceId ?? "",
+        };
+      }),
+    [utterancesByParagraph, visibleParagraphs],
+  );
+  const paragraphStatusCounts = useMemo<Record<ParagraphDubbingStatus, number>>(
+    () =>
+      paragraphStatusItems.reduce(
+        (counts, item) => ({ ...counts, [item.status]: counts[item.status] + 1 }),
+        {
+          unsegmented: 0,
+          "unselected-role": 0,
+          undubbed: 0,
+          dubbed: 0,
+          failed: 0,
+        },
+      ),
+    [paragraphStatusItems],
+  );
   const hasPendingHumanReview = flattenedUtterances.some(
     (utterance) => utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
+  );
+  const hasUnselectedRoleUtterance = paragraphStatusCounts["unselected-role"] > 0;
+  const hasUngeneratedAudioUtterance = paragraphStatusCounts.undubbed > 0;
+  const hasGeneratedAudioUtterance = flattenedUtterances.some((utterance) =>
+    Boolean(utteranceAudioSource(utterance)),
   );
   const primaryStatementParagraphId = visibleParagraphs[0]?.paragraphId ?? "";
   const roleOptions = useMemo(
@@ -1376,6 +1490,15 @@ function App() {
   function updateRole(roleId: string, updates: Partial<RoleCard>) {
     const currentRole = roles.find((role) => role.roleId === roleId);
     if (!currentRole) return;
+    if (updates.voiceResourceId) {
+      const duplicate = roles.find(
+        (role) => role.roleId !== roleId && role.voiceResourceId === updates.voiceResourceId,
+      );
+      if (duplicate) {
+        setApiStatus(`音色已分配给 ${duplicate.name}，本章节每个角色需要使用唯一音色`);
+        return;
+      }
+    }
     const merged = { ...currentRole, ...updates };
     const updatedRole =
       updates.voiceResourceId !== undefined ? applyVoiceToRole(merged, updates.voiceResourceId) : merged;
@@ -1387,7 +1510,8 @@ function App() {
   }
 
   async function addRole() {
-    const voice = voices[0];
+    const usedVoiceIds = new Set(roles.map((role) => role.voiceResourceId).filter(Boolean));
+    const voice = voices.find((item) => !usedVoiceIds.has(item.voiceId));
     const roleId = `custom_role_${Date.now()}`;
     const roleName = `新角色${roles.length + 1}`;
     const role = voice ? roleFromVoice(roleId, roleName, voice) : createBlankRole(roleId, roleName);
@@ -1625,18 +1749,64 @@ function App() {
     );
   }
 
-  function jumpToFirstPendingUtterance() {
-    const pending = firstPendingUtterance();
-    if (!pending) {
-      setApiStatus("当前没有未确认台词");
-      return;
-    }
-    setHighlightUtteranceId(pending.utteranceId);
+  function focusUtterance(utterance: UtteranceDraft, statusMessage: string) {
+    setHighlightUtteranceId(utterance.utteranceId);
     document
-      .querySelector(`[data-utterance-id="${pending.utteranceId}"]`)
+      .querySelector(`[data-utterance-id="${utterance.utteranceId}"]`)
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
     window.setTimeout(() => setHighlightUtteranceId(""), 1600);
-    setApiStatus(`已跳转到未确认台词：${pending.utteranceId}`);
+    setApiStatus(statusMessage);
+  }
+
+  function focusParagraphStatusItem(item: ParagraphStatusItem, statusMessage: string) {
+    setHighlightParagraphId(item.paragraphId);
+    if (item.firstUtteranceId) setHighlightUtteranceId(item.firstUtteranceId);
+    document
+      .querySelector(`[data-reader-paragraph-id="${item.paragraphId}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (item.firstUtteranceId) {
+      document
+        .querySelector(`[data-utterance-id="${item.firstUtteranceId}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    window.setTimeout(() => {
+      setHighlightParagraphId("");
+      if (item.firstUtteranceId) setHighlightUtteranceId("");
+    }, 1600);
+    setApiStatus(statusMessage);
+  }
+
+  function toggleParagraphStatusFilter(status: ParagraphDubbingStatus) {
+    const nextStatus = activeParagraphStatusFilter === status ? "" : status;
+    setActiveParagraphStatusFilter(nextStatus);
+    if (!nextStatus) {
+      setApiStatus("已显示全部正文状态");
+      return;
+    }
+    const firstItem = paragraphStatusItems.find((item) => item.status === nextStatus);
+    if (!firstItem) {
+      setApiStatus(`当前章节没有${PARAGRAPH_STATUS_META[nextStatus].label}段落`);
+      return;
+    }
+    focusParagraphStatusItem(firstItem, `已筛选并跳转到${firstItem.label}段落：${firstItem.paragraphId}`);
+  }
+
+  function jumpToFirstUnselectedRoleUtterance() {
+    const pending = flattenedUtterances.find((utterance) => !utterance.roleId);
+    if (!pending) {
+      setApiStatus("当前没有未选择角色的台词");
+      return;
+    }
+    focusUtterance(pending, `已跳转到未选择角色的台词：${pending.utteranceId}`);
+  }
+
+  function jumpToFirstUngeneratedAudioUtterance() {
+    const pendingParagraph = paragraphStatusItems.find((item) => item.status === "undubbed");
+    if (!pendingParagraph) {
+      setApiStatus("当前没有未生成配音的台词");
+      return;
+    }
+    focusParagraphStatusItem(pendingParagraph, `已跳转到未生成配音的段落：${pendingParagraph.paragraphId}`);
   }
 
   function confirmAllReadyUtterances() {
@@ -1659,7 +1829,10 @@ function App() {
     setConfirmed(remaining === 0 && flattenedUtterances.length > 0);
     if (remaining > 0) {
       setApiStatus(`仍有 ${remaining} 条台词缺少文本或角色，请处理后再确认`);
-      window.setTimeout(() => jumpToFirstPendingUtterance(), 0);
+      const pending = firstPendingUtterance();
+      if (pending) {
+        window.setTimeout(() => focusUtterance(pending, `请处理台词：${pending.utteranceId}`), 0);
+      }
       return;
     }
     setApiStatus("所有台词与角色已确认，可以继续生成配音");
@@ -1699,6 +1872,90 @@ function App() {
       ...current,
       [paragraphId]: (current[paragraphId] ?? []).filter((utterance) => utterance.utteranceId !== utteranceId),
     }));
+  }
+
+  function finishChapterPlayback(message = "当前章节配音播放完成") {
+    const player = chapterPlayerRef.current;
+    if (player) {
+      player.pause();
+      player.removeAttribute("src");
+      player.load();
+    }
+    chapterPlaybackQueueRef.current = [];
+    chapterPlaybackIndexRef.current = 0;
+    setChapterPlaybackState("idle");
+    setChapterPlaybackUtteranceId("");
+    setApiStatus(message);
+  }
+
+  function playQueuedChapterAudioAt(index: number) {
+    const queue = chapterPlaybackQueueRef.current;
+    const utterance = queue[index];
+    if (!utterance) {
+      finishChapterPlayback();
+      return;
+    }
+    const source = utteranceAudioSource(utterance);
+    if (!source) {
+      playQueuedChapterAudioAt(index + 1);
+      return;
+    }
+    const player = chapterPlayerRef.current;
+    if (!player) {
+      setApiStatus("一键播放失败：播放器尚未初始化");
+      return;
+    }
+    chapterPlaybackIndexRef.current = index;
+    setChapterPlaybackUtteranceId(utterance.utteranceId);
+    setChapterPlaybackState("playing");
+    document
+      .querySelector(`[data-utterance-id="${utterance.utteranceId}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    player.src = mediaRequestUrl(source);
+    player.currentTime = 0;
+    player
+      .play()
+      .then(() => setApiStatus(`正在播放配音：${utterance.utteranceId}`))
+      .catch((error) => {
+        setChapterPlaybackState("paused");
+        setApiStatus(apiFailureMessage("一键播放失败", error));
+      });
+  }
+
+  function playNextQueuedChapterAudio() {
+    playQueuedChapterAudioAt(chapterPlaybackIndexRef.current + 1);
+  }
+
+  function toggleChapterPlayback() {
+    const player = chapterPlayerRef.current;
+    if (chapterPlaybackState === "playing") {
+      player?.pause();
+      setChapterPlaybackState("paused");
+      setApiStatus("已暂停当前章节配音播放");
+      return;
+    }
+    if (chapterPlaybackState === "paused") {
+      if (!player) {
+        setApiStatus("继续播放失败：播放器尚未初始化");
+        return;
+      }
+      player
+        .play()
+        .then(() => {
+          setChapterPlaybackState("playing");
+          setApiStatus(`继续播放配音：${chapterPlaybackUtteranceId}`);
+        })
+        .catch((error) => setApiStatus(apiFailureMessage("继续播放失败", error)));
+      return;
+    }
+    const queue = flattenedUtterances.filter((utterance) => utteranceAudioSource(utterance));
+    if (queue.length === 0) {
+      setApiStatus("当前章节没有已生成配音的台词");
+      return;
+    }
+    chapterPlaybackQueueRef.current = queue;
+    chapterPlaybackIndexRef.current = 0;
+    playQueuedChapterAudioAt(0);
   }
 
   async function generateAudio(utterance: UtteranceDraft) {
@@ -1817,9 +2074,7 @@ function App() {
         mergeApiAudioByUtteranceId(current, data.utterances_by_paragraph, paragraphs, roles),
       );
       setVoiceGenerationProgress(100);
-      const groupSummary = data.groups.map((group) => `${group.voice_resource_id}×${group.count}`).join("，");
-      const errorSummary = data.failed_count ? `；失败 ${data.failed_count} 条：${data.errors[0]?.message ?? "请检查详情"}` : "";
-      setApiStatus(`批量生成配音完成：成功 ${data.success_count} 条，跳过 ${data.skipped_count} 条；分组 ${groupSummary || "无待生成"}${errorSummary}`);
+      setApiStatus(formatBatchDubbingStatus(data));
       setWorkflowState((current) => transitionWorkflow(current, { type: "AGENT_COMPLETED" }));
     } catch (error) {
       setVoiceGenerationProgress(100);
@@ -2221,11 +2476,18 @@ function App() {
                               onChange={(event) => updateRole(role.roleId, { voiceResourceId: event.target.value })}
                             >
                               <option value="">未选择音色</option>
-                              {voices.map((item) => (
-                                <option key={item.voiceId} value={item.voiceId}>
-                                  {item.name}
-                                </option>
-                              ))}
+                              {voices.map((item) => {
+                                const owner = roles.find(
+                                  (candidateRole) =>
+                                    candidateRole.roleId !== role.roleId &&
+                                    candidateRole.voiceResourceId === item.voiceId,
+                                );
+                                return (
+                                  <option disabled={Boolean(owner)} key={item.voiceId} value={item.voiceId}>
+                                    {owner ? `${item.name}（已分配给${owner.name}）` : item.name}
+                                  </option>
+                                );
+                              })}
                             </select>
                           </label>
                         </div>
@@ -2324,18 +2586,93 @@ function App() {
                   >
                     导出制作包
                   </button>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => toggleChapterPlayback()}
+                    disabled={!hasGeneratedAudioUtterance}
+                  >
+                    {chapterPlaybackState === "playing"
+                      ? "暂停播放"
+                      : chapterPlaybackState === "paused"
+                        ? "继续播放"
+                        : "一键播放"}
+                  </button>
                   <span>
                     {confirmed && !hasPendingHumanReview
                       ? "台词已确认，可以批量配音或导出"
                       : "请完成角色分析、配音编排并确认所有配音片段"}
                   </span>
                 </div>
+                <div className="status-filter-bar" aria-label="状态筛选">
+                  <span>状态筛选</span>
+                  {PARAGRAPH_STATUS_FILTERS.map((status) => (
+                    <button
+                      className={[
+                        "status-pill",
+                        status,
+                        activeParagraphStatusFilter === status ? "active" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      disabled={paragraphStatusCounts[status] === 0}
+                      key={status}
+                      type="button"
+                      onClick={() => toggleParagraphStatusFilter(status)}
+                    >
+                      <span>{PARAGRAPH_STATUS_META[status].label}</span>
+                      <strong>{paragraphStatusCounts[status]}</strong>
+                    </button>
+                  ))}
+                </div>
               </header>
+              <audio
+                className="chapter-playback-audio"
+                onEnded={() => playNextQueuedChapterAudio()}
+                onError={() => playNextQueuedChapterAudio()}
+                ref={chapterPlayerRef}
+              />
 
               <section className="chapter-workspace-grid">
                 <article className="panel chapter-reader" aria-label="当前章节完整小说内容">
-                  <div className="section-title">当前章节完整小说内容</div>
-                  <div className="chapter-reader-body">{currentChapterText || "当前章节正文为空。"}</div>
+                  <div className="section-heading">
+                    <div className="section-title">当前章节完整小说内容</div>
+                    <div className="status-legend" aria-label="正文状态图例">
+                      {Object.entries(PARAGRAPH_STATUS_META).map(([status, meta]) => (
+                        <span className={`status-legend-item ${status}`} key={status}>
+                          <i />
+                          {meta.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="chapter-reader-body">
+                    {paragraphStatusItems.length === 0
+                      ? "当前章节正文为空。"
+                      : paragraphStatusItems.map((item) => (
+                          <section
+                            className={[
+                              "reader-paragraph",
+                              item.status,
+                              highlightParagraphId === item.paragraphId ? "attention" : "",
+                              activeParagraphStatusFilter && activeParagraphStatusFilter !== item.status
+                                ? "dimmed"
+                                : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                            data-reader-paragraph-id={item.paragraphId}
+                            key={item.paragraphId}
+                          >
+                            <div className="reader-paragraph-meta">
+                              <span className={`status-dot ${item.status}`} />
+                              <strong>{item.label}</strong>
+                              <span>{item.paragraphId}</span>
+                            </div>
+                            <p>{item.text}</p>
+                          </section>
+                        ))}
+                  </div>
                 </article>
 
                 <article className="panel statement-panel" aria-label="划分台词与角色匹配">
@@ -2345,10 +2682,18 @@ function App() {
                       <button
                         className="tool-button amber"
                         type="button"
-                        disabled={!hasPendingHumanReview}
-                        onClick={() => jumpToFirstPendingUtterance()}
+                        disabled={!hasUnselectedRoleUtterance}
+                        onClick={() => jumpToFirstUnselectedRoleUtterance()}
                       >
-                        跳转到未确认
+                        跳转到未选择角色的台词
+                      </button>
+                      <button
+                        className="tool-button amber"
+                        type="button"
+                        disabled={!hasUngeneratedAudioUtterance}
+                        onClick={() => jumpToFirstUngeneratedAudioUtterance()}
+                      >
+                        跳转到未生成配音的台词
                       </button>
                       <button
                         className="tool-button teal"
@@ -2360,6 +2705,31 @@ function App() {
                       </button>
                     </div>
                   </div>
+                  {paragraphStatusItems.length > 0 && (
+                    <div className="chapter-status-map" aria-label="章节状态小地图">
+                      {paragraphStatusItems.map((item, index) => (
+                        <button
+                          className={[
+                            "status-map-cell",
+                            item.status,
+                            highlightParagraphId === item.paragraphId ? "attention" : "",
+                            activeParagraphStatusFilter && activeParagraphStatusFilter !== item.status
+                              ? "dimmed"
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          key={item.paragraphId}
+                          title={`${item.paragraphId} ${item.label}`}
+                          type="button"
+                          aria-label={`跳转到${item.paragraphId}：${item.label}`}
+                          onClick={() => focusParagraphStatusItem(item, `已跳转到${item.label}段落：${item.paragraphId}`)}
+                        >
+                          {index + 1}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
                       <span>当前章节可手动添加台词、选择角色并生成配音；也可以稍后使用配音编排 Agent 自动辅助。</span>
@@ -2377,11 +2747,13 @@ function App() {
                     <div className="statement-list">
                       {flattenedUtterances.map((utterance) => (
                         <article
-                          className={
-                            highlightUtteranceId === utterance.utteranceId
-                              ? "utterance-card attention"
-                              : "utterance-card"
-                          }
+                          className={[
+                            "utterance-card",
+                            highlightUtteranceId === utterance.utteranceId ? "attention" : "",
+                            chapterPlaybackUtteranceId === utterance.utteranceId ? "playing" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
                           data-utterance-id={utterance.utteranceId}
                           key={utterance.utteranceId}
                         >
@@ -2469,8 +2841,8 @@ function App() {
                             );
                           })()}
                           <output>{utterance.audioStatus}</output>
-                          {utterance.audioUrl && (
-                            <AuthorizedAudio source={utterance.audioUrl} />
+                          {utteranceAudioSource(utterance) && (
+                            <AuthorizedAudio source={utteranceAudioSource(utterance) ?? ""} />
                           )}
                         </article>
                       ))}

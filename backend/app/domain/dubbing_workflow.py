@@ -1150,6 +1150,7 @@ def auto_apply_role_candidates(
     updated_count = 0
     matched_existing_count = 0
     generated_voice_count = 0
+    reserved_voice_ids: set[str] = set()
 
     for raw_candidate in candidates:
         candidate = _candidate_from_any(raw_candidate)
@@ -1177,12 +1178,16 @@ def auto_apply_role_candidates(
             added_count += 1
             action = "added"
 
-        voice, score, reason = _best_voice_match(candidate, voices.list())
+        available_voices = [
+            voice for voice in voices.list() if voice.voice_id not in reserved_voice_ids
+        ]
+        voice, score, reason = _best_voice_match(candidate, available_voices)
         generated_by_ai = False
         if (
             (voice is None or score < voice_match_threshold)
             and action == "matched_existing"
             and role.voice_resource_id
+            and role.voice_resource_id not in reserved_voice_ids
         ):
             voice = VoiceResource(
                 voice_id=role.voice_resource_id,
@@ -1200,7 +1205,12 @@ def auto_apply_role_candidates(
             score = role.voice_match_score if role.voice_match_score is not None else 1.0
             reason = role.voice_match_reason or "复用已有角色绑定音色。"
         elif voice is None or score < voice_match_threshold:
-            voice = _generate_voice_for_candidate(candidate, voices, generate_voice)
+            voice = _generate_voice_for_candidate(
+                candidate,
+                voices,
+                generate_voice,
+                reserved_voice_ids=reserved_voice_ids,
+            )
             generated_voice_count += 1
             generated_by_ai = True
             score = 1.0
@@ -1224,6 +1234,7 @@ def auto_apply_role_candidates(
             voice_generated_by_ai=generated_by_ai,
         )
         roles.upsert(updated)
+        reserved_voice_ids.add(voice.voice_id)
         if action == "matched_existing":
             updated_count += 1
         actions.append(
@@ -1578,11 +1589,18 @@ def _generate_voice_for_candidate(
     candidate: RoleAnalysisCandidate,
     voices: VoiceResourceCollection,
     generate_voice: Callable[[RoleAnalysisCandidate], VoiceResource | dict[str, Any]] | None,
+    *,
+    reserved_voice_ids: set[str] | None = None,
 ) -> VoiceResource:
+    reserved_voice_ids = reserved_voice_ids or set()
     if generate_voice is not None:
         resource = generate_voice(candidate)
     else:
-        voice_id = f"voice-auto-{_role_slug(candidate.name or '角色')}"
+        voice_id = _unique_voice_id(
+            f"voice-auto-{_role_slug(candidate.name or '角色')}",
+            voices,
+            reserved_voice_ids,
+        )
         resource = VoiceResource(
             voice_id=voice_id,
             name=f"{candidate.name or '角色'}专属音色",
@@ -1596,8 +1614,39 @@ def _generate_voice_for_candidate(
             reference_audio_path="assets/samples/voices/cmn_qixinxieli_canonni_cc0.wav",
             generated=True,
         )
+    resource = _ensure_unreserved_voice_resource(resource, voices, reserved_voice_ids)
     voice = voices.upsert(resource)
     return voice
+
+
+def _ensure_unreserved_voice_resource(
+    resource: VoiceResource | dict[str, Any],
+    voices: VoiceResourceCollection,
+    reserved_voice_ids: set[str],
+) -> VoiceResource | dict[str, Any]:
+    raw_voice_id = resource.voice_id if isinstance(resource, VoiceResource) else resource.get("voice_id")
+    voice_id = str(raw_voice_id) if raw_voice_id else ""
+    if voice_id and voice_id not in reserved_voice_ids:
+        return resource
+    next_id = _unique_voice_id(voice_id or "voice-auto", voices, reserved_voice_ids)
+    if isinstance(resource, VoiceResource):
+        return resource.with_updates(voice_id=next_id)
+    return {**resource, "voice_id": next_id}
+
+
+def _unique_voice_id(
+    base_voice_id: str,
+    voices: VoiceResourceCollection,
+    reserved_voice_ids: set[str],
+) -> str:
+    base = base_voice_id.strip() or "voice-auto"
+    used = {voice.voice_id for voice in voices.list()} | reserved_voice_ids
+    if base not in used:
+        return base
+    index = 2
+    while f"{base}-{index}" in used:
+        index += 1
+    return f"{base}-{index}"
 
 
 def _merge_aliases(existing: list[str], incoming: list[str]) -> list[str]:

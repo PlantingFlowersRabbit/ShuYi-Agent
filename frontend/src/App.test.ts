@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.5.4 application shell", () => {
+describe("v0.5.5 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.5.4 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.5.5 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.5.4 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.5.4");
+    expect(markup).toContain("v0.5.5");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.5.4 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.5.4 model configuration with separate backend and model tests", async () => {
+  it("renders v0.5.5 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -61,7 +61,7 @@ describe("v0.5.4 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.5.4 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.5.5 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -90,10 +90,23 @@ describe("v0.5.4 application shell", () => {
     expect(appSource).toContain("在此后添加台词");
     expect(appSource).toContain("台词文本");
     expect(appSource).toContain("生成配音");
-    expect(appSource).toContain("跳转到未确认");
+    expect(appSource).toContain("跳转到未选择角色的台词");
+    expect(appSource).toContain("跳转到未生成配音的台词");
+    expect(appSource).toContain("一键播放");
+    expect(appSource).toContain("暂停播放");
+    expect(appSource).toContain("继续播放");
+    expect(appSource).toContain("状态筛选");
+    expect(appSource).toContain("未划分");
+    expect(appSource).toContain("未选角色");
+    expect(appSource).toContain("未配音");
+    expect(appSource).toContain("章节状态小地图");
+    expect(appSource).toContain("chapter-status-map");
+    expect(appSource).toContain("reader-paragraph");
     expect(appSource).toContain("确认已选台词与角色");
     expect(appSource).toContain("mergeApiAudioByUtteranceId");
     expect(appSource).toContain("dubbingQueueRef");
+    expect(appSource).toContain("chapterPlaybackQueueRef");
+    expect(appSource).not.toContain("跳转到未确认");
     expect(appSource).not.toContain("在此后添加语句");
     expect(appSource).not.toContain("划分语句与角色匹配");
     expect(appSource).toContain("addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)");
@@ -101,7 +114,21 @@ describe("v0.5.4 application shell", () => {
     expect(cssSource).toMatch(/\.role-stack\s*{[^}]*min-height:\s*clamp\(240px, 42vh, 520px\)/s);
     expect(cssSource).toMatch(/\.empty-state\s*{[^}]*min-height:\s*100%/s);
     expect(cssSource).toMatch(/\.brand-logo\s*{[^}]*height:\s*clamp\(38px, 5vw, 52px\)/s);
+    expect(cssSource).toContain(".reader-paragraph.failed");
+    expect(cssSource).toContain(".chapter-status-map");
+    expect(cssSource).toContain(".status-filter-bar");
     expect(cssSource).not.toContain(".access-token-field");
+  });
+
+  it("classifies paragraph heatmap status with failure and completion priority", async () => {
+    const { paragraphDubbingStatus } = await import("./App");
+
+    expect(paragraphDubbingStatus([])).toBe("unsegmented");
+    expect(paragraphDubbingStatus([{ roleId: "", audioStatus: "尚未生成" }])).toBe("unselected-role");
+    expect(paragraphDubbingStatus([{ roleId: "hero", audioStatus: "尚未生成" }])).toBe("undubbed");
+    expect(paragraphDubbingStatus([{ roleId: "hero", audioPath: "outputs/audio/u-001.wav" }])).toBe("dubbed");
+    expect(paragraphDubbingStatus([{ roleId: "hero", audioPath: "outputs/audio/u-001.wav", audioError: "TTS error" }])).toBe("failed");
+    expect(paragraphDubbingStatus([{ roleId: "hero", audioStatus: "音频生成失败：文本过长" }])).toBe("failed");
   });
 
   it("checks backend connectivity before sending large document parse payloads", async () => {
@@ -186,5 +213,29 @@ describe("v0.5.4 application shell", () => {
     expect(documentParseFallbackMessage(disconnected)).toBe(
       "没有连接后端，解析失败，采用前端默认简易解析策略：ApiRequestError",
     );
+  });
+
+  it("summarizes batch dubbing counts without duplicating per-line TTS failure text", async () => {
+    const { formatBatchDubbingStatus } = await import("./App");
+
+    const message = formatBatchDubbingStatus({
+      success_count: 104,
+      skipped_count: 0,
+      failed_count: 1,
+      groups: [
+        { voice_resource_id: "voice-auto-0002", count: 23 },
+        { voice_resource_id: "voice-auto-0001", count: 54 },
+      ],
+      errors: [
+        {
+          statement_id: "p-0001-u-099",
+          message: "当前台词文本长度 167 字，超过本地 TTS 单条上限 120 字。",
+        },
+      ],
+    });
+
+    expect(message).toContain("成功 104 条，跳过 0 条，失败 1 条");
+    expect(message).toContain("失败原因已标记在对应台词");
+    expect(message).not.toContain("当前台词文本长度 167 字");
   });
 });

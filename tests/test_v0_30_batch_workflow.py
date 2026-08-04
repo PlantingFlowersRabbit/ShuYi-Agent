@@ -321,6 +321,62 @@ def test_v0_30_auto_role_creation_dedupes_narrator_binds_or_generates_voice():
     assert result.matched_existing_count == 1
 
 
+def test_v0_55_auto_role_creation_never_reuses_voice_within_chapter():
+    """v0.5.5: automatic role analysis assigns each chapter role a unique voice."""
+    from backend.app.domain.dubbing_workflow import (
+        RoleAnalysisCandidate,
+        auto_apply_role_candidates,
+    )
+    from backend.app.domain.roles import RoleCollection
+    from backend.app.domain.voices import VoiceResourceCollection
+
+    roles = RoleCollection([])
+    voices = VoiceResourceCollection(
+        [
+            {
+                "voice_id": "voice-calm-female",
+                "name": "冷静女声",
+                "gender": "女",
+                "description": "冷静、清亮，适合女性主角对白。",
+                "suitable_role_types": ["女性主角", "冷静"],
+                "reference_text": "测试语音",
+                "reference_audio_path": "female.wav",
+            }
+        ]
+    )
+    generated: list[str] = []
+
+    def generate_voice(candidate):
+        generated.append(candidate.name)
+        return {
+            "voice_id": f"voice-generated-{len(generated):04d}",
+            "name": f"{candidate.name}专属音色",
+            "gender": candidate.gender,
+            "description": candidate.voice_direction or candidate.profile or "AI自动生成音色",
+            "suitable_role_types": [candidate.gender or "", candidate.profile or ""],
+            "reference_text": f"{candidate.name} 的试听语音。",
+            "reference_audio_path": f"{candidate.name}.wav",
+            "generated": True,
+        }
+
+    result = auto_apply_role_candidates(
+        candidates=[
+            RoleAnalysisCandidate(name="林清", gender="女", profile="冷静女性主角"),
+            RoleAnalysisCandidate(name="苏婉", gender="女", profile="冷静女性主角"),
+        ],
+        roles=roles,
+        voices=voices,
+        generate_voice=generate_voice,
+    )
+
+    assigned_voice_ids = [role.voice_resource_id for role in roles.list()]
+    assert len(assigned_voice_ids) == len(set(assigned_voice_ids))
+    assert "voice-calm-female" in assigned_voice_ids
+    assert "voice-generated-0001" in assigned_voice_ids
+    assert generated == ["苏婉"]
+    assert result.generated_voice_count == 1
+
+
 def test_v0_30_one_click_dubbing_groups_by_voice_and_maps_results_by_statement_id(tmp_path):
     """Covers v0.3.0 grouped batch TTS generation, result mapping, and success skip."""
     from backend.app.domain.audio import generate_chapter_audio_batch

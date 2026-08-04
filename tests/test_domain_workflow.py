@@ -2065,7 +2065,7 @@ def test_fastapi_tts_endpoint_invokes_local_service_and_returns_audio_url(tmp_pa
 
 
 def test_fastapi_v0_54_batch_tts_keeps_successes_when_one_line_fails(tmp_path):
-    """v0.5.4: one failed utterance must not poison the whole batch."""
+    """v0.5.5: one failed utterance must not poison the whole batch."""
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -2129,7 +2129,7 @@ def test_fastapi_v0_54_batch_tts_keeps_successes_when_one_line_fails(tmp_path):
 
 
 def test_fastapi_v0_54_single_tts_requests_are_serialized(tmp_path):
-    """v0.5.4: concurrent manual clicks enter the backend TTS queue in order."""
+    """v0.5.5: concurrent manual clicks enter the backend TTS queue in order."""
     pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")
 
