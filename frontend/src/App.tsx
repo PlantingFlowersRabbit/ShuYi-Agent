@@ -39,7 +39,7 @@ export function apiFailureDetail(error: unknown): string {
       error.status === 0 ||
       (error.status === 404 && ["Not Found", "请求失败"].includes(message))
     ) {
-      return "ApiRequestError";
+      return "后端未连接";
     }
     return message;
   }
@@ -52,9 +52,9 @@ export function apiFailureMessage(prefix: string, error: unknown): string {
 
 export function documentParseFallbackMessage(error: unknown): string {
   if (error instanceof ApiRequestError && error.status === 0) {
-    return "没有连接后端，解析失败，采用前端默认简易解析策略：ApiRequestError";
+    return "后端未连接，已使用前端本地规则解析章节；可继续制作，连接后端后可启用 Agent 规则增强。";
   }
-  return apiFailureMessage("文档解析失败，已使用本地章节索引兜底", error);
+  return `后端解析暂不可用，已使用前端本地规则解析章节；可继续制作。错误：${apiFailureDetail(error)}`;
 }
 
 export function formatBatchDubbingStatus(
@@ -84,6 +84,13 @@ export function isRoleDeleteReferenceConflict(
 type Page = "main" | "voices" | "memory" | "agent-runs" | "models";
 type VoiceMode = "voice_cloning" | "voice_design";
 type ExportPreset = "preview" | "delivery" | "post";
+type ServiceHealthState = "checking" | "connected" | "degraded" | "offline";
+
+type ServiceHealth = {
+  state: ServiceHealthState;
+  label: string;
+  detail: string;
+};
 
 type Chapter = {
   chapterId: string;
@@ -628,6 +635,12 @@ const defaultTtsDeployment: TtsDeploymentStatus = {
   voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
 };
 
+const defaultServiceHealth: ServiceHealth = {
+  state: "checking",
+  label: "后端待检测",
+  detail: "前端本地规则可继续",
+};
+
 const PROJECT_STORAGE_KEY = "shuyi-agent.recent-projects.v0.6.1";
 
 const defaultQualitySummary: QualitySummary = {
@@ -666,6 +679,8 @@ const BLOCKER_RECOMMENDATIONS: Record<keyof QualitySummary, string> = {
   role_without_voice: "为角色绑定或生成音色",
   needs_human_review: "人工确认低置信度角色或台词",
 };
+
+const PRODUCTION_STEP_LABELS = ["准备", "解析", "复核", "配音", "导出"] as const;
 
 const EXPORT_PRESETS: Record<
   ExportPreset,
@@ -1608,6 +1623,9 @@ function App() {
     runtimeConfig.apiBase || "/api/v1",
   );
   const [apiStatus, setApiStatus] = useState("等待上传小说");
+  const [serviceHealth, setServiceHealth] =
+    useState<ServiceHealth>(defaultServiceHealth);
+  const [resourceStatus, setResourceStatus] = useState("项目、角色与音色等待同步。");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
   const [roleMatchingProgress, setRoleMatchingProgress] = useState(0);
@@ -1691,6 +1709,17 @@ function App() {
     projects.find((project) => project.project_id === activeProjectId) ??
     projects[0] ??
     null;
+
+  function updateServiceHealthFromError(error: unknown) {
+    const detail = apiFailureDetail(error);
+    const offline = detail === "后端未连接";
+    setServiceHealth({
+      state: offline ? "offline" : "degraded",
+      label: offline ? "后端未连接" : "后端异常",
+      detail: offline ? "前端本地规则可继续" : detail,
+    });
+  }
+
   const visibleParagraphs = paragraphs.filter(
     (paragraph) => !paragraph.deleted,
   );
@@ -1776,19 +1805,49 @@ function App() {
       return true;
     });
   }, [qualityReport.issues, reviewQueue.items]);
+  const visibleBlockerItems = blockerItems.slice(0, 3);
+  const hiddenBlockerCount = Math.max(0, blockerItems.length - visibleBlockerItems.length);
+  const productionStepIndex = useMemo(() => {
+    if (!hasSplitChapters) return novelPreview ? 1 : 0;
+    if (!activeChapter) return 1;
+    if (
+      blockerItems.length > 0 ||
+      hasPendingHumanReview ||
+      roles.length === 0 ||
+      flattenedUtterances.length === 0 ||
+      agentRunWaitingForRoles ||
+      !confirmed
+    ) {
+      return 2;
+    }
+    if (hasUngeneratedAudioUtterance || !hasGeneratedAudioUtterance) return 3;
+    return 4;
+  }, [
+    activeChapter,
+    agentRunWaitingForRoles,
+    blockerItems.length,
+    confirmed,
+    flattenedUtterances.length,
+    hasGeneratedAudioUtterance,
+    hasPendingHumanReview,
+    hasSplitChapters,
+    hasUngeneratedAudioUtterance,
+    novelPreview,
+    roles.length,
+  ]);
   const productionPrimaryAction = useMemo(() => {
     if (!hasSplitChapters) {
       return {
-        label: "开始制作",
+        label: novelPreview ? "解析章节" : "上传小说",
         detail: novelPreview
-          ? "继续解析小说章节，进入制作流程。"
-          : "先上传小说，随后解析章节并进入制作流程。",
+          ? "已读取小说预览，下一步解析章节目录并进入制作。"
+          : "先上传小说文件，系统会保留预览并准备章节解析。",
         disabled: false,
       };
     }
     if (!activeChapter) {
       return {
-        label: "继续下一步",
+        label: "选择章节",
         detail: "请选择一个章节后继续制作。",
         disabled: chapters.length === 0,
       };
@@ -1802,35 +1861,35 @@ function App() {
     }
     if (roles.length === 0 || flattenedUtterances.length === 0) {
       return {
-        label: "开始制作",
+        label: "生成角色与台词",
         detail: "运行 Agent 生成角色、台词和初始配音编排。",
         disabled: agentRunRunning || visibleParagraphs.length === 0,
       };
     }
     if (agentRunWaitingForRoles && agentRunThreadId) {
       return {
-        label: "继续下一步",
+        label: "生成台词编排",
         detail: "角色已分析，继续执行配音编排。",
         disabled: agentRunRunning,
       };
     }
     if (!confirmed) {
       return {
-        label: "继续下一步",
+        label: "确认台词与角色",
         detail: "确认已选台词与角色后进入配音生成。",
         disabled: flattenedUtterances.length === 0,
       };
     }
     if (hasUngeneratedAudioUtterance) {
       return {
-        label: "继续下一步",
+        label: "生成缺失配音",
         detail: "批量生成当前章节缺失的配音。",
         disabled: false,
       };
     }
     if (hasGeneratedAudioUtterance) {
       return {
-        label: "继续下一步",
+        label: "导出制作包",
         detail: "导出制作包；需要听审时可在高级操作中播放整章。",
         disabled: false,
       };
@@ -1915,8 +1974,17 @@ function App() {
           ? `已打开项目：${preferredProject.name}`
           : "暂无项目，请新建项目工作区",
       );
+      setResourceStatus(
+        preferredProject
+          ? `项目已同步：${preferredProject.name}`
+          : "项目等待新建；音色与角色可继续同步。",
+      );
     } catch (error) {
       setQualityStatus(apiFailureMessage("项目工作区载入失败", error));
+      setResourceStatus(
+        `项目同步失败：${apiFailureDetail(error)}；前端本地规则可继续。`,
+      );
+      updateServiceHealthFromError(error);
     }
   }
 
@@ -2582,18 +2650,38 @@ function App() {
     void loadProjects();
 
     requestJson<{ voices: ApiVoiceResource[] }>("/voice-profiles")
-      .then((data) => setVoices(data.voices.map(fromApiVoice)))
-      .catch((error) =>
-        setApiStatus(apiFailureMessage("音色库载入失败，已保持空列表", error)),
-      );
+      .then((data) => {
+        setVoices(data.voices.map(fromApiVoice));
+        setServiceHealth({
+          state: "connected",
+          label: "后端已连接",
+          detail: "资源接口可用",
+        });
+        setResourceStatus(`音色库已同步：${data.voices.length} 个音色。`);
+      })
+      .catch((error) => {
+        updateServiceHealthFromError(error);
+        setResourceStatus(
+          `音色库载入失败：${apiFailureDetail(error)}；前端本地规则可继续。`,
+        );
+      });
 
     requestJson<{ roles: ApiRoleCard[] }>("/characters")
-      .then((data) => setRoles(data.roles.map(fromApiRole)))
-      .catch((error) =>
-        setApiStatus(
-          apiFailureMessage("角色列表载入失败，已保持空列表", error),
-        ),
-      );
+      .then((data) => {
+        setRoles(data.roles.map(fromApiRole));
+        setServiceHealth({
+          state: "connected",
+          label: "后端已连接",
+          detail: "资源接口可用",
+        });
+        setResourceStatus(`角色列表已同步：${data.roles.length} 个角色。`);
+      })
+      .catch((error) => {
+        updateServiceHealthFromError(error);
+        setResourceStatus(
+          `角色列表载入失败：${apiFailureDetail(error)}；前端本地规则可继续。`,
+        );
+      });
 
     requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
@@ -2731,7 +2819,13 @@ function App() {
     setChapterSplitProgress(12);
     setApiStatus("文档解析正在检查可复用规则");
     try {
-      await requestJson<ConnectionTestResponse>("/connection-test");
+      const connection =
+        await requestJson<ConnectionTestResponse>("/connection-test");
+      setServiceHealth({
+        state: "connected",
+        label: "后端已连接",
+        detail: connection.message || "Agent API 可用",
+      });
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
         ? await requestJson<ApiChapterSplitResponse>(
@@ -2772,6 +2866,7 @@ function App() {
       applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
     } catch (error) {
       setChapterSplitProgress(76);
+      updateServiceHealthFromError(error);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
       applyChapters(parsed, documentParseFallbackMessage(error));
     } finally {
@@ -4010,11 +4105,22 @@ function App() {
 
   async function testBackendConnection() {
     applyBackendApiBaseInput();
+    setServiceHealth({
+      state: "checking",
+      label: "后端检测中",
+      detail: "正在检查 API 可用性",
+    });
     try {
       const data =
         await requestJson<ConnectionTestResponse>("/connection-test");
+      setServiceHealth({
+        state: "connected",
+        label: "后端已连接",
+        detail: data.message || "Agent API 可用",
+      });
       setApiStatus(data.message || "后端 API 连接成功");
     } catch (error) {
+      updateServiceHealthFromError(error);
       setApiStatus(apiFailureMessage("测试连接失败", error));
     }
   }
@@ -4168,6 +4274,23 @@ function App() {
                     {workflowState.mode === "automatic" ? "自动" : "分步"}
                   </span>
                 </div>
+                <div className="production-stepper" aria-label="制作步骤">
+                  {PRODUCTION_STEP_LABELS.map((label, index) => (
+                    <span
+                      className={
+                        index < productionStepIndex
+                          ? "done"
+                          : index === productionStepIndex
+                            ? "active"
+                            : ""
+                      }
+                      key={label}
+                    >
+                      <strong>{index + 1}</strong>
+                      {label}
+                    </span>
+                  ))}
+                </div>
                 <button
                   className="production-primary-button"
                   type="button"
@@ -4181,12 +4304,14 @@ function App() {
                 </small>
               </section>
 
-              <section className="panel project-workspace-panel">
-                <div className="section-heading">
-                  <div>
-                    <div className="section-title">项目工作区</div>
+              <details className="panel project-workspace-panel sidebar-muted-panel">
+                <summary>
+                  <span>
+                    <span className="section-title">项目工作区</span>
                     <small>当前项目：{activeProject?.name ?? "default"}</small>
-                  </div>
+                  </span>
+                </summary>
+                <div className="toolbar-row">
                   <button
                     className="tool-button sky"
                     type="button"
@@ -4255,7 +4380,7 @@ function App() {
                     ))
                   )}
                 </div>
-              </section>
+              </details>
 
               <section className="panel blocker-panel">
                 <div className="section-heading">
@@ -4304,82 +4429,85 @@ function App() {
                   {qualityStatus}
                 </small>
 
-                <div className="blocker-action-row">
-                  <button
-                    className="tool-button teal"
-                    type="button"
-                    onClick={() => bulkConfirmReviewItems()}
-                  >
-                    批量确认
-                  </button>
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => void bulkSplitLongUtterances()}
-                  >
-                    批量拆分超长台词
-                  </button>
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => void bulkRetryDubbing()}
-                  >
-                    批量重试
-                  </button>
-                </div>
-                <div className="bulk-role-row">
-                  <label>
-                    目标角色
-                    <select
-                      value={bulkRoleTargetId}
-                      onChange={(event) => {
-                        setBulkRoleTargetId(event.target.value);
-                        setBulkRolePreviewArmed(false);
-                      }}
-                    >
-                      <option value="">请选择目标角色</option>
-                      {roles.map((role) => (
-                        <option key={role.roleId} value={role.roleId}>
-                          {role.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <button
-                    className="tool-button amber"
-                    type="button"
-                    disabled={bulkRoleChangeIds.length === 0}
-                    onClick={() => void bulkChangeReviewRole()}
-                  >
-                    {bulkRolePreviewArmed ? "确认批量改角色" : "预览批量改角色"}
-                  </button>
-                  <small>
-                    预览影响 {bulkRoleChangeIds.length} 条台词；选择目标角色后需再次确认。
-                  </small>
-                </div>
-                <div className="review-filter-row" aria-label="阻塞项筛选">
-                  {(
-                    [
-                      "needs_human_review",
-                      "unselected_role",
-                      "long_utterance",
-                      "dubbing_failed",
-                    ] as (keyof QualitySummary)[]
-                  ).map((issueType) => (
+                <details className="blocker-tools">
+                  <summary>批量处理工具</summary>
+                  <div className="blocker-action-row">
                     <button
-                      key={issueType}
+                      className="tool-button teal"
                       type="button"
-                      onClick={() => void loadReviewQueue(issueType)}
+                      onClick={() => bulkConfirmReviewItems()}
                     >
-                      {QUALITY_LABELS[issueType]}
+                      批量确认
                     </button>
-                  ))}
-                </div>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => void bulkSplitLongUtterances()}
+                    >
+                      批量拆分超长台词
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => void bulkRetryDubbing()}
+                    >
+                      批量重试
+                    </button>
+                  </div>
+                  <div className="bulk-role-row">
+                    <label>
+                      目标角色
+                      <select
+                        value={bulkRoleTargetId}
+                        onChange={(event) => {
+                          setBulkRoleTargetId(event.target.value);
+                          setBulkRolePreviewArmed(false);
+                        }}
+                      >
+                        <option value="">请选择目标角色</option>
+                        {roles.map((role) => (
+                          <option key={role.roleId} value={role.roleId}>
+                            {role.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="tool-button amber"
+                      type="button"
+                      disabled={bulkRoleChangeIds.length === 0}
+                      onClick={() => void bulkChangeReviewRole()}
+                    >
+                      {bulkRolePreviewArmed ? "确认批量改角色" : "预览批量改角色"}
+                    </button>
+                    <small>
+                      预览影响 {bulkRoleChangeIds.length} 条台词；选择目标角色后需再次确认。
+                    </small>
+                  </div>
+                  <div className="review-filter-row" aria-label="阻塞项筛选">
+                    {(
+                      [
+                        "needs_human_review",
+                        "unselected_role",
+                        "long_utterance",
+                        "dubbing_failed",
+                      ] as (keyof QualitySummary)[]
+                    ).map((issueType) => (
+                      <button
+                        key={issueType}
+                        type="button"
+                        onClick={() => void loadReviewQueue(issueType)}
+                      >
+                        {QUALITY_LABELS[issueType]}
+                      </button>
+                    ))}
+                  </div>
+                </details>
                 <div className="blocker-list" aria-label="制作阻塞项列表">
                   {blockerItems.length === 0 ? (
                     <small>暂无制作阻塞项；刷新后会显示需要人工处理的事项。</small>
                   ) : (
-                    blockerItems.map((item) => (
+                    visibleBlockerItems.map((item) => (
                       <button
                         className="blocker-card"
                         key={item.issue_id}
@@ -4397,6 +4525,11 @@ function App() {
                         </small>
                       </button>
                     ))
+                  )}
+                  {hiddenBlockerCount > 0 && (
+                    <small>
+                      还有 {hiddenBlockerCount} 个阻塞项；可按类型筛选或进入批量处理。
+                    </small>
                   )}
                 </div>
 
@@ -4459,9 +4592,15 @@ function App() {
                 </div>
               </section>
 
-              <section className="panel">
+              <details className="panel sidebar-muted-panel role-list-panel">
+                <summary>
+                  <span>
+                    <span className="section-title">角色列表</span>
+                    <small>{roles.length} 个角色；展开编辑角色与音色。</small>
+                  </span>
+                </summary>
                 <div className="section-heading">
-                  <div className="section-title">角色列表</div>
+                  <small>编辑角色名、别名、音色匹配和角色删除。</small>
                   <button
                     className="tool-button teal"
                     type="button"
@@ -4625,7 +4764,7 @@ function App() {
                     ))}
                   </div>
                 )}
-              </section>
+              </details>
             </>
           )}
         </aside>
@@ -4739,11 +4878,19 @@ function App() {
                   </div>
                 </details>
                 <div className="delivery-hint" aria-label="整章播放列表控制">
-                  整章播放列表支持播放、暂停、继续、上一句、下一句；当前播放台词高亮。
-                  导出制作包包含完整 WAV/MP3、逐句音频 + manifest、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单；
-                  音频后期默认应用片段间停顿、头尾静音裁剪和响度归一化。
+                  整章播放列表支持播放、暂停、上一句、下一句；当前播放台词高亮。
+                  导出包包含完整音频、逐句音频、台本、字幕、角色表、音色表和失败清单。
                 </div>
-                <div className="export-settings-panel" aria-label="导出制作包参数">
+                <div
+                  className="export-settings-panel"
+                  aria-label="导出制作包参数"
+                >
+                  <div className="export-settings-heading">
+                    <span>导出参数</span>
+                    <small>
+                      当前预设：{exportOptions.label}；高级参数可按需展开。
+                    </small>
+                  </div>
                   <div className="export-preset-row">
                     {(Object.entries(EXPORT_PRESETS) as [ExportPreset, ExportOptions][]).map(
                       ([preset, options]) => (
@@ -4762,82 +4909,94 @@ function App() {
                       ),
                     )}
                   </div>
-                  <div className="export-advanced-grid">
-                    <label>
-                      片段间停顿 ms
-                      <input
-                        type="number"
-                        min="0"
-                        value={exportOptions.pauseMs}
-                        onChange={(event) =>
-                          setExportOptions((current) => ({
-                            ...current,
-                            pauseMs: Math.max(0, Number(event.target.value) || 0),
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      语速
-                      <input
-                        type="number"
-                        min="0.5"
-                        step="0.05"
-                        value={exportOptions.speed}
-                        onChange={(event) =>
-                          setExportOptions((current) => ({
-                            ...current,
-                            speed: Math.max(0.5, Number(event.target.value) || 1),
-                          }))
-                        }
-                      />
-                    </label>
-                    <label>
-                      目标峰值
-                      <input
-                        type="number"
-                        min="0.1"
-                        max="1"
-                        step="0.01"
-                        value={exportOptions.targetPeak}
-                        onChange={(event) =>
-                          setExportOptions((current) => ({
-                            ...current,
-                            targetPeak: Math.min(
-                              1,
-                              Math.max(0.1, Number(event.target.value) || 0.9),
-                            ),
-                          }))
-                        }
-                      />
-                    </label>
-                    <label className="checkline">
-                      <input
-                        type="checkbox"
-                        checked={exportOptions.trimSilence}
-                        onChange={(event) =>
-                          setExportOptions((current) => ({
-                            ...current,
-                            trimSilence: event.target.checked,
-                          }))
-                        }
-                      />
-                      头尾静音裁剪
-                    </label>
-                    <label className="checkline">
-                      <input
-                        type="checkbox"
-                        checked={exportOptions.normalizeAudio}
-                        onChange={(event) =>
-                          setExportOptions((current) => ({
-                            ...current,
-                            normalizeAudio: event.target.checked,
-                          }))
-                        }
-                      />
-                      响度归一化
-                    </label>
-                  </div>
+                  <details className="export-advanced-panel">
+                    <summary>高级导出参数</summary>
+                    <div className="export-advanced-grid">
+                      <label>
+                        片段间停顿 ms
+                        <input
+                          type="number"
+                          min="0"
+                          value={exportOptions.pauseMs}
+                          onChange={(event) =>
+                            setExportOptions((current) => ({
+                              ...current,
+                              pauseMs: Math.max(
+                                0,
+                                Number(event.target.value) || 0,
+                              ),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        语速
+                        <input
+                          type="number"
+                          min="0.5"
+                          step="0.05"
+                          value={exportOptions.speed}
+                          onChange={(event) =>
+                            setExportOptions((current) => ({
+                              ...current,
+                              speed: Math.max(
+                                0.5,
+                                Number(event.target.value) || 1,
+                              ),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label>
+                        目标峰值
+                        <input
+                          type="number"
+                          min="0.1"
+                          max="1"
+                          step="0.01"
+                          value={exportOptions.targetPeak}
+                          onChange={(event) =>
+                            setExportOptions((current) => ({
+                              ...current,
+                              targetPeak: Math.min(
+                                1,
+                                Math.max(
+                                  0.1,
+                                  Number(event.target.value) || 0.9,
+                                ),
+                              ),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="checkline">
+                        <input
+                          type="checkbox"
+                          checked={exportOptions.trimSilence}
+                          onChange={(event) =>
+                            setExportOptions((current) => ({
+                              ...current,
+                              trimSilence: event.target.checked,
+                            }))
+                          }
+                        />
+                        头尾静音裁剪
+                      </label>
+                      <label className="checkline">
+                        <input
+                          type="checkbox"
+                          checked={exportOptions.normalizeAudio}
+                          onChange={(event) =>
+                            setExportOptions((current) => ({
+                              ...current,
+                              normalizeAudio: event.target.checked,
+                            }))
+                          }
+                        />
+                        响度归一化
+                      </label>
+                    </div>
+                  </details>
                 </div>
                 <div className="status-filter-bar" aria-label="状态筛选">
                   <span>状态筛选</span>
@@ -6009,6 +6168,13 @@ function App() {
           <p className="product-subtitle">
             基于 Agent 的多人有声书自动配音工作台
           </p>
+        </div>
+        <div className="health-strip" aria-label="运行状态">
+          <span className={`health-chip ${serviceHealth.state}`}>
+            {serviceHealth.label}
+          </span>
+          <small>{serviceHealth.detail}</small>
+          <small>{resourceStatus}</small>
         </div>
         <div className="topbar-actions">
           <div className="mode-selector" role="group" aria-label="配音模式">

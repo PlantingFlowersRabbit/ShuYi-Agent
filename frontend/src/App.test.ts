@@ -222,9 +222,15 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("/story-bible/facts");
 
     expect(appSource).toContain("productionPrimaryAction");
-    expect(appSource).toContain("开始制作");
-    expect(appSource).toContain("继续下一步");
+    expect(appSource).toContain("上传小说");
+    expect(appSource).toContain("解析章节");
+    expect(appSource).toContain("确认台词与角色");
+    expect(appSource).toContain("生成缺失配音");
+    expect(appSource).toContain("导出制作包");
     expect(appSource).toContain("处理阻塞项");
+    expect(appSource).toContain("production-stepper");
+    expect(appSource).toContain("后端待检测");
+    expect(appSource).toContain("前端本地规则可继续");
     expect(appSource).toContain("智能下一步助手");
     expect(appSource).not.toContain(">生成计划</button>");
     expect(appSource).not.toContain(">执行计划</button>");
@@ -340,13 +346,17 @@ describe("v0.7.1 application shell", () => {
 
     const disconnected = new ApiRequestError(0, "后端不可连接");
     const staticHostNotFound = new ApiRequestError(404, "Not Found");
+    const parserInternalError = new ApiRequestError(500, "Internal Server Error");
     const reachableFailure = new ApiRequestError(503, "TTS模型尚未就绪");
 
-    expect(apiFailureMessage("音频生成失败", disconnected)).toBe("音频生成失败：ApiRequestError");
-    expect(apiFailureMessage("测试连接失败", staticHostNotFound)).toBe("测试连接失败：ApiRequestError");
+    expect(apiFailureMessage("音频生成失败", disconnected)).toBe("音频生成失败：后端未连接");
+    expect(apiFailureMessage("测试连接失败", staticHostNotFound)).toBe("测试连接失败：后端未连接");
     expect(apiFailureMessage("测试模型失败", reachableFailure)).toBe("测试模型失败：TTS模型尚未就绪");
     expect(documentParseFallbackMessage(disconnected)).toBe(
-      "没有连接后端，解析失败，采用前端默认简易解析策略：ApiRequestError",
+      "后端未连接，已使用前端本地规则解析章节；可继续制作，连接后端后可启用 Agent 规则增强。",
+    );
+    expect(documentParseFallbackMessage(parserInternalError)).toBe(
+      "后端解析暂不可用，已使用前端本地规则解析章节；可继续制作。错误：Internal Server Error",
     );
   });
 
