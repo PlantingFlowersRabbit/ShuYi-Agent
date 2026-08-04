@@ -1644,7 +1644,7 @@ wheels = [
 
 [[package]]
 name = "shuyi-agent"
-version = "0.6.4"
+version = "0.6.5"
 source = { virtual = "." }
 
 [package.dev-dependencies]

@@ -110,6 +110,17 @@ class SQLiteRepository:
             )
             """
             )
+            connection.execute(
+                """
+            CREATE TABLE IF NOT EXISTS planner_runs (
+                run_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                run_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (run_id, project_id)
+            )
+            """
+            )
             connection.commit()
             self._connection = connection
 
@@ -382,6 +393,7 @@ class SQLiteRepository:
             connection.execute("DELETE FROM story_memory_chunks WHERE project_id = ?", (project_id,))
             connection.execute("DELETE FROM story_bible_facts WHERE project_id = ?", (project_id,))
             connection.execute("DELETE FROM run_memories WHERE project_id = ?", (project_id,))
+            connection.execute("DELETE FROM planner_runs WHERE project_id = ?", (project_id,))
             connection.commit()
         return cursor.rowcount > 0
 
@@ -555,6 +567,50 @@ class SQLiteRepository:
             return None
         return self._decode_run_memory(row[0])
 
+    def save_planner_run(self, planner_run: dict[str, Any]) -> None:
+        run_id = str(planner_run.get("run_id") or "").strip()
+        project_id = str(planner_run.get("project_id") or "").strip()
+        if not run_id or not project_id:
+            raise ValueError("Planner run requires run_id and project_id")
+        now = datetime.now(UTC).isoformat()
+        payload = dict(planner_run)
+        payload["updated_at"] = now
+        with self._lock:
+            connection = self._require_connection()
+            connection.execute(
+                """
+            INSERT INTO planner_runs (run_id, project_id, run_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(run_id, project_id) DO UPDATE SET
+                run_json = excluded.run_json,
+                updated_at = excluded.updated_at
+            """,
+                (
+                    run_id,
+                    project_id,
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def get_planner_run(self, *, project_id: str, run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = (
+                self._require_connection()
+                .execute(
+                    """
+                SELECT run_json FROM planner_runs
+                WHERE project_id = ? AND run_id = ?
+                """,
+                    (project_id, run_id),
+                )
+                .fetchone()
+            )
+        if row is None:
+            return None
+        return self._decode_planner_run(row[0])
+
     def _decode_trace(self, trace_json: str) -> dict[str, Any]:
         payload = json.loads(trace_json)
         if not isinstance(payload, dict):
@@ -583,6 +639,12 @@ class SQLiteRepository:
         payload = json.loads(memory_json)
         if not isinstance(payload, dict):
             raise TypeError("Run memory payload is not an object")
+        return payload
+
+    def _decode_planner_run(self, run_json: str) -> dict[str, Any]:
+        payload = json.loads(run_json)
+        if not isinstance(payload, dict):
+            raise TypeError("Planner run payload is not an object")
         return payload
 
     def _require_connection(self) -> sqlite3.Connection:

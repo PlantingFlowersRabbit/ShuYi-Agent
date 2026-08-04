@@ -1,6 +1,6 @@
 # 书弈 Agent 前端
 
-前端使用 React 19、TypeScript 和 Vite，提供小说导入、角色确认、配音编排与结果导出工作台。
+前端使用 React 19、TypeScript 和 Vite，提供小说导入、角色确认、制作任务 Planner、配音编排与结果导出工作台。
 
 ## 本地开发
 
@@ -25,6 +25,7 @@ v0.6.1 主页面侧栏新增 **项目工作区**、**质量检查面板** 和 **
 
 - 项目工作区调用 `/api/v1/projects`，支持新建、打开最近项目和删除非默认项目；最近项目顺序保存在浏览器 `localStorage`。
 - 质量检查面板向 `/api/v1/projects/{project_id}/quality-check` 发送当前章节、角色、台词与配音状态，展示生成前检查和导出前检查结果。
+- 制作任务 Planner 调用 `/api/v1/projects/{project_id}/planner/plan`、`/planner/execute` 和 `/planner/review`，展示“把当前章节处理到可导出”的计划树、步骤状态、失败原因和恢复建议。
 - 审稿队列调用 `/api/v1/projects/{project_id}/review-queue`，集中处理 `needs_human_review`、未选角色、超长台词和配音失败，并提供批量确认、批量改角色和批量重试入口。
 
 前端只保存最近项目 id 和后端地址等 UI 偏好；项目元数据、输出目录和质量检查结果以后端为准。

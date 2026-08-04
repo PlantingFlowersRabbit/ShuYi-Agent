@@ -84,7 +84,7 @@ def test_v0_5_dockerfile_defines_cpu_and_cuda_runtime_targets():
 
 
 def test_v0_62_qdrant_compose_adds_local_vector_store():
-    """v0.6.4 ships an optional Qdrant service for Story Bible RAG indexing."""
+    """v0.6.5 ships an optional Qdrant service for Story Bible RAG indexing."""
     compose_path = ROOT / "compose.qdrant.yaml"
     assert compose_path.exists()
     config = _compose_config("compose.qdrant.yaml")
@@ -105,9 +105,9 @@ def test_v0_5_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
         "--gpus all",
         "--target cpu-runtime",
         "--target cuda-runtime",
-        "v0.6.4-cpu",
+        "v0.6.5-cpu",
         "CNB_TAG:-}",
-        "v0.6.4-cuda",
+        "v0.6.5-cuda",
         "CNB_COMMIT_SHA",
     ]:
         assert required in pipeline

@@ -1,6 +1,6 @@
 # 书弈 Agent 后端
 
-后端基于 FastAPI，包含小说解析、角色/音色管理、配音工作流、短期/长期记忆、Tool Calling Registry、Story Bible RAG、SQLite 仓储、可选 Qdrant 向量库和本地 Qwen3-TTS 服务。
+后端基于 FastAPI，包含小说解析、角色/音色管理、配音工作流、制作任务 Planner、短期/长期记忆、Tool Calling Registry、Story Bible RAG、SQLite 仓储、可选 Qdrant 向量库和本地 Qwen3-TTS 服务。
 
 ## 本地启动
 
@@ -56,6 +56,17 @@ v0.6.4 新增 Run Memory 和长期 Story Memory 读写规则：
 - `GET /api/v1/projects/{project_id}/run-memory/{run_id}`：恢复一次工具计划或 Agent run 的短期记忆，包括目标、计划、步骤、工具调用、错误、reflection 和最终输出。
 
 `rejected` 事实不会被删除，会留在长期记忆中防止模型反复提出同一个错误事实；但它不会进入 `facts_for_prompt`，`lookup_pronunciation` 等工具也不会把它当作可信事实返回。
+
+## 制作任务 Planner
+
+v0.6.5 新增项目级 Planner API：
+
+- `POST /api/v1/projects/{project_id}/planner/plan`：把制作目标拆成计划树，默认覆盖章节状态检查、Story Bible 检索、角色/台词状态查询、长句拆分建议、TTS 健康检查、导出前检查和 Reviewer 复盘。
+- `POST /api/v1/projects/{project_id}/planner/execute`：只执行 Tool Registry 中注册过的工具步骤；可传 `run_id` 继续已保存计划，也可传 `max_steps` 分批执行。
+- `POST /api/v1/projects/{project_id}/planner/review`：复盘失败步骤和待处理步骤，返回 remaining issues、是否需要人工介入和恢复建议。
+- `GET /api/v1/projects/{project_id}/planner/runs/{run_id}`：恢复已保存 Planner run。
+
+Planner run 会持久化到 `planner_runs`，同时写入 `agent_runs` checkpoint、Run Memory 和 `planner_step_*` events。工具失败不会被吞掉，会把 run 状态切到 `waiting_for_user`，并提示修正输入后从失败步骤继续。
 
 ## Tool Calling Registry
 

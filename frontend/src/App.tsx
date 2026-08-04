@@ -405,6 +405,51 @@ type ReviewQueueResponse = {
   filters?: Record<string, string>;
 };
 
+type PlannerStep = {
+  step_id: string;
+  title: string;
+  status: string;
+  kind?: string;
+  rationale?: string;
+  tool_call?: {
+    tool_name?: string;
+    arguments?: Record<string, unknown>;
+  } | null;
+  tool_result?: {
+    status?: string;
+    failure?: string | null;
+    output_summary?: string;
+  };
+};
+
+type PlannerRun = {
+  run_id: string;
+  project_id: string;
+  chapter_id?: string;
+  status: string;
+  current_goal: string;
+  steps: PlannerStep[];
+  recovery_suggestions?: {
+    step_id?: string;
+    title?: string;
+    message?: string;
+  }[];
+};
+
+type PlannerRunResponse = {
+  project_id: string;
+  planner_run: PlannerRun;
+  review?: {
+    status: string;
+    remaining_issues: {
+      failed_step_id?: string;
+      title?: string;
+      message?: string;
+      recovery_action?: string;
+    }[];
+  };
+};
+
 type ProjectQualityPayload = {
   chapters: {
     chapter_id: string;
@@ -1474,6 +1519,10 @@ function App() {
   });
   const [qualityStatus, setQualityStatus] =
     useState("质量检查面板等待当前项目数据。");
+  const [plannerGoal, setPlannerGoal] = useState("把当前章节处理到可导出");
+  const [plannerRun, setPlannerRun] = useState<PlannerRun | null>(null);
+  const [plannerStatus, setPlannerStatus] =
+    useState("制作任务 Planner 等待目标。");
   const [chapterPlaybackState, setChapterPlaybackState] = useState<
     "idle" | "playing" | "paused"
   >("idle");
@@ -1747,6 +1796,82 @@ function App() {
         setQualityStatus(`审稿队列已筛选：${QUALITY_LABELS[issueType]}`);
     } catch (error) {
       setQualityStatus(apiFailureMessage("审稿队列读取失败", error));
+    }
+  }
+
+  async function generatePlannerPlan() {
+    const goal = plannerGoal.trim();
+    if (!goal) {
+      setPlannerStatus("请输入制作目标后再生成计划");
+      return;
+    }
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    setPlannerStatus("正在生成制作任务计划");
+    try {
+      const data = await requestJson<PlannerRunResponse>(
+        `/projects/${encodeURIComponent(projectId)}/planner/plan`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            goal,
+            chapter_id: activeChapterId,
+            ...projectQualityPayload(),
+          }),
+        },
+      );
+      setPlannerRun(data.planner_run);
+      setPlannerStatus(`计划已生成：${data.planner_run.steps.length} 个步骤`);
+    } catch (error) {
+      setPlannerStatus(apiFailureMessage("Planner 生成计划失败", error));
+    }
+  }
+
+  async function executePlannerPlan() {
+    if (!plannerRun) {
+      setPlannerStatus("请先生成计划，再执行 Planner");
+      return;
+    }
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    setPlannerStatus("正在执行制作任务计划");
+    try {
+      const data = await requestJson<PlannerRunResponse>(
+        `/projects/${encodeURIComponent(projectId)}/planner/execute`,
+        {
+          method: "POST",
+          body: JSON.stringify({ run_id: plannerRun.run_id }),
+        },
+      );
+      setPlannerRun(data.planner_run);
+      setPlannerStatus(`计划执行状态：${data.planner_run.status}`);
+    } catch (error) {
+      setPlannerStatus(apiFailureMessage("Planner 执行失败", error));
+    }
+  }
+
+  async function reviewPlannerPlan() {
+    if (!plannerRun) {
+      setPlannerStatus("请先生成计划，再复盘 Planner");
+      return;
+    }
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    setPlannerStatus("正在复盘制作任务计划");
+    try {
+      const data = await requestJson<PlannerRunResponse>(
+        `/projects/${encodeURIComponent(projectId)}/planner/review`,
+        {
+          method: "POST",
+          body: JSON.stringify({ run_id: plannerRun.run_id }),
+        },
+      );
+      setPlannerRun(data.planner_run);
+      const issueCount = data.review?.remaining_issues.length ?? 0;
+      setPlannerStatus(
+        issueCount > 0
+          ? `复盘完成：仍有 ${issueCount} 个问题需要人工介入`
+          : `复盘完成：${data.review?.status ?? data.planner_run.status}`,
+      );
+    } catch (error) {
+      setPlannerStatus(apiFailureMessage("Planner 复盘失败", error));
     }
   }
 
@@ -3585,6 +3710,85 @@ function App() {
                 <small className="status-message" aria-label="质量检查反馈">
                   {qualityStatus}
                 </small>
+
+                <div className="planner-panel" aria-label="制作任务 Planner">
+                  <div className="section-heading">
+                    <div>
+                      <div className="section-title">制作任务 Planner</div>
+                      <small>把章节目标拆成可执行、可复盘、可恢复的工具计划。</small>
+                    </div>
+                    <span className={`planner-status ${plannerRun?.status ?? "idle"}`}>
+                      {plannerRun?.status ?? "idle"}
+                    </span>
+                  </div>
+                  <input
+                    aria-label="Planner目标"
+                    value={plannerGoal}
+                    onChange={(event) => setPlannerGoal(event.target.value)}
+                  />
+                  <div className="toolbar-row compact">
+                    <button
+                      className="tool-button purple"
+                      type="button"
+                      onClick={() => void generatePlannerPlan()}
+                    >
+                      生成计划
+                    </button>
+                    <button
+                      className="tool-button teal"
+                      type="button"
+                      disabled={!plannerRun}
+                      onClick={() => void executePlannerPlan()}
+                    >
+                      执行计划
+                    </button>
+                    <button
+                      className="tool-button amber"
+                      type="button"
+                      disabled={!plannerRun}
+                      onClick={() => void reviewPlannerPlan()}
+                    >
+                      复盘计划
+                    </button>
+                  </div>
+                  <small className="status-message" aria-label="Planner反馈">
+                    {plannerStatus}
+                  </small>
+                  <div className="planner-step-list" aria-label="Planner计划树">
+                    {!plannerRun ? (
+                      <small>尚未生成计划，默认目标是“把当前章节处理到可导出”。</small>
+                    ) : (
+                      plannerRun.steps.map((step, index) => (
+                        <article
+                          className={`planner-step-card ${step.status}`}
+                          key={step.step_id}
+                        >
+                          <strong>
+                            {index + 1}. {step.title}
+                          </strong>
+                          <span>{step.status}</span>
+                          <small>
+                            {step.tool_call?.tool_name ??
+                              step.rationale ??
+                              "reviewer checkpoint"}
+                          </small>
+                          {step.tool_result?.failure && (
+                            <small>失败原因：{step.tool_result.failure}</small>
+                          )}
+                        </article>
+                      ))
+                    )}
+                  </div>
+                  {(plannerRun?.recovery_suggestions ?? []).length > 0 && (
+                    <div className="planner-recovery-list">
+                      {(plannerRun?.recovery_suggestions ?? []).map((item) => (
+                        <small key={item.step_id}>
+                          {item.title}：{item.message}
+                        </small>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 <div className="review-queue-panel" aria-label="审稿队列">
                   <div className="section-heading">

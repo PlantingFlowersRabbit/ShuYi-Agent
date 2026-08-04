@@ -59,6 +59,14 @@ from backend.app.domain.dubbing_workflow import (
 from backend.app.domain.llm import MissingProviderCredential
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
 from backend.app.domain.novel_files import NovelFileError, extract_novel_file
+from backend.app.domain.production_planner import (
+    PLANNER_AGENT_ID,
+    build_production_planner_run,
+    execute_planner_run,
+    planner_run_from_payload,
+    planner_run_to_memory_payload,
+    review_planner_run,
+)
 from backend.app.domain.project_workspace import (
     DEFAULT_PROJECT_ID,
     build_quality_report,
@@ -119,7 +127,7 @@ REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.6.4"
+SERVICE_VERSION = "0.6.5"
 PUBLIC_BROWSER_CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "*",
@@ -1106,6 +1114,99 @@ def create_app() -> FastAPI:
         if memory is None:
             raise HTTPException(status_code=404, detail="Run Memory 不存在")
         return {"project_id": safe_id, "run_memory": memory}
+
+    @app.post("/api/v1/projects/{project_id}/planner/plan")
+    async def plan_production_task(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        try:
+            planner_run = build_production_planner_run(
+                project_id=safe_id,
+                payload=payload or {},
+                registered_tools=_registered_tool_names(app.state.tool_registry),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _persist_planner_run(repository, planner_run)
+        return {
+            "project_id": safe_id,
+            "planner_run": planner_run,
+            "planner_policy": {
+                "executor": "registered_tools_only",
+                "failure_mode": "pause_with_recovery_suggestions",
+                "reviewer": "checks_failed_and_pending_steps",
+            },
+        }
+
+    @app.get("/api/v1/projects/{project_id}/planner/runs/{run_id}")
+    async def get_production_planner_run(project_id: str, run_id: str):
+        safe_id = _require_project(repository, project_id)
+        planner_run = repository.get_planner_run(project_id=safe_id, run_id=run_id)
+        if planner_run is None:
+            raise HTTPException(status_code=404, detail="Planner run 不存在")
+        return {"project_id": safe_id, "planner_run": planner_run}
+
+    @app.post("/api/v1/projects/{project_id}/planner/execute")
+    async def execute_production_plan(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        plan = payload or {}
+        run_id = str(plan.get("run_id") or "")
+        existing = repository.get_planner_run(project_id=safe_id, run_id=run_id) if run_id else None
+        try:
+            planner_run = (
+                existing
+                if existing is not None and not plan.get("steps")
+                else planner_run_from_payload(
+                    project_id=safe_id,
+                    payload=plan,
+                    registered_tools=_registered_tool_names(app.state.tool_registry),
+                )
+            )
+            updated = execute_planner_run(
+                planner_run=planner_run,
+                registry=app.state.tool_registry,
+                context=ToolExecutionContext(project_id=safe_id),
+                max_steps=int(plan.get("max_steps") or 0) or None,
+            )
+        except UnknownToolError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ToolPermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ToolValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _append_planner_events(repository, updated)
+        _persist_planner_run(repository, updated)
+        return {"project_id": safe_id, "planner_run": updated}
+
+    @app.post("/api/v1/projects/{project_id}/planner/review")
+    async def review_production_plan(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        plan = payload or {}
+        run_id = str(plan.get("run_id") or "")
+        existing = repository.get_planner_run(project_id=safe_id, run_id=run_id) if run_id else None
+        try:
+            planner_run = (
+                existing
+                if existing is not None and not plan.get("steps")
+                else planner_run_from_payload(
+                    project_id=safe_id,
+                    payload=plan,
+                    registered_tools=_registered_tool_names(app.state.tool_registry),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        review = review_planner_run(planner_run)
+        updated = {
+            **planner_run,
+            "status": review["status"],
+            "reflection": [*planner_run.get("reflection", []), review],
+            "final_output": {"status": review["status"], "review": review},
+            "updated_at": review["reviewed_at"],
+        }
+        _persist_planner_run(repository, updated)
+        return {"project_id": safe_id, "planner_run": updated, "review": review}
 
     @app.get("/api/v1/tools")
     async def list_tools() -> dict[str, Any]:
@@ -2971,6 +3072,55 @@ def _require_project(repository: SQLiteRepository, project_id: str) -> str:
     if repository.get_project(safe_id) is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     return safe_id
+
+
+def _registered_tool_names(registry: ToolRegistry) -> set[str]:
+    return {str(definition["tool_name"]) for definition in registry.list_definitions()}
+
+
+def _persist_planner_run(repository: SQLiteRepository, planner_run: dict[str, Any]) -> None:
+    repository.save_planner_run(planner_run)
+    repository.save_agent_run(
+        run_id=str(planner_run["run_id"]),
+        agent_id=PLANNER_AGENT_ID,
+        status=str(planner_run.get("status") or "planned"),
+        checkpoint=planner_run,
+    )
+    repository.save_run_memory(
+        build_run_memory_snapshot(
+            project_id=str(planner_run["project_id"]),
+            run_id=str(planner_run["run_id"]),
+            payload=planner_run_to_memory_payload(planner_run),
+            tool_results=planner_run.get("tool_results") or [],
+            final_status=str(planner_run.get("status") or "planned"),
+        )
+    )
+
+
+def _append_planner_events(repository: SQLiteRepository, planner_run: dict[str, Any]) -> None:
+    run_id = str(planner_run.get("run_id") or "")
+    if not run_id:
+        return
+    for sequence, step in enumerate(planner_run.get("steps") or [], start=1):
+        if not isinstance(step, dict) or step.get("status") == "pending":
+            continue
+        repository.append_event(
+            run_id=run_id,
+            sequence=sequence,
+            event_type=f"planner_step_{step.get('status')}",
+            payload={
+                "project_id": planner_run.get("project_id"),
+                "step_id": step.get("step_id"),
+                "title": step.get("title"),
+                "status": step.get("status"),
+                "tool_name": (step.get("tool_call") or {}).get("tool_name")
+                if isinstance(step.get("tool_call"), dict)
+                else "",
+                "failure": (step.get("tool_result") or {}).get("failure")
+                if isinstance(step.get("tool_result"), dict)
+                else None,
+            },
+        )
 
 
 def _quality_payload_from_request(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:

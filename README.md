@@ -24,20 +24,21 @@ src="https://img.shields.io/badge/Code_License-MIT-f5de53?&color=f5de53"/></a>
 3. [项目结构](#项目结构)
 4. [本地开发](#本地开发)
 5. [API 与 OpenAPI](#api-与-openapi)
-6. [短期与长期记忆机制](#短期与长期记忆机制)
-7. [Tool Calling Registry](#tool-calling-registry)
-8. [Story Bible RAG 与 Qdrant](#story-bible-rag-与-qdrant)
-9. [项目工作区与审稿队列](#项目工作区与审稿队列)
-10. [Agent 追踪与上下文报告](#agent-追踪与上下文报告)
-11. [Docker CPU / GPU](#docker-cpu--gpu)
-12. [环境变量](#环境变量)
-13. [GitHub Pages](#github-pages)
-14. [CNB 镜像发布模板](#cnb-镜像发布模板)
-15. [验证](#验证)
+6. [制作任务 Planner](#制作任务-planner)
+7. [短期与长期记忆机制](#短期与长期记忆机制)
+8. [Tool Calling Registry](#tool-calling-registry)
+9. [Story Bible RAG 与 Qdrant](#story-bible-rag-与-qdrant)
+10. [项目工作区与审稿队列](#项目工作区与审稿队列)
+11. [Agent 追踪与上下文报告](#agent-追踪与上下文报告)
+12. [Docker CPU / GPU](#docker-cpu--gpu)
+13. [环境变量](#环境变量)
+14. [GitHub Pages](#github-pages)
+15. [CNB 镜像发布模板](#cnb-镜像发布模板)
+16. [验证](#验证)
 
 ## 简介
 
-书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.6.4 新增短期 Run Memory、长期 Story Memory 可信度策略和错误记忆防污染；v0.6.3 新增 Tool Calling Registry、声明式工具 schema、JSON-plan fallback、项目级权限隔离和 Trace Viewer 工具调用审计；v0.6.2 新增 Story Bible RAG、OpenAI-compatible embedding、可选 Qdrant 向量库、SQLite 文本检索降级和带来源引用的角色证据；v0.6.1 增加项目/书籍工作区、按 `project_id` 隔离的输出路径、生成前/导出前质量检查和审稿队列；v0.6.0 已加入 Agent Run History、Prompt SHA、token/context 预算报告和可审计追踪详情。项目同时保留 v0.5.5 的公开 v1 API、前端一键后台下载并部署 TTS 模型、OpenAI SDK 兼容文本模型配置，以及“运行时不会生成或执行模型返回 Python 代码”的安全边界。
+书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.6.5 新增制作任务 Planner，可把“把当前章节处理到可导出”拆成可执行、可复盘、可恢复的工具计划；v0.6.4 新增短期 Run Memory、长期 Story Memory 可信度策略和错误记忆防污染；v0.6.3 新增 Tool Calling Registry、声明式工具 schema、JSON-plan fallback、项目级权限隔离和 Trace Viewer 工具调用审计；v0.6.2 新增 Story Bible RAG、OpenAI-compatible embedding、可选 Qdrant 向量库、SQLite 文本检索降级和带来源引用的角色证据；v0.6.1 增加项目/书籍工作区、按 `project_id` 隔离的输出路径、生成前/导出前质量检查和审稿队列；v0.6.0 已加入 Agent Run History、Prompt SHA、token/context 预算报告和可审计追踪详情。项目同时保留 v0.5.5 的公开 v1 API、前端一键后台下载并部署 TTS 模型、OpenAI SDK 兼容文本模型配置，以及“运行时不会生成或执行模型返回 Python 代码”的安全边界。
 
 ## 快速开始
 
@@ -118,6 +119,7 @@ npm --prefix frontend run dev
 - Story Bible 纠错：`PATCH /api/v1/projects/{project_id}/story-bible/facts/{fact_id}`
 - Story Memory 上下文：`GET /api/v1/projects/{project_id}/story-bible/memory-context?query=...`
 - Run Memory 恢复：`GET /api/v1/projects/{project_id}/run-memory/{run_id}`
+- 制作任务 Planner：`POST /api/v1/projects/{project_id}/planner/plan`、`POST /planner/execute`、`POST /planner/review`、`GET /planner/runs/{run_id}`
 - Tool Registry：`GET /api/v1/tools`
 - Tool Calling 执行：`POST /api/v1/projects/{project_id}/tools/execute`
 - Agent 追踪列表：`GET /api/v1/agent-runs`
@@ -125,6 +127,14 @@ npm --prefix frontend run dev
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 - Swagger UI：`http://127.0.0.1:8000/docs`
 - v1 接口默认公开访问，不再需要后端访问令牌；文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
+
+## 制作任务 Planner
+
+v0.6.5 新增制作任务 Planner，把“把当前章节处理到可导出”这类目标拆成计划树，并通过 Tool Registry 执行项目状态检查、Story Bible 检索、台词查询、长句拆分建议、TTS 健康检查和导出前质量检查。Planner 不执行未注册工具，不让模型直接运行任意代码；每个工具步骤仍沿用 v0.6.3 的项目权限、参数校验和失败摘要。
+
+Planner run 会写入 SQLite `planner_runs`，同时同步到 `agent_runs` checkpoint、短期 Run Memory 和 `planner_step_*` events。`POST /planner/execute` 支持从已保存 `run_id` 继续执行，也支持 `max_steps` 做分批执行；工具失败后状态转为 `waiting_for_user`，并返回 `recovery_suggestions`。`POST /planner/review` 会输出 remaining issues、是否需要人工介入，以及“修正输入后从失败步骤继续”的恢复建议。
+
+前端主页面侧栏新增 **制作任务 Planner** 面板，默认目标为“把当前章节处理到可导出”，支持生成计划、执行计划和复盘计划，并展示每一步的状态、工具名、失败原因与恢复建议。这个阶段的面试讲解重点是：目标拆解、受控工具执行、暂停/继续、失败恢复、Reviewer 复盘和 Human-in-the-loop。
 
 ## 短期与长期记忆机制
 
