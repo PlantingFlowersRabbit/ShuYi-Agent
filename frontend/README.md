@@ -19,6 +19,24 @@ VITE_API_BASE_URL=api.example.com
 
 CNB/VS Code 环境会通过 `.devcontainer/devcontainer.json` 请求自动转发 8000 端口，并通过 `.vscode/settings.json` 识别启动脚本打印的 `http://localhost:8000`。公网地址以 PORTS 面板的 Forwarded Address 为准，不要使用启动日志里的模板地址。
 
+## 项目工作区与审稿队列
+
+v0.6.1 主页面侧栏新增 **项目工作区**、**质量检查面板** 和 **审稿队列**：
+
+- 项目工作区调用 `/api/v1/projects`，支持新建、打开最近项目和删除非默认项目；最近项目顺序保存在浏览器 `localStorage`。
+- 质量检查面板向 `/api/v1/projects/{project_id}/quality-check` 发送当前章节、角色、台词与配音状态，展示生成前检查和导出前检查结果。
+- 审稿队列调用 `/api/v1/projects/{project_id}/review-queue`，集中处理 `needs_human_review`、未选角色、超长台词和配音失败，并提供批量确认、批量改角色和批量重试入口。
+
+前端只保存最近项目 id 和后端地址等 UI 偏好；项目元数据、输出目录和质量检查结果以后端为准。
+
+## Story Bible RAG
+
+v0.6.2 的 Story Memory、Story Bible、embedding 和 Qdrant 能力先落在后端 API：`/api/v1/projects/{project_id}/memory/index`、`/memory/search`、`/story-bible` 和 `/story-bible/facts/{fact_id}`。v0.6.4 追加长期记忆写入、`memory-context` 和 `run-memory` 恢复 API；前端当前不会保存 embedding key 或向量库配置，后续页面只应调用后端聚合结果并展示 `source_citations` 与可信度状态。
+
+## Agent 追踪页面
+
+v0.6.0 顶部导航新增 **Agent追踪**。页面会调用 `/api/v1/agent-runs` 和 `/api/v1/agent-runs/{run_id}`，展示 Run History、Prompt SHA、token 预算、输入摘要、模型输出、JSON 校验、reflection 和最终决策。v0.6.3 追加 Tool Calls 区块，展示工具名、参数摘要、返回摘要、耗时和失败原因。该页面只读取后端 trace，不接收或展示模型 API key。
+
 ## 测试与构建
 
 ```bash

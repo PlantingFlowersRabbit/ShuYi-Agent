@@ -205,7 +205,8 @@ small {
 .sidebar,
 .main-panel,
 .library-page,
-.model-page {
+.model-page,
+.trace-page {
   min-width: 0;
 }
 
@@ -326,7 +327,9 @@ small {
   padding: 7px 12px;
   font-size: 12px;
   font-weight: 700;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
   white-space: nowrap;
 }
 
@@ -450,6 +453,140 @@ small {
 .chapter-list button.active {
   background: #dbeafe;
   color: #2563eb;
+}
+
+.project-workspace-panel,
+.quality-panel,
+.review-queue-panel {
+  align-content: start;
+}
+
+.project-roots {
+  display: grid;
+  gap: 4px;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.recent-project-list,
+.review-item-list {
+  display: grid;
+  gap: 8px;
+}
+
+.project-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 8px;
+}
+
+.project-card.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.project-card > button:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  background: transparent;
+  color: #334155;
+  padding: 0;
+  text-align: left;
+  white-space: normal;
+}
+
+.project-card strong,
+.project-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-card span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.quality-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.quality-summary-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.quality-summary-item.active {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.quality-summary-item strong {
+  min-width: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 2px 7px;
+  text-align: center;
+}
+
+.review-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.review-filter-row button {
+  background: #f1f5f9;
+  color: #475569;
+  padding: 5px 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.review-item-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #334155;
+  padding: 9px;
+  text-align: left;
+  white-space: normal;
+}
+
+.review-item-card strong {
+  color: #b45309;
+  font-size: 12px;
+}
+
+.review-item-card span {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .role-card,
@@ -631,7 +768,10 @@ small {
   border-left-width: 5px;
   border-radius: 8px;
   padding: 10px 12px;
-  transition: opacity 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+  transition:
+    opacity 120ms ease,
+    box-shadow 120ms ease,
+    border-color 120ms ease;
 }
 
 .reader-paragraph + .reader-paragraph {
@@ -862,7 +1002,10 @@ small {
 
 .utterance-card {
   display: grid;
-  grid-template-columns: minmax(240px, 2fr) minmax(120px, 1fr) minmax(130px, 1fr);
+  grid-template-columns: minmax(240px, 2fr) minmax(120px, 1fr) minmax(
+      130px,
+      1fr
+    );
   gap: 8px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
@@ -904,7 +1047,8 @@ small {
 }
 
 .library-page,
-.model-page {
+.model-page,
+.trace-page {
   display: grid;
   align-content: start;
   gap: 16px;
@@ -913,6 +1057,143 @@ small {
   overflow-y: auto;
   overflow-x: hidden;
   padding: 16px;
+}
+
+.trace-page {
+  grid-template-columns: minmax(280px, 34%) minmax(0, 1fr);
+}
+
+.trace-list-panel,
+.trace-detail-panel {
+  align-content: start;
+}
+
+.trace-run-list {
+  display: grid;
+  gap: 10px;
+}
+
+.trace-run-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #334155;
+  padding: 10px;
+  text-align: left;
+  white-space: normal;
+}
+
+.trace-run-card.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.trace-run-card.empty {
+  cursor: default;
+}
+
+.trace-run-card span {
+  color: #475569;
+  font-size: 12px;
+}
+
+.trace-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.trace-metric-grid div,
+.trace-section {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 10px;
+}
+
+.trace-metric-grid span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.trace-metric-grid strong {
+  overflow-wrap: anywhere;
+}
+
+.trace-section p {
+  margin: 0;
+  color: #334155;
+  line-height: 1.55;
+}
+
+.trace-section pre {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.tool-call-list {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-call-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.tool-call-card > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tool-call-card span {
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #075985;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 2px 8px;
+}
+
+.tool-call-card dl {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 4px 8px;
+  margin: 0;
+}
+
+.tool-call-card dt {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tool-call-card dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
 }
 
 .voice-grid {
@@ -999,13 +1280,16 @@ label {
   .chapter-reader,
   .statement-panel,
   .library-page,
-  .model-page {
+  .model-page,
+  .trace-page {
     overflow: visible;
   }
 
   .chapter-workspace-grid,
   .two-column,
   .model-page,
+  .trace-page,
+  .trace-metric-grid,
   .compact-grid,
   .utterance-card {
     grid-template-columns: minmax(0, 1fr);

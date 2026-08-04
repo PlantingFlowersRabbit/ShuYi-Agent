@@ -4,7 +4,11 @@ import {
   transitionWorkflow,
   type WorkflowMode,
 } from "./features/agent-workflow/workflowMachine";
-import { APP_BRAND, APP_VERSION, runtimeConfig } from "./shared/config/runtimeConfig";
+import {
+  APP_BRAND,
+  APP_VERSION,
+  runtimeConfig,
+} from "./shared/config/runtimeConfig";
 
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -31,7 +35,10 @@ function formatApiErrorDetail(detail: unknown): string {
 export function apiFailureDetail(error: unknown): string {
   if (error instanceof ApiRequestError) {
     const message = error.message || "ApiRequestError";
-    if (error.status === 0 || (error.status === 404 && ["Not Found", "请求失败"].includes(message))) {
+    if (
+      error.status === 0 ||
+      (error.status === 404 && ["Not Found", "请求失败"].includes(message))
+    ) {
       return "ApiRequestError";
     }
     return message;
@@ -50,23 +57,31 @@ export function documentParseFallbackMessage(error: unknown): string {
   return apiFailureMessage("文档解析失败，已使用本地章节索引兜底", error);
 }
 
-export function formatBatchDubbingStatus(data: BatchDubbingStatusPayload): string {
+export function formatBatchDubbingStatus(
+  data: BatchDubbingStatusPayload,
+): string {
   const groupSummary = data.groups
     .map((group) => `${group.voice_resource_id}×${group.count}`)
     .join("，");
   const failureSummary =
-    data.failed_count > 0 ? "；失败原因已标记在对应台词，请直接查看对应条目" : "";
+    data.failed_count > 0
+      ? "；失败原因已标记在对应台词，请直接查看对应条目"
+      : "";
   return `批量生成配音完成：成功 ${data.success_count} 条，跳过 ${data.skipped_count} 条，失败 ${data.failed_count} 条；分组 ${groupSummary || "无待生成"}${failureSummary}`;
 }
 
-export function isRoleDeleteReferenceConflict(error: unknown): error is ApiRequestError {
+export function isRoleDeleteReferenceConflict(
+  error: unknown,
+): error is ApiRequestError {
   if (!(error instanceof ApiRequestError) || error.status !== 409) return false;
-  const detail = error.detail as { delete_result?: { referenced_count?: unknown } } | null;
+  const detail = error.detail as {
+    delete_result?: { referenced_count?: unknown };
+  } | null;
   const referencedCount = detail?.delete_result?.referenced_count;
   return typeof referencedCount === "number" && referencedCount > 0;
 }
 
-type Page = "main" | "voices" | "models";
+type Page = "main" | "voices" | "models" | "agent-runs";
 type VoiceMode = "voice_cloning" | "voice_design";
 
 type Chapter = {
@@ -251,7 +266,11 @@ type RoleAnalysisRunResponse = {
   role_candidates: AiRoleCandidate[];
   roles?: ApiRoleCard[];
   voices?: ApiVoiceResource[];
-  auto_role_report?: { added_count: number; updated_count: number; generated_voice_count: number } | null;
+  auto_role_report?: {
+    added_count: number;
+    updated_count: number;
+    generated_voice_count: number;
+  } | null;
 };
 
 type AiRoleSelectionEvent = {
@@ -271,7 +290,131 @@ type DubbingArrangementResponse = {
   message: string;
   utterances_by_paragraph: Record<string, ApiUtterance[]>;
   role_selection_events: AiRoleSelectionEvent[];
-  failure?: { paragraph_id: string; error_code: string; message: string } | null;
+  failure?: {
+    paragraph_id: string;
+    error_code: string;
+    message: string;
+  } | null;
+};
+
+type ToolCallTrace = {
+  tool_call_id: string;
+  tool_name: string;
+  status: string;
+  permission_scope?: string;
+  arguments_summary?: string;
+  output_summary?: string;
+  failure?: string | null;
+  duration_ms?: number;
+};
+
+type AgentTrace = {
+  run_id: string;
+  project_id: string;
+  chapter_id: string;
+  agent_id: string;
+  agent_name: string;
+  prompt_id: string;
+  prompt_version: string;
+  prompt_sha256: string;
+  model_name: string;
+  provider_base_url: string;
+  temperature: number;
+  max_tokens: number;
+  estimated_prompt_tokens: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_total_tokens: number;
+  context_window: number;
+  input_summary: string;
+  raw_model_output: string;
+  parsed_output: unknown;
+  validation_status: string;
+  validation_errors: unknown[];
+  reflection_count: number;
+  reflection_trace: unknown[];
+  final_decision: string;
+  human_review_count: number;
+  created_at?: string;
+  updated_at?: string;
+  duration_ms?: number;
+  token_context_report?: {
+    reserved_output_tokens?: number;
+    available_input_tokens?: number;
+    within_context_window?: boolean;
+    budget_policy?: Record<string, string>;
+  };
+  tool_calls?: ToolCallTrace[];
+};
+
+type AgentTraceHistoryResponse = {
+  runs: AgentTrace[];
+};
+
+type AgentTraceDetailResponse = {
+  trace: AgentTrace;
+};
+
+type ProjectWorkspace = {
+  project_id: string;
+  name: string;
+  status: string;
+  output_roots?: {
+    audio?: string;
+    exports?: string;
+  };
+  updated_at?: string;
+};
+
+type QualitySummary = Record<
+  | "unsegmented"
+  | "unselected_role"
+  | "undubbed"
+  | "dubbing_failed"
+  | "long_utterance"
+  | "duplicate_voice"
+  | "role_without_voice"
+  | "needs_human_review",
+  number
+>;
+
+type QualityIssue = {
+  issue_id: string;
+  issue_type: keyof QualitySummary;
+  severity: string;
+  chapter_id?: string;
+  paragraph_id?: string;
+  utterance_id?: string;
+  role_id?: string;
+  message: string;
+  actions?: string[];
+};
+
+type QualityCheckResponse = {
+  project_id: string;
+  summary: QualitySummary;
+  issues: QualityIssue[];
+  can_generate: boolean;
+  can_export: boolean;
+};
+
+type ReviewQueueResponse = {
+  project_id: string;
+  items: QualityIssue[];
+  total_count: number;
+  filters?: Record<string, string>;
+};
+
+type ProjectQualityPayload = {
+  chapters: {
+    chapter_id: string;
+    title: string;
+    paragraphs: { paragraph_id: string; text: string }[];
+  }[];
+  roles: Record<string, unknown>[];
+  utterances_by_paragraph: Record<string, Record<string, unknown>[]>;
+  max_utterance_chars: number;
+  filters?: Record<string, string>;
 };
 
 type BatchDubbingStatusPayload = {
@@ -283,11 +426,7 @@ type BatchDubbingStatusPayload = {
 };
 
 export type ParagraphDubbingStatus =
-  | "unsegmented"
-  | "unselected-role"
-  | "undubbed"
-  | "dubbed"
-  | "failed";
+  "unsegmented" | "unselected-role" | "undubbed" | "dubbed" | "failed";
 
 type ParagraphStatusUtterance = {
   roleId?: string | null;
@@ -347,17 +486,19 @@ type TtsDeploymentStatus = {
 const MAX_NOVEL_PREVIEW_CHARS = 700;
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
 const DEFAULT_BASE_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-Base";
-const DEFAULT_VOICE_DESIGN_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
+const DEFAULT_VOICE_DESIGN_MODEL_PATH =
+  "/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign";
 
 const defaultVoices: VoiceResource[] = [];
 
-const PARAGRAPH_STATUS_META: Record<ParagraphDubbingStatus, { label: string }> = {
-  unsegmented: { label: "未划分" },
-  "unselected-role": { label: "未选角色" },
-  undubbed: { label: "未配音" },
-  dubbed: { label: "已配音" },
-  failed: { label: "失败" },
-};
+const PARAGRAPH_STATUS_META: Record<ParagraphDubbingStatus, { label: string }> =
+  {
+    unsegmented: { label: "未划分" },
+    "unselected-role": { label: "未选角色" },
+    undubbed: { label: "未配音" },
+    dubbed: { label: "已配音" },
+    failed: { label: "失败" },
+  };
 
 const PARAGRAPH_STATUS_FILTERS: ParagraphDubbingStatus[] = [
   "unsegmented",
@@ -392,9 +533,39 @@ const defaultTtsDeployment: TtsDeploymentStatus = {
   voice_design_model_path: DEFAULT_VOICE_DESIGN_MODEL_PATH,
 };
 
+const PROJECT_STORAGE_KEY = "shuyi-agent.recent-projects.v0.6.1";
+
+const defaultQualitySummary: QualitySummary = {
+  unsegmented: 0,
+  unselected_role: 0,
+  undubbed: 0,
+  dubbing_failed: 0,
+  long_utterance: 0,
+  duplicate_voice: 0,
+  role_without_voice: 0,
+  needs_human_review: 0,
+};
+
+const QUALITY_LABELS: Record<keyof QualitySummary, string> = {
+  unsegmented: "未划分",
+  unselected_role: "未选角色",
+  undubbed: "未配音",
+  dubbing_failed: "配音失败",
+  long_utterance: "超长台词",
+  duplicate_voice: "重复音色",
+  role_without_voice: "角色无音色",
+  needs_human_review: "needs_human_review",
+};
+
+const QUALITY_SUMMARY_KEYS = Object.keys(
+  defaultQualitySummary,
+) as (keyof QualitySummary)[];
+
 function initialPageFromUrl(): Page {
   const page = new URLSearchParams(window.location.search).get("page");
-  return page === "voices" || page === "models" ? page : "main";
+  return page === "voices" || page === "models" || page === "agent-runs"
+    ? page
+    : "main";
 }
 
 function makeNovelPreview(text: string): string {
@@ -441,7 +612,9 @@ function decodeNovelTextBuffer(buffer: ArrayBuffer): string {
 
 async function readNovelFileUpload(file: File): Promise<NovelFileUpload> {
   const buffer = await file.arrayBuffer();
-  const isEpub = file.name.toLowerCase().endsWith(".epub") || file.type === "application/epub+zip";
+  const isEpub =
+    file.name.toLowerCase().endsWith(".epub") ||
+    file.type === "application/epub+zip";
   if (isEpub) {
     return {
       text: "",
@@ -472,19 +645,36 @@ function findChapterHeadingMatches(text: string): ChapterHeadingMatch[] {
     }));
     if (matches.length > 0) candidates.push(matches);
   }
-  return candidates.sort((left, right) => compareChapterHeadingMatches(text, right, left))[0] ?? [];
+  return (
+    candidates.sort((left, right) =>
+      compareChapterHeadingMatches(text, right, left),
+    )[0] ?? []
+  );
 }
 
-function compareChapterHeadingMatches(text: string, left: ChapterHeadingMatch[], right: ChapterHeadingMatch[]): number {
+function compareChapterHeadingMatches(
+  text: string,
+  left: ChapterHeadingMatch[],
+  right: ChapterHeadingMatch[],
+): number {
   const leftScore = chapterHeadingScore(text, left);
   const rightScore = chapterHeadingScore(text, right);
-  return leftScore[0] - rightScore[0] || leftScore[1] - rightScore[1] || leftScore[2] - rightScore[2];
+  return (
+    leftScore[0] - rightScore[0] ||
+    leftScore[1] - rightScore[1] ||
+    leftScore[2] - rightScore[2]
+  );
 }
 
-function chapterHeadingScore(text: string, matches: ChapterHeadingMatch[]): [number, number, number] {
+function chapterHeadingScore(
+  text: string,
+  matches: ChapterHeadingMatch[],
+): [number, number, number] {
   const nonEmptyBodies = matches.filter((match, index) => {
     const next = matches[index + 1];
-    const body = text.slice(match.index + match.text.length, next?.index ?? text.length).trim();
+    const body = text
+      .slice(match.index + match.text.length, next?.index ?? text.length)
+      .trim();
     return body.length > 0;
   }).length;
   const firstIndex = matches[0]?.index ?? text.length;
@@ -494,7 +684,9 @@ function chapterHeadingScore(text: string, matches: ChapterHeadingMatch[]): [num
 function parseChapters(text: string): Chapter[] {
   const matches = findChapterHeadingMatches(text);
   if (matches.length === 0) {
-    return text.trim() ? [{ chapterId: "chapter-0001", title: "未分章正文", body: text.trim() }] : [];
+    return text.trim()
+      ? [{ chapterId: "chapter-0001", title: "未分章正文", body: text.trim() }]
+      : [];
   }
   return matches.map((match, index) => {
     const next = matches[index + 1];
@@ -503,7 +695,10 @@ function parseChapters(text: string): Chapter[] {
     return {
       chapterId: `chapter-${String(index + 1).padStart(4, "0")}`,
       title: match.title,
-      body: text.slice(bodyStart, bodyEnd).replace(/^-{3,}\s*/, "").trim(),
+      body: text
+        .slice(bodyStart, bodyEnd)
+        .replace(/^-{3,}\s*/, "")
+        .trim(),
     };
   });
 }
@@ -513,7 +708,15 @@ function parseChapterIndex(text: string): Chapter[] {
   if (matches.length === 0) {
     const stripped = text.trim();
     return stripped
-      ? [{ chapterId: "chapter-0001", title: "未分章正文", body: "", bodyStart: 0, bodyEnd: text.length }]
+      ? [
+          {
+            chapterId: "chapter-0001",
+            title: "未分章正文",
+            body: "",
+            bodyStart: 0,
+            bodyEnd: text.length,
+          },
+        ]
       : [];
   }
   return matches.map((match, index) => {
@@ -530,7 +733,10 @@ function parseChapterIndex(text: string): Chapter[] {
 
 function extractChapterBody(text: string, chapter: Chapter): string {
   if (chapter.body) return chapter.body;
-  const body = text.slice(chapter.bodyStart ?? 0, chapter.bodyEnd ?? text.length);
+  const body = text.slice(
+    chapter.bodyStart ?? 0,
+    chapter.bodyEnd ?? text.length,
+  );
   return body.replace(/^-{3,}\s*/, "").trim();
 }
 
@@ -592,14 +798,19 @@ function fromApiRole(role: ApiRoleCard): RoleCard {
     designPrompt: role.design_prompt ?? "",
     voiceDescription: role.voice_description ?? role.description,
     voiceSampleText: role.voice_sample_text ?? role.reference_text ?? "",
-    playableVoicePath: role.playable_voice_path ?? role.reference_audio_path ?? "",
+    playableVoicePath:
+      role.playable_voice_path ?? role.reference_audio_path ?? "",
     voiceMatchScore: role.voice_match_score,
     voiceMatchReason: role.voice_match_reason,
     voiceGeneratedByAi: Boolean(role.voice_generated_by_ai),
   };
 }
 
-function toApiVoice(voice: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & { suitableRoleTypes?: string[] | string }): Record<string, unknown> {
+function toApiVoice(
+  voice: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & {
+    suitableRoleTypes?: string[] | string;
+  },
+): Record<string, unknown> {
   return {
     voice_id: voice.voiceId,
     name: voice.name,
@@ -640,7 +851,9 @@ function toApiRole(role: RoleCard): Record<string, unknown> {
   };
 }
 
-function utteranceGroupsToApi(groups: Record<string, UtteranceDraft[]>): Record<string, Record<string, unknown>[]> {
+function utteranceGroupsToApi(
+  groups: Record<string, UtteranceDraft[]>,
+): Record<string, Record<string, unknown>[]> {
   return Object.fromEntries(
     Object.entries(groups).map(([paragraphId, utterances]) => [
       paragraphId,
@@ -655,7 +868,11 @@ function utteranceGroupsToApi(groups: Record<string, UtteranceDraft[]>): Record<
         speed: 1.0,
         volume: 1.0,
         design_prompt: null,
-        audio_status: utterance.audioPath ? "success" : utterance.audioError ? "failed" : undefined,
+        audio_status: utterance.audioPath
+          ? "success"
+          : utterance.audioError
+            ? "failed"
+            : undefined,
         audio_path: utterance.audioPath,
         audio_duration: utterance.audioDuration,
         audio_provider: utterance.audioProvider,
@@ -671,7 +888,11 @@ function voiceAudioSrc(voice: VoiceResource): string {
   return runtimeConfig.apiUrl(`/voice-profiles/${voice.voiceId}/audio`);
 }
 
-function roleFromVoice(roleId: string, name: string, voice: VoiceResource): RoleCard {
+function roleFromVoice(
+  roleId: string,
+  name: string,
+  voice: VoiceResource,
+): RoleCard {
   return {
     roleId,
     name,
@@ -744,7 +965,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
     data = {};
   }
   if (!response.ok) {
-    throw new ApiRequestError(response.status, data.detail ?? data.error ?? response.statusText);
+    throw new ApiRequestError(
+      response.status,
+      data.detail ?? data.error ?? response.statusText,
+    );
   }
   return data as T;
 }
@@ -765,10 +989,14 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 function base64ToBytes(value: string): Uint8Array {
-  return Uint8Array.from(window.atob(value), (character) => character.charCodeAt(0));
+  return Uint8Array.from(window.atob(value), (character) =>
+    character.charCodeAt(0),
+  );
 }
 
-async function createSecretExchangePayload(secret: string): Promise<SecretExchangePayload | null> {
+async function createSecretExchangePayload(
+  secret: string,
+): Promise<SecretExchangePayload | null> {
   const trimmed = secret.trim();
   if (!trimmed) return null;
   const secretBytes = new TextEncoder().encode(trimmed);
@@ -815,7 +1043,8 @@ export function parseAgentSseBuffer(buffer: string): {
     for (const line of frame.split("\n")) {
       if (line.startsWith("id:")) id = Number(line.slice(3).trim()) || 0;
       else if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      else if (line.startsWith("data:"))
+        dataLines.push(line.slice(5).trimStart());
     }
     if (dataLines.length) {
       events.push({ id, event, data: JSON.parse(dataLines.join("\n")) });
@@ -852,7 +1081,11 @@ function AuthorizedAudio({ source }: { source: string }) {
     };
   }, [source]);
 
-  return playableUrl ? <audio controls src={playableUrl} /> : <small>音频暂不可用</small>;
+  return playableUrl ? (
+    <audio controls src={playableUrl} />
+  ) : (
+    <small>音频暂不可用</small>
+  );
 }
 
 function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
@@ -867,9 +1100,14 @@ function makeUtteranceDraft(paragraph: ParagraphModule): UtteranceDraft {
   };
 }
 
-function makeWholeParagraphUtteranceGroups(paragraphs: ParagraphModule[]): Record<string, UtteranceDraft[]> {
+function makeWholeParagraphUtteranceGroups(
+  paragraphs: ParagraphModule[],
+): Record<string, UtteranceDraft[]> {
   return Object.fromEntries(
-    paragraphs.map((paragraph) => [paragraph.paragraphId, [makeUtteranceDraft(paragraph)]]),
+    paragraphs.map((paragraph) => [
+      paragraph.paragraphId,
+      [makeUtteranceDraft(paragraph)],
+    ]),
   );
 }
 
@@ -880,13 +1118,20 @@ function apiUtterancesToGroups(
 ): Record<string, UtteranceDraft[]> {
   return Object.fromEntries(
     Object.entries(groups).map(([paragraphId, utterances]) => {
-      const paragraph = paragraphs.find((item) => item.paragraphId === paragraphId) ?? {
+      const paragraph = paragraphs.find(
+        (item) => item.paragraphId === paragraphId,
+      ) ?? {
         paragraphId,
         text: "",
         collapsed: false,
         deleted: false,
       };
-      return [paragraphId, utterances.map((utterance) => fromApiUtterance(utterance, paragraph, roles))];
+      return [
+        paragraphId,
+        utterances.map((utterance) =>
+          fromApiUtterance(utterance, paragraph, roles),
+        ),
+      ];
     }),
   );
 }
@@ -900,7 +1145,9 @@ function audioPathToUrl(path?: string): string | undefined {
   return index >= 0 ? path.slice(index) : undefined;
 }
 
-function utteranceAudioSource(utterance: Pick<UtteranceDraft, "audioUrl" | "audioPath">): string | undefined {
+function utteranceAudioSource(
+  utterance: Pick<UtteranceDraft, "audioUrl" | "audioPath">,
+): string | undefined {
   return utterance.audioUrl ?? audioPathToUrl(utterance.audioPath);
 }
 
@@ -912,17 +1159,23 @@ export function paragraphDubbingStatus(
   if (
     list.some(
       (utterance) =>
-        Boolean(utterance.audioError) || String(utterance.audioStatus ?? "").includes("音频生成失败"),
+        Boolean(utterance.audioError) ||
+        String(utterance.audioStatus ?? "").includes("音频生成失败"),
     )
   ) {
     return "failed";
   }
   if (list.some((utterance) => !utterance.roleId)) return "unselected-role";
-  if (list.some((utterance) => !utteranceAudioSource(utterance))) return "undubbed";
+  if (list.some((utterance) => !utteranceAudioSource(utterance)))
+    return "undubbed";
   return "dubbed";
 }
 
-function fromApiUtterance(utterance: ApiUtterance, paragraph: ParagraphModule, roles: RoleCard[]): UtteranceDraft {
+function fromApiUtterance(
+  utterance: ApiUtterance,
+  paragraph: ParagraphModule,
+  roles: RoleCard[],
+): UtteranceDraft {
   const role = roles.find((item) => item.roleId === utterance.speaker_role_id);
   const audioUrl = utterance.audio_url ?? audioPathToUrl(utterance.audio_path);
   const audioStatus =
@@ -964,7 +1217,9 @@ function mergeApiAudioByUtteranceId(
 
   const merged: Record<string, UtteranceDraft[]> = {};
   for (const [paragraphId, utterances] of Object.entries(current)) {
-    const knownIds = new Set(utterances.map((utterance) => utterance.utteranceId));
+    const knownIds = new Set(
+      utterances.map((utterance) => utterance.utteranceId),
+    );
     const additions = (incomingGroups[paragraphId] ?? []).filter(
       (utterance) => !knownIds.has(utterance.utteranceId),
     );
@@ -986,8 +1241,14 @@ function mergeApiAudioByUtteranceId(
   return merged;
 }
 
-function normalizeModelConfig(config: Partial<ModelConfig> & { llm?: Partial<ModelConfig["text_model"]>; chapter_agent?: Partial<ModelConfig["text_model"]> }): ModelConfig {
-  const textModel = config.text_model ?? config.chapter_agent ?? config.llm ?? {};
+function normalizeModelConfig(
+  config: Partial<ModelConfig> & {
+    llm?: Partial<ModelConfig["text_model"]>;
+    chapter_agent?: Partial<ModelConfig["text_model"]>;
+  },
+): ModelConfig {
+  const textModel =
+    config.text_model ?? config.chapter_agent ?? config.llm ?? {};
   return {
     text_model: {
       base_url: textModel.base_url ?? defaultModelConfig.text_model.base_url,
@@ -997,16 +1258,22 @@ function normalizeModelConfig(config: Partial<ModelConfig> & { llm?: Partial<Mod
     tts: {
       base_url: config.tts?.base_url ?? defaultModelConfig.tts.base_url,
       model_path: config.tts?.model_path ?? defaultModelConfig.tts.model_path,
-      voice_design_model_path: config.tts?.voice_design_model_path ?? defaultModelConfig.tts.voice_design_model_path,
+      voice_design_model_path:
+        config.tts?.voice_design_model_path ??
+        defaultModelConfig.tts.voice_design_model_path,
     },
   };
 }
 
-function normalizeTtsDeployment(status: Partial<TtsDeploymentStatus> | null | undefined): TtsDeploymentStatus {
+function normalizeTtsDeployment(
+  status: Partial<TtsDeploymentStatus> | null | undefined,
+): TtsDeploymentStatus {
   return {
     ...defaultTtsDeployment,
     ...(status ?? {}),
-    progress: Number.isFinite(status?.progress) ? Number(status?.progress) : defaultTtsDeployment.progress,
+    progress: Number.isFinite(status?.progress)
+      ? Number(status?.progress)
+      : defaultTtsDeployment.progress,
   };
 }
 
@@ -1018,11 +1285,92 @@ function ProgressBar({ label, value }: { label: string; value: number }) {
         <span>{label}</span>
         <span>{normalized}%</span>
       </div>
-      <div className="progress-bar" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={normalized}>
+      <div
+        className="progress-bar"
+        role="progressbar"
+        aria-label={label}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={normalized}
+      >
         <span style={{ width: `${normalized}%` }} />
       </div>
     </div>
   );
+}
+
+function formatTraceJson(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "暂无记录";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value, null, 2);
+}
+
+function formatTraceTimestamp(value?: string): string {
+  if (!value) return "未记录";
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp)
+    ? value
+    : new Date(timestamp).toLocaleString("zh-CN");
+}
+
+function projectStorage(): Storage | null {
+  if (typeof window === "undefined" || !("localStorage" in window)) return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readRecentProjectIds(): string[] {
+  const storage = projectStorage();
+  if (!storage) return [];
+  try {
+    const value = JSON.parse(storage.getItem(PROJECT_STORAGE_KEY) ?? "[]");
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeRecentProjectIds(projectIds: string[]) {
+  const storage = projectStorage();
+  if (!storage) return;
+  storage.setItem(PROJECT_STORAGE_KEY, JSON.stringify(projectIds.slice(0, 8)));
+}
+
+function rememberRecentProject(projectId: string) {
+  if (!projectId) return;
+  writeRecentProjectIds([
+    projectId,
+    ...readRecentProjectIds().filter((item) => item !== projectId),
+  ]);
+}
+
+function forgetRecentProject(projectId: string) {
+  writeRecentProjectIds(
+    readRecentProjectIds().filter((item) => item !== projectId),
+  );
+}
+
+function sortProjectsByRecent(
+  projects: ProjectWorkspace[],
+): ProjectWorkspace[] {
+  const recentIds = readRecentProjectIds();
+  return [...projects].sort((left, right) => {
+    const leftIndex = recentIds.indexOf(left.project_id);
+    const rightIndex = recentIds.indexOf(right.project_id);
+    const leftRank = leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex;
+    const rightRank = rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex;
+    return (
+      leftRank - rightRank ||
+      String(right.updated_at ?? "").localeCompare(
+        String(left.updated_at ?? ""),
+      )
+    );
+  });
 }
 
 function App() {
@@ -1048,9 +1396,13 @@ function App() {
   const [confirmed, setConfirmed] = useState(false);
   const [voices, setVoices] = useState<VoiceResource[]>(defaultVoices);
   const [roles, setRoles] = useState<RoleCard[]>([]);
-  const [utterancesByParagraph, setUtterancesByParagraph] = useState<Record<string, UtteranceDraft[]>>({});
+  const [utterancesByParagraph, setUtterancesByParagraph] = useState<
+    Record<string, UtteranceDraft[]>
+  >({});
   const [chapterBackendSynced, setChapterBackendSynced] = useState(false);
-  const [selectedVoiceIds, setSelectedVoiceIds] = useState<Record<string, boolean>>({});
+  const [selectedVoiceIds, setSelectedVoiceIds] = useState<
+    Record<string, boolean>
+  >({});
   const [newVoice, setNewVoice] = useState({
     name: "",
     gender: "",
@@ -1068,35 +1420,84 @@ function App() {
     referenceText: DEFAULT_GENERATED_VOICE_TEXT,
   });
   const [newVoiceAudioPreviewUrl, setNewVoiceAudioPreviewUrl] = useState("");
-  const [generatedVoicePreview, setGeneratedVoicePreview] = useState<VoiceResource | null>(null);
+  const [generatedVoicePreview, setGeneratedVoicePreview] =
+    useState<VoiceResource | null>(null);
   const [generatedVoicePreviewUrl, setGeneratedVoicePreviewUrl] = useState("");
-  const [modelConfig, setModelConfig] = useState<ModelConfig>(defaultModelConfig);
+  const [modelConfig, setModelConfig] =
+    useState<ModelConfig>(defaultModelConfig);
   const [textModelApiKey, setTextModelApiKey] = useState("");
-  const [backendApiBase, setBackendApiBase] = useState(runtimeConfig.apiBase || "/api/v1");
+  const [backendApiBase, setBackendApiBase] = useState(
+    runtimeConfig.apiBase || "/api/v1",
+  );
   const [apiStatus, setApiStatus] = useState("等待上传小说");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
   const [roleMatchingProgress, setRoleMatchingProgress] = useState(0);
   const [voiceGenerationProgress, setVoiceGenerationProgress] = useState(0);
-  const [generatingUtteranceIds, setGeneratingUtteranceIds] = useState<Record<string, boolean>>({});
+  const [generatingUtteranceIds, setGeneratingUtteranceIds] = useState<
+    Record<string, boolean>
+  >({});
   const [highlightUtteranceId, setHighlightUtteranceId] = useState("");
   const [highlightParagraphId, setHighlightParagraphId] = useState("");
-  const [activeParagraphStatusFilter, setActiveParagraphStatusFilter] = useState<ParagraphDubbingStatus | "">("");
+  const [activeParagraphStatusFilter, setActiveParagraphStatusFilter] =
+    useState<ParagraphDubbingStatus | "">("");
   const [generatedVoiceProgress, setGeneratedVoiceProgress] = useState(0);
   const [localTtsStarting, setLocalTtsStarting] = useState(false);
-  const [ttsDeployment, setTtsDeployment] = useState<TtsDeploymentStatus>(defaultTtsDeployment);
-  const [aiRoleCandidates, setAiRoleCandidates] = useState<AiRoleCandidate[]>([]);
+  const [ttsDeployment, setTtsDeployment] =
+    useState<TtsDeploymentStatus>(defaultTtsDeployment);
+  const [aiRoleCandidates, setAiRoleCandidates] = useState<AiRoleCandidate[]>(
+    [],
+  );
   const [agentRunThreadId, setAgentRunThreadId] = useState("");
   const [agentRunWaitingForRoles, setAgentRunWaitingForRoles] = useState(false);
   const [agentRunRunning, setAgentRunRunning] = useState(false);
-  const [chapterPlaybackState, setChapterPlaybackState] = useState<"idle" | "playing" | "paused">("idle");
-  const [chapterPlaybackUtteranceId, setChapterPlaybackUtteranceId] = useState("");
-  const [workflowState, setWorkflowState] = useState(() => createWorkflowState("automatic"));
+  const [agentTraces, setAgentTraces] = useState<AgentTrace[]>([]);
+  const [selectedAgentTrace, setSelectedAgentTrace] =
+    useState<AgentTrace | null>(null);
+  const [agentTraceStatus, setAgentTraceStatus] = useState(
+    "Run History 会在完成一次 Agent run 后显示。",
+  );
+  const [projects, setProjects] = useState<ProjectWorkspace[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState("default");
+  const [newProjectName, setNewProjectName] = useState("");
+  const [qualityReport, setQualityReport] = useState<QualityCheckResponse>({
+    project_id: "default",
+    summary: defaultQualitySummary,
+    issues: [],
+    can_generate: false,
+    can_export: false,
+  });
+  const [reviewQueue, setReviewQueue] = useState<ReviewQueueResponse>({
+    project_id: "default",
+    items: [],
+    total_count: 0,
+  });
+  const [qualityStatus, setQualityStatus] =
+    useState("质量检查面板等待当前项目数据。");
+  const [chapterPlaybackState, setChapterPlaybackState] = useState<
+    "idle" | "playing" | "paused"
+  >("idle");
+  const [chapterPlaybackUtteranceId, setChapterPlaybackUtteranceId] =
+    useState("");
+  const [workflowState, setWorkflowState] = useState(() =>
+    createWorkflowState("automatic"),
+  );
 
-  const activeChapter = chapters.find((chapter) => chapter.chapterId === activeChapterId);
-  const visibleParagraphs = paragraphs.filter((paragraph) => !paragraph.deleted);
+  const activeChapter = chapters.find(
+    (chapter) => chapter.chapterId === activeChapterId,
+  );
+  const activeProject =
+    projects.find((project) => project.project_id === activeProjectId) ??
+    projects[0] ??
+    null;
+  const visibleParagraphs = paragraphs.filter(
+    (paragraph) => !paragraph.deleted,
+  );
   const flattenedUtterances = useMemo(
-    () => visibleParagraphs.flatMap((paragraph) => utterancesByParagraph[paragraph.paragraphId] ?? []),
+    () =>
+      visibleParagraphs.flatMap(
+        (paragraph) => utterancesByParagraph[paragraph.paragraphId] ?? [],
+      ),
     [utterancesByParagraph, visibleParagraphs],
   );
   const paragraphStatusItems = useMemo<ParagraphStatusItem[]>(
@@ -1117,7 +1518,10 @@ function App() {
   const paragraphStatusCounts = useMemo<Record<ParagraphDubbingStatus, number>>(
     () =>
       paragraphStatusItems.reduce(
-        (counts, item) => ({ ...counts, [item.status]: counts[item.status] + 1 }),
+        (counts, item) => ({
+          ...counts,
+          [item.status]: counts[item.status] + 1,
+        }),
         {
           unsegmented: 0,
           "unselected-role": 0,
@@ -1129,9 +1533,11 @@ function App() {
     [paragraphStatusItems],
   );
   const hasPendingHumanReview = flattenedUtterances.some(
-    (utterance) => utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
+    (utterance) =>
+      utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
   );
-  const hasUnselectedRoleUtterance = paragraphStatusCounts["unselected-role"] > 0;
+  const hasUnselectedRoleUtterance =
+    paragraphStatusCounts["unselected-role"] > 0;
   const hasUngeneratedAudioUtterance = paragraphStatusCounts.undubbed > 0;
   const hasGeneratedAudioUtterance = flattenedUtterances.some((utterance) =>
     Boolean(utteranceAudioSource(utterance)),
@@ -1149,7 +1555,345 @@ function App() {
     setAgentRunRunning(false);
   }
 
-  function applyTtsDeployment(status: Partial<TtsDeploymentStatus> | null | undefined) {
+  function projectQualityPayload(
+    filters?: Record<string, string>,
+  ): ProjectQualityPayload {
+    const scopedChapters = activeChapter
+      ? [
+          {
+            chapter_id: activeChapter.chapterId,
+            title: activeChapter.title,
+            paragraphs: visibleParagraphs.map((paragraph) => ({
+              paragraph_id: paragraph.paragraphId,
+              text: paragraph.text,
+            })),
+          },
+        ]
+      : chapters.map((chapter) => ({
+          chapter_id: chapter.chapterId,
+          title: chapter.title,
+          paragraphs: [],
+        }));
+    return {
+      chapters: scopedChapters,
+      roles: roles.map(toApiRole),
+      utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+      max_utterance_chars: 120,
+      ...(filters ? { filters } : {}),
+    };
+  }
+
+  async function loadProjects() {
+    setQualityStatus("正在打开最近项目");
+    try {
+      const data = await requestJson<{ projects: ProjectWorkspace[] }>(
+        "/projects",
+      );
+      const sorted = sortProjectsByRecent(data.projects);
+      const recentIds = readRecentProjectIds();
+      const preferredProject =
+        sorted.find((project) => project.project_id === activeProjectId) ??
+        sorted.find((project) => recentIds.includes(project.project_id)) ??
+        sorted[0];
+      setProjects(sorted);
+      if (preferredProject) {
+        setActiveProjectId(preferredProject.project_id);
+        rememberRecentProject(preferredProject.project_id);
+      }
+      setQualityStatus(
+        preferredProject
+          ? `已打开项目：${preferredProject.name}`
+          : "暂无项目，请新建项目工作区",
+      );
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("项目工作区载入失败", error));
+    }
+  }
+
+  async function createProject() {
+    const name = newProjectName.trim();
+    if (!name) {
+      setQualityStatus("请输入项目名称后再新建项目");
+      return;
+    }
+    try {
+      const data = await requestJson<{ project: ProjectWorkspace }>(
+        "/projects",
+        {
+          method: "POST",
+          body: JSON.stringify({ name }),
+        },
+      );
+      rememberRecentProject(data.project.project_id);
+      setProjects((current) =>
+        sortProjectsByRecent([
+          data.project,
+          ...current.filter(
+            (project) => project.project_id !== data.project.project_id,
+          ),
+        ]),
+      );
+      setActiveProjectId(data.project.project_id);
+      setNewProjectName("");
+      setQualityReport({
+        ...qualityReport,
+        project_id: data.project.project_id,
+        summary: defaultQualitySummary,
+        issues: [],
+      });
+      setReviewQueue({
+        project_id: data.project.project_id,
+        items: [],
+        total_count: 0,
+      });
+      setQualityStatus(`项目工作区已创建：${data.project.name}`);
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("项目创建失败", error));
+    }
+  }
+
+  async function deleteProject(projectId: string) {
+    if (projectId === "default") {
+      setQualityStatus("默认项目用于兼容旧数据，不能删除");
+      return;
+    }
+    try {
+      await requestJson<{ deleted: boolean }>(
+        `/projects/${encodeURIComponent(projectId)}`,
+        {
+          method: "DELETE",
+        },
+      );
+      forgetRecentProject(projectId);
+      setProjects((current) => {
+        const remaining = current.filter(
+          (project) => project.project_id !== projectId,
+        );
+        const nextProject = remaining[0] ?? null;
+        if (nextProject) {
+          setActiveProjectId(nextProject.project_id);
+          rememberRecentProject(nextProject.project_id);
+        }
+        return remaining;
+      });
+      setQualityStatus("项目工作区已删除");
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("项目删除失败", error));
+    }
+  }
+
+  function selectProject(projectId: string) {
+    const project = projects.find((item) => item.project_id === projectId);
+    if (!project) return;
+    rememberRecentProject(projectId);
+    setActiveProjectId(projectId);
+    setProjects((current) => sortProjectsByRecent(current));
+    setQualityReport({
+      project_id: projectId,
+      summary: defaultQualitySummary,
+      issues: [],
+      can_generate: false,
+      can_export: false,
+    });
+    setReviewQueue({ project_id: projectId, items: [], total_count: 0 });
+    setQualityStatus(`已切换到最近项目：${project.name}`);
+  }
+
+  async function runQualityCheck(purpose: "generate" | "export" = "generate") {
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    setQualityStatus(
+      purpose === "export" ? "正在执行导出前检查" : "正在执行生成前检查",
+    );
+    try {
+      const data = await requestJson<QualityCheckResponse>(
+        `/projects/${encodeURIComponent(projectId)}/quality-check`,
+        {
+          method: "POST",
+          body: JSON.stringify(projectQualityPayload()),
+        },
+      );
+      setQualityReport(data);
+      setQualityStatus(
+        purpose === "export"
+          ? data.can_export
+            ? "导出前检查通过"
+            : `导出前检查发现 ${data.issues.length} 个问题`
+          : data.can_generate
+            ? "生成前检查通过"
+            : `生成前检查发现 ${data.issues.length} 个问题`,
+      );
+      void loadReviewQueue();
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("质量检查失败", error));
+    }
+  }
+
+  async function loadReviewQueue(issueType?: keyof QualitySummary) {
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    try {
+      const data = await requestJson<ReviewQueueResponse>(
+        `/projects/${encodeURIComponent(projectId)}/review-queue`,
+        {
+          method: "POST",
+          body: JSON.stringify(
+            projectQualityPayload(
+              issueType ? { issue_type: issueType } : undefined,
+            ),
+          ),
+        },
+      );
+      setReviewQueue(data);
+      if (issueType)
+        setQualityStatus(`审稿队列已筛选：${QUALITY_LABELS[issueType]}`);
+    } catch (error) {
+      setQualityStatus(apiFailureMessage("审稿队列读取失败", error));
+    }
+  }
+
+  function focusQualityIssue(issue: QualityIssue) {
+    if (issue.utterance_id) {
+      const utterance = flattenedUtterances.find(
+        (item) => item.utteranceId === issue.utterance_id,
+      );
+      if (utterance) {
+        focusUtterance(utterance, `已跳转到审稿队列问题：${issue.message}`);
+        return;
+      }
+    }
+    if (issue.paragraph_id) {
+      const item = paragraphStatusItems.find(
+        (paragraph) => paragraph.paragraphId === issue.paragraph_id,
+      );
+      if (item) {
+        focusParagraphStatusItem(
+          item,
+          `已跳转到质量检查问题：${issue.message}`,
+        );
+        return;
+      }
+    }
+    setQualityStatus(`已定位问题：${issue.message}`);
+  }
+
+  function bulkConfirmReviewItems() {
+    const reviewIds = new Set(
+      reviewQueue.items.map((item) => item.utterance_id).filter(Boolean),
+    );
+    setUtterancesByParagraph((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([paragraphId, utterances]) => [
+          paragraphId,
+          utterances.map((utterance) =>
+            reviewIds.has(utterance.utteranceId)
+              ? {
+                  ...utterance,
+                  needsHumanReview: false,
+                  audioStatus: "人工复核已确认",
+                }
+              : utterance,
+          ),
+        ]),
+      ),
+    );
+    setQualityStatus(
+      `批量确认完成：${reviewIds.size} 条台词已移出 needs_human_review`,
+    );
+  }
+
+  function bulkChangeReviewRole() {
+    const fallbackRole = roles.find((role) => role.voiceResourceId) ?? roles[0];
+    if (!fallbackRole) {
+      setQualityStatus("批量改角色失败：请先创建角色");
+      return;
+    }
+    const reviewIds = new Set(
+      reviewQueue.items
+        .filter(
+          (item) =>
+            item.issue_type === "unselected_role" ||
+            item.actions?.includes("change_role"),
+        )
+        .map((item) => item.utterance_id)
+        .filter(Boolean),
+    );
+    setUtterancesByParagraph((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([paragraphId, utterances]) => [
+          paragraphId,
+          utterances.map((utterance) =>
+            reviewIds.has(utterance.utteranceId)
+              ? {
+                  ...utterance,
+                  roleId: fallbackRole.roleId,
+                  speakerName: fallbackRole.name,
+                  needsHumanReview: false,
+                  audioStatus: "已批量改角色，待重新生成配音",
+                }
+              : utterance,
+          ),
+        ]),
+      ),
+    );
+    setQualityStatus(
+      `批量改角色完成：${reviewIds.size} 条台词已绑定到 ${fallbackRole.name}`,
+    );
+  }
+
+  function bulkRetryDubbing() {
+    const retryIds = new Set(
+      reviewQueue.items
+        .filter(
+          (item) =>
+            item.issue_type === "dubbing_failed" ||
+            item.actions?.includes("retry_dubbing"),
+        )
+        .map((item) => item.utterance_id)
+        .filter(Boolean),
+    );
+    const retryUtterances = flattenedUtterances.filter((utterance) =>
+      retryIds.has(utterance.utteranceId),
+    );
+    if (retryUtterances.length === 0) {
+      setQualityStatus("审稿队列没有可批量重试的配音失败台词");
+      return;
+    }
+    retryUtterances.forEach((utterance) => void generateAudio(utterance));
+    setQualityStatus(
+      `批量重试已加入队列：${retryUtterances.length} 条配音失败台词`,
+    );
+  }
+
+  async function loadAgentRunHistory() {
+    setAgentTraceStatus("正在读取 Agent Run History");
+    try {
+      const data = await requestJson<AgentTraceHistoryResponse>("/agent-runs");
+      setAgentTraces(data.runs);
+      setSelectedAgentTrace((current) => current ?? data.runs[0] ?? null);
+      setAgentTraceStatus(
+        data.runs.length
+          ? `已载入 ${data.runs.length} 条 Agent 追踪`
+          : "暂无 Agent run 记录",
+      );
+    } catch (error) {
+      setAgentTraceStatus(apiFailureMessage("Agent追踪读取失败", error));
+    }
+  }
+
+  async function selectAgentTrace(trace: AgentTrace) {
+    setSelectedAgentTrace(trace);
+    try {
+      const data = await requestJson<AgentTraceDetailResponse>(
+        `/agent-runs/${trace.run_id}?agent_id=${encodeURIComponent(trace.agent_id)}`,
+      );
+      setSelectedAgentTrace(data.trace);
+    } catch (error) {
+      setAgentTraceStatus(apiFailureMessage("Agent追踪详情读取失败", error));
+    }
+  }
+
+  function applyTtsDeployment(
+    status: Partial<TtsDeploymentStatus> | null | undefined,
+  ) {
     const normalized = normalizeTtsDeployment(status);
     setTtsDeployment(normalized);
     if (normalized.model_path || normalized.voice_design_model_path) {
@@ -1157,7 +1901,9 @@ function App() {
         ...current,
         tts: {
           ...current.tts,
-          ...(normalized.model_path ? { model_path: normalized.model_path } : {}),
+          ...(normalized.model_path
+            ? { model_path: normalized.model_path }
+            : {}),
           ...(normalized.voice_design_model_path
             ? { voice_design_model_path: normalized.voice_design_model_path }
             : {}),
@@ -1168,35 +1914,52 @@ function App() {
   }
 
   useEffect(() => {
+    void loadProjects();
+
     requestJson<{ voices: ApiVoiceResource[] }>("/voice-profiles")
       .then((data) => setVoices(data.voices.map(fromApiVoice)))
-      .catch((error) => setApiStatus(apiFailureMessage("音色库载入失败，已保持空列表", error)));
+      .catch((error) =>
+        setApiStatus(apiFailureMessage("音色库载入失败，已保持空列表", error)),
+      );
 
     requestJson<{ roles: ApiRoleCard[] }>("/characters")
       .then((data) => setRoles(data.roles.map(fromApiRole)))
-      .catch((error) => setApiStatus(apiFailureMessage("角色列表载入失败，已保持空列表", error)));
+      .catch((error) =>
+        setApiStatus(
+          apiFailureMessage("角色列表载入失败，已保持空列表", error),
+        ),
+      );
 
     requestJson<{ config: ModelConfig }>("/model-config")
       .then((data) => setModelConfig(normalizeModelConfig(data.config)))
       .catch(() => undefined);
 
-    requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deployment")
+    requestJson<{ deployment: TtsDeploymentStatus }>(
+      "/model-config/tts/deployment",
+    )
       .then((data) => applyTtsDeployment(data.deployment))
       .catch(() => undefined);
   }, []);
 
   useEffect(() => {
+    if (page === "agent-runs") void loadAgentRunHistory();
+  }, [page]);
+
+  useEffect(() => {
     if (ttsDeployment.status !== "running") return undefined;
     let cancelled = false;
     const poll = () => {
-      requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deployment")
+      requestJson<{ deployment: TtsDeploymentStatus }>(
+        "/model-config/tts/deployment",
+      )
         .then((data) => {
           if (cancelled) return;
           const status = applyTtsDeployment(data.deployment);
           if (status.status !== "running") setApiStatus(status.message);
         })
         .catch((error) => {
-          if (!cancelled) setApiStatus(apiFailureMessage("TTS模型部署进度读取失败", error));
+          if (!cancelled)
+            setApiStatus(apiFailureMessage("TTS模型部署进度读取失败", error));
         });
     };
     poll();
@@ -1208,7 +1971,11 @@ function App() {
   }, [ttsDeployment.status]);
 
   useEffect(() => {
-    if (workflowState.mode !== "automatic" || workflowState.status !== "running") return;
+    if (
+      workflowState.mode !== "automatic" ||
+      workflowState.status !== "running"
+    )
+      return;
     if (
       workflowState.activeAgent === "role_analyzer" &&
       agentRunWaitingForRoles &&
@@ -1240,14 +2007,20 @@ function App() {
     fullNovelTextRef.current = text;
     setNovelPreview(makeNovelPreview(text));
     try {
-      const data = await requestJson<{ chapters: ApiChapter[] }>("/books/parse", {
-        method: "POST",
-        body: JSON.stringify({ text }),
-      });
+      const data = await requestJson<{ chapters: ApiChapter[] }>(
+        "/books/parse",
+        {
+          method: "POST",
+          body: JSON.stringify({ text }),
+        },
+      );
       const parsed = data.chapters.map(fromApiChapter);
       applyChapters(parsed, "小说已上传并由后端划分章节");
     } catch (error) {
-      applyChapters(parseChapters(text), apiFailureMessage("后端导入失败，已使用本地章节预览", error));
+      applyChapters(
+        parseChapters(text),
+        apiFailureMessage("后端导入失败，已使用本地章节预览", error),
+      );
     }
   }
 
@@ -1295,25 +2068,37 @@ function App() {
       await requestJson<ConnectionTestResponse>("/connection-test");
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
-        ? await requestJson<ApiChapterSplitResponse>("/books/agent-chapter-split-file", (() => {
-            const form = new FormData();
-            form.append(
-              "file",
-              new File(
-                [Uint8Array.from(atob(uploadedFile.contentBase64), (character) => character.charCodeAt(0))],
-                uploadedFile.filename,
-                { type: "application/epub+zip" },
-              ),
-            );
-            return { method: "POST", body: form };
-          })())
-        : await requestJson<ApiChapterSplitResponse>("/books/agent-chapter-split", {
-            method: "POST",
-            body: JSON.stringify({ text: fullNovelTextRef.current }),
-          });
+        ? await requestJson<ApiChapterSplitResponse>(
+            "/books/agent-chapter-split-file",
+            (() => {
+              const form = new FormData();
+              form.append(
+                "file",
+                new File(
+                  [
+                    Uint8Array.from(
+                      atob(uploadedFile.contentBase64),
+                      (character) => character.charCodeAt(0),
+                    ),
+                  ],
+                  uploadedFile.filename,
+                  { type: "application/epub+zip" },
+                ),
+              );
+              return { method: "POST", body: form };
+            })(),
+          )
+        : await requestJson<ApiChapterSplitResponse>(
+            "/books/agent-chapter-split",
+            {
+              method: "POST",
+              body: JSON.stringify({ text: fullNovelTextRef.current }),
+            },
+          );
       setChapterSplitProgress(84);
       const parsed = data.chapters.map(fromApiChapter);
-      const ruleName = data.agent.rule_path?.split(/[\\/]/).pop() ?? "未记录规则";
+      const ruleName =
+        data.agent.rule_path?.split(/[\\/]/).pop() ?? "未记录规则";
       const agentStatus =
         data.agent.status === "rule_reused"
           ? `文档解析完成：已复用 ${ruleName}`
@@ -1345,9 +2130,11 @@ function App() {
     setApiStatus(`已加载章节：${chapter.title}`);
   }
 
-  async function syncCurrentChapterParagraphs(
-    confirm = false,
-  ): Promise<{ paragraphs: ParagraphModule[]; canSegment: boolean; utteranceDrafts: ApiUtterance[] }> {
+  async function syncCurrentChapterParagraphs(confirm = false): Promise<{
+    paragraphs: ParagraphModule[];
+    canSegment: boolean;
+    utteranceDrafts: ApiUtterance[];
+  }> {
     if (!activeChapter) throw new Error("请选择章节");
     const data = await requestJson<ApiChapterParagraphsResponse>(
       `/chapters/${activeChapter.chapterId}/paragraphs`,
@@ -1376,10 +2163,15 @@ function App() {
     };
   }
 
-  function updateParagraph(paragraphId: string, updates: Partial<ParagraphModule>) {
+  function updateParagraph(
+    paragraphId: string,
+    updates: Partial<ParagraphModule>,
+  ) {
     setParagraphs((current) =>
       current.map((paragraph) =>
-        paragraph.paragraphId === paragraphId ? { ...paragraph, ...updates } : paragraph,
+        paragraph.paragraphId === paragraphId
+          ? { ...paragraph, ...updates }
+          : paragraph,
       ),
     );
     if ("text" in updates) {
@@ -1394,7 +2186,9 @@ function App() {
   function deleteParagraph(paragraphId: string) {
     setParagraphs((current) =>
       current.map((paragraph) =>
-        paragraph.paragraphId === paragraphId ? { ...paragraph, deleted: true } : paragraph,
+        paragraph.paragraphId === paragraphId
+          ? { ...paragraph, deleted: true }
+          : paragraph,
       ),
     );
     setUtterancesByParagraph((current) => {
@@ -1413,9 +2207,12 @@ function App() {
     setApiStatus(`已删除段落 ${paragraphId}；其余配音编排 Agent 结果已保留`);
   }
 
-  async function ensureChapterStatementsReady(): Promise<Record<string, UtteranceDraft[]>> {
+  async function ensureChapterStatementsReady(): Promise<
+    Record<string, UtteranceDraft[]>
+  > {
     const hasStatementDrafts = visibleParagraphs.some(
-      (paragraph) => (utterancesByParagraph[paragraph.paragraphId] ?? []).length > 0,
+      (paragraph) =>
+        (utterancesByParagraph[paragraph.paragraphId] ?? []).length > 0,
     );
     if (confirmed && hasStatementDrafts) return utterancesByParagraph;
     setApiStatus("正在同步当前章节并准备可匹配台词草稿");
@@ -1423,12 +2220,20 @@ function App() {
     const draftsByParagraph = Object.fromEntries(
       synced.paragraphs.map((paragraph) => [
         paragraph.paragraphId,
-        synced.utteranceDrafts.filter((utterance) => utterance.paragraph_id === paragraph.paragraphId),
+        synced.utteranceDrafts.filter(
+          (utterance) => utterance.paragraph_id === paragraph.paragraphId,
+        ),
       ]),
     );
-    const nextUtterances = apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles);
+    const nextUtterances = apiUtterancesToGroups(
+      draftsByParagraph,
+      synced.paragraphs,
+      roles,
+    );
     setUtterancesByParagraph(nextUtterances);
-    setApiStatus("当前章节已准备为可编辑台词草稿；配音编排 Agent 将自动完成台词划分和角色选择");
+    setApiStatus(
+      "当前章节已准备为可编辑台词草稿；配音编排 Agent 将自动完成台词划分和角色选择",
+    );
     return nextUtterances;
   }
 
@@ -1440,11 +2245,17 @@ function App() {
       const draftsByParagraph = Object.fromEntries(
         synced.paragraphs.map((paragraph) => [
           paragraph.paragraphId,
-          synced.utteranceDrafts.filter((utterance) => utterance.paragraph_id === paragraph.paragraphId),
+          synced.utteranceDrafts.filter(
+            (utterance) => utterance.paragraph_id === paragraph.paragraphId,
+          ),
         ]),
       );
-      setUtterancesByParagraph(apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles));
-      setApiStatus("段落已确认，已默认按整段落生成台词文本；配音编排 Agent 将自动完成台词划分和角色选择");
+      setUtterancesByParagraph(
+        apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles),
+      );
+      setApiStatus(
+        "段落已确认，已默认按整段落生成台词文本；配音编排 Agent 将自动完成台词划分和角色选择",
+      );
     } catch (error) {
       setConfirmed(false);
       setChapterBackendSynced(false);
@@ -1492,17 +2303,25 @@ function App() {
     if (!currentRole) return;
     if (updates.voiceResourceId) {
       const duplicate = roles.find(
-        (role) => role.roleId !== roleId && role.voiceResourceId === updates.voiceResourceId,
+        (role) =>
+          role.roleId !== roleId &&
+          role.voiceResourceId === updates.voiceResourceId,
       );
       if (duplicate) {
-        setApiStatus(`音色已分配给 ${duplicate.name}，本章节每个角色需要使用唯一音色`);
+        setApiStatus(
+          `音色已分配给 ${duplicate.name}，本章节每个角色需要使用唯一音色`,
+        );
         return;
       }
     }
     const merged = { ...currentRole, ...updates };
     const updatedRole =
-      updates.voiceResourceId !== undefined ? applyVoiceToRole(merged, updates.voiceResourceId) : merged;
-    setRoles((current) => current.map((role) => (role.roleId === roleId ? updatedRole : role)));
+      updates.voiceResourceId !== undefined
+        ? applyVoiceToRole(merged, updates.voiceResourceId)
+        : merged;
+    setRoles((current) =>
+      current.map((role) => (role.roleId === roleId ? updatedRole : role)),
+    );
     requestJson(`/characters/${roleId}`, {
       method: "PATCH",
       body: JSON.stringify(toApiRole(updatedRole)),
@@ -1510,11 +2329,15 @@ function App() {
   }
 
   async function addRole() {
-    const usedVoiceIds = new Set(roles.map((role) => role.voiceResourceId).filter(Boolean));
+    const usedVoiceIds = new Set(
+      roles.map((role) => role.voiceResourceId).filter(Boolean),
+    );
     const voice = voices.find((item) => !usedVoiceIds.has(item.voiceId));
     const roleId = `custom_role_${Date.now()}`;
     const roleName = `新角色${roles.length + 1}`;
-    const role = voice ? roleFromVoice(roleId, roleName, voice) : createBlankRole(roleId, roleName);
+    const role = voice
+      ? roleFromVoice(roleId, roleName, voice)
+      : createBlankRole(roleId, roleName);
     setRoles((current) => [...current, role]);
     try {
       const data = await requestJson<{ roles: ApiRoleCard[] }>("/characters", {
@@ -1524,26 +2347,42 @@ function App() {
       setRoles(data.roles.map(fromApiRole));
       setApiStatus(`已新增角色：${role.name}`);
     } catch (error) {
-      setApiStatus(apiFailureMessage("新增角色同步失败，已保留本地角色", error));
+      setApiStatus(
+        apiFailureMessage("新增角色同步失败，已保留本地角色", error),
+      );
     }
   }
 
   async function deleteRole(roleId: string) {
-    const payload = { roles: roles.map(toApiRole), utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph) };
+    const payload = {
+      roles: roles.map(toApiRole),
+      utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+    };
     try {
-      const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
-        `/characters/${roleId}`,
-        { method: "DELETE", body: JSON.stringify(payload) },
-      );
+      const data = await requestJson<{
+        roles: ApiRoleCard[];
+        utterances_by_paragraph: Record<string, ApiUtterance[]>;
+      }>(`/characters/${roleId}`, {
+        method: "DELETE",
+        body: JSON.stringify(payload),
+      });
       setRoles(data.roles.map(fromApiRole));
-      setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, data.roles.map(fromApiRole)));
+      setUtterancesByParagraph(
+        apiUtterancesToGroups(
+          data.utterances_by_paragraph,
+          paragraphs,
+          data.roles.map(fromApiRole),
+        ),
+      );
       setApiStatus("角色删除成功");
     } catch (error) {
       if (!isRoleDeleteReferenceConflict(error)) {
         setApiStatus(apiFailureMessage("角色删除失败", error));
         return;
       }
-      const detail = error.detail as { delete_result?: { referenced_count?: number } };
+      const detail = error.detail as {
+        delete_result?: { referenced_count?: number };
+      };
       const referencedCount = detail.delete_result?.referenced_count ?? 0;
       const shouldUnbind = window.confirm(
         `角色正在被 ${referencedCount} 条台词引用，是否解除这些台词的角色绑定并删除？`,
@@ -1553,13 +2392,22 @@ function App() {
         return;
       }
       try {
-        const data = await requestJson<{ roles: ApiRoleCard[]; utterances_by_paragraph: Record<string, ApiUtterance[]> }>(
-          `/characters/${roleId}`,
-          { method: "DELETE", body: JSON.stringify({ ...payload, action: "unbind" }) },
-        );
+        const data = await requestJson<{
+          roles: ApiRoleCard[];
+          utterances_by_paragraph: Record<string, ApiUtterance[]>;
+        }>(`/characters/${roleId}`, {
+          method: "DELETE",
+          body: JSON.stringify({ ...payload, action: "unbind" }),
+        });
         const nextRoles = data.roles.map(fromApiRole);
         setRoles(nextRoles);
-        setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, nextRoles));
+        setUtterancesByParagraph(
+          apiUtterancesToGroups(
+            data.utterances_by_paragraph,
+            paragraphs,
+            nextRoles,
+          ),
+        );
         setApiStatus("已解除引用台词的角色绑定并删除角色");
       } catch (secondError) {
         setApiStatus(apiFailureMessage("角色删除失败", secondError));
@@ -1572,7 +2420,9 @@ function App() {
     setAgentRunRunning(true);
     automaticDubbingStartedRef.current = false;
     automaticRoleMatchingAttemptedRef.current = false;
-    setWorkflowState((current) => transitionWorkflow(current, { type: "START" }));
+    setWorkflowState((current) =>
+      transitionWorkflow(current, { type: "START" }),
+    );
     setRoleMatchingProgress(8);
     setApiStatus("角色分析 Agent 正在同步当前章节、创建角色并匹配音色");
     try {
@@ -1586,12 +2436,17 @@ function App() {
       setAgentRunThreadId(data.thread_id);
       setAiRoleCandidates(data.role_candidates);
       setAgentRunWaitingForRoles(true);
-      setWorkflowState((current) => transitionWorkflow(current, { type: "AGENT_COMPLETED" }));
+      setWorkflowState((current) =>
+        transitionWorkflow(current, { type: "AGENT_COMPLETED" }),
+      );
       setRoleMatchingProgress(35);
       const autoSummary = data.auto_role_report
         ? `自动新增 ${data.auto_role_report.added_count} 个角色，生成 ${data.auto_role_report.generated_voice_count} 个音色。`
         : "";
-      setApiStatus(`${data.message} ${autoSummary} 请检查角色列表后点击“配音编排 Agent”。`);
+      setApiStatus(
+        `${data.message} ${autoSummary} 请检查角色列表后点击“配音编排 Agent”。`,
+      );
+      void loadAgentRunHistory();
     } catch (error) {
       resetAgentRunState();
       setRoleMatchingProgress(100);
@@ -1604,7 +2459,9 @@ function App() {
   async function runAiRoleMatching() {
     if (!agentRunThreadId) return;
     setAgentRunRunning(true);
-    setWorkflowState((current) => transitionWorkflow(current, { type: "CONTINUE" }));
+    setWorkflowState((current) =>
+      transitionWorkflow(current, { type: "CONTINUE" }),
+    );
     setAgentRunWaitingForRoles(false);
     setRoleMatchingProgress(45);
     setApiStatus("配音编排 Agent 正在划分台词并为未绑定台词选择角色");
@@ -1618,14 +2475,19 @@ function App() {
       let terminalReceived = false;
       for (let attempt = 0; attempt < 3 && !terminalReceived; attempt += 1) {
         try {
-          const response = await fetchApi(`/agent-runs/${agentRunThreadId}/events`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(lastEventId ? { "Last-Event-ID": String(lastEventId) } : {}),
+          const response = await fetchApi(
+            `/agent-runs/${agentRunThreadId}/events`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(lastEventId
+                  ? { "Last-Event-ID": String(lastEventId) }
+                  : {}),
+              },
+              body: requestBody,
             },
-            body: requestBody,
-          });
+          );
           if (!response.ok) throw new Error(await response.text());
           if (!response.body) throw new Error("配音编排 Agent 没有返回进度流");
           const reader = response.body.getReader();
@@ -1633,22 +2495,29 @@ function App() {
           let buffer = "";
           while (true) {
             const { value, done } = await reader.read();
-            buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+            buffer += decoder.decode(value ?? new Uint8Array(), {
+              stream: !done,
+            });
             const parsed = parseAgentSseBuffer(buffer);
             buffer = parsed.remainder;
             for (const event of parsed.events) {
               lastEventId = Math.max(lastEventId, event.id);
               handleAgentRunStreamEvent(event);
-              terminalReceived ||= event.event === "completed" || event.event === "failed";
+              terminalReceived ||=
+                event.event === "completed" || event.event === "failed";
             }
             if (done) break;
           }
           if (!terminalReceived && attempt < 2) {
-            await new Promise((resolve) => window.setTimeout(resolve, 250 * 2 ** attempt));
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, 250 * 2 ** attempt),
+            );
           }
         } catch (error) {
           if (attempt >= 2) throw error;
-          await new Promise((resolve) => window.setTimeout(resolve, 250 * 2 ** attempt));
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, 250 * 2 ** attempt),
+          );
         }
       }
       if (!terminalReceived) throw new Error("配音编排 Agent 进度流提前结束");
@@ -1664,13 +2533,18 @@ function App() {
   function handleAgentRunStreamEvent(event: { event: string; data: any }) {
     if (event.event === "role_selected") {
       applyAiRoleSelectionEvent(event.data as AiRoleSelectionEvent);
-      setRoleMatchingProgress((current) => Math.min(95, Math.max(current + 5, 55)));
+      setRoleMatchingProgress((current) =>
+        Math.min(95, Math.max(current + 5, 55)),
+      );
       return;
     }
     if (event.event === "completed") {
       const data = event.data as DubbingArrangementResponse;
-      setUtterancesByParagraph(apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, roles));
-      const requiresHumanReview = data.status === "needs_human_review" ||
+      setUtterancesByParagraph(
+        apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, roles),
+      );
+      const requiresHumanReview =
+        data.status === "needs_human_review" ||
         data.role_selection_events.some((item) => item.needs_human_review);
       setConfirmed(!requiresHumanReview);
       setChapterBackendSynced(true);
@@ -1679,13 +2553,18 @@ function App() {
       setApiStatus(data.message);
       setWorkflowState((current) =>
         transitionWorkflow(current, {
-          type: data.status === "needs_human_review" ? "PAUSE" : "AGENT_COMPLETED",
+          type:
+            data.status === "needs_human_review" ? "PAUSE" : "AGENT_COMPLETED",
         }),
       );
+      void loadAgentRunHistory();
       return;
     }
     if (event.event === "failed") {
-      const message = event.data?.failure?.message ?? event.data?.message ?? "模型输出未通过校验";
+      const message =
+        event.data?.failure?.message ??
+        event.data?.message ??
+        "模型输出未通过校验";
       setAgentRunWaitingForRoles(true);
       setRoleMatchingProgress(100);
       setApiStatus(`配音编排 Agent 失败：${message}`);
@@ -1702,14 +2581,22 @@ function App() {
         text: event.text,
         roleId: role?.roleId ?? event.speaker_role_id ?? "",
         speakerName: event.speaker_name || role?.name || "",
-        audioStatus: event.needs_human_review ? "AI已选择角色，请人工确认" : "AI已选择角色",
+        audioStatus: event.needs_human_review
+          ? "AI已选择角色，请人工确认"
+          : "AI已选择角色",
         needsHumanReview: event.needs_human_review,
       };
-      const found = list.some((item) => item.utteranceId === event.utterance_id);
+      const found = list.some(
+        (item) => item.utteranceId === event.utterance_id,
+      );
       return {
         ...current,
         [event.paragraph_id]: found
-          ? list.map((item) => (item.utteranceId === event.utterance_id ? { ...item, ...next } : item))
+          ? list.map((item) =>
+              item.utteranceId === event.utterance_id
+                ? { ...item, ...next }
+                : item,
+            )
           : [...list, next],
       };
     });
@@ -1743,9 +2630,14 @@ function App() {
     if (field === "roleId" && !value) setConfirmed(false);
   }
 
-  function firstPendingUtterance(utterances: UtteranceDraft[] = flattenedUtterances) {
+  function firstPendingUtterance(
+    utterances: UtteranceDraft[] = flattenedUtterances,
+  ) {
     return utterances.find(
-      (utterance) => utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
+      (utterance) =>
+        utterance.needsHumanReview ||
+        !utterance.roleId ||
+        !utterance.text.trim(),
     );
   }
 
@@ -1758,7 +2650,10 @@ function App() {
     setApiStatus(statusMessage);
   }
 
-  function focusParagraphStatusItem(item: ParagraphStatusItem, statusMessage: string) {
+  function focusParagraphStatusItem(
+    item: ParagraphStatusItem,
+    statusMessage: string,
+  ) {
     setHighlightParagraphId(item.paragraphId);
     if (item.firstUtteranceId) setHighlightUtteranceId(item.firstUtteranceId);
     document
@@ -1783,12 +2678,19 @@ function App() {
       setApiStatus("已显示全部正文状态");
       return;
     }
-    const firstItem = paragraphStatusItems.find((item) => item.status === nextStatus);
+    const firstItem = paragraphStatusItems.find(
+      (item) => item.status === nextStatus,
+    );
     if (!firstItem) {
-      setApiStatus(`当前章节没有${PARAGRAPH_STATUS_META[nextStatus].label}段落`);
+      setApiStatus(
+        `当前章节没有${PARAGRAPH_STATUS_META[nextStatus].label}段落`,
+      );
       return;
     }
-    focusParagraphStatusItem(firstItem, `已筛选并跳转到${firstItem.label}段落：${firstItem.paragraphId}`);
+    focusParagraphStatusItem(
+      firstItem,
+      `已筛选并跳转到${firstItem.label}段落：${firstItem.paragraphId}`,
+    );
   }
 
   function jumpToFirstUnselectedRoleUtterance() {
@@ -1801,27 +2703,35 @@ function App() {
   }
 
   function jumpToFirstUngeneratedAudioUtterance() {
-    const pendingParagraph = paragraphStatusItems.find((item) => item.status === "undubbed");
+    const pendingParagraph = paragraphStatusItems.find(
+      (item) => item.status === "undubbed",
+    );
     if (!pendingParagraph) {
       setApiStatus("当前没有未生成配音的台词");
       return;
     }
-    focusParagraphStatusItem(pendingParagraph, `已跳转到未生成配音的段落：${pendingParagraph.paragraphId}`);
+    focusParagraphStatusItem(
+      pendingParagraph,
+      `已跳转到未生成配音的段落：${pendingParagraph.paragraphId}`,
+    );
   }
 
   function confirmAllReadyUtterances() {
     let remaining = 0;
     const nextGroups: Record<string, UtteranceDraft[]> = {};
-    for (const [paragraphId, utterances] of Object.entries(utterancesByParagraph)) {
+    for (const [paragraphId, utterances] of Object.entries(
+      utterancesByParagraph,
+    )) {
       nextGroups[paragraphId] = utterances.map((utterance) => {
         const ready = Boolean(utterance.roleId && utterance.text.trim());
         if (!ready) remaining += 1;
         return {
           ...utterance,
           needsHumanReview: !ready,
-          audioStatus: ready && utterance.audioStatus === "请选择角色后再确认"
-            ? "台词与角色已确认"
-            : utterance.audioStatus,
+          audioStatus:
+            ready && utterance.audioStatus === "请选择角色后再确认"
+              ? "台词与角色已确认"
+              : utterance.audioStatus,
         };
       });
     }
@@ -1831,13 +2741,21 @@ function App() {
       setApiStatus(`仍有 ${remaining} 条台词缺少文本或角色，请处理后再确认`);
       const pending = firstPendingUtterance();
       if (pending) {
-        window.setTimeout(() => focusUtterance(pending, `请处理台词：${pending.utteranceId}`), 0);
+        window.setTimeout(
+          () => focusUtterance(pending, `请处理台词：${pending.utteranceId}`),
+          0,
+        );
       }
       return;
     }
     setApiStatus("所有台词与角色已确认，可以继续生成配音");
-    if (workflowState.mode === "automatic" && workflowState.activeAgent === "dubbing_director") {
-      setWorkflowState((current) => transitionWorkflow(current, { type: "CONTINUE" }));
+    if (
+      workflowState.mode === "automatic" &&
+      workflowState.activeAgent === "dubbing_director"
+    ) {
+      setWorkflowState((current) =>
+        transitionWorkflow(current, { type: "CONTINUE" }),
+      );
       if (!automaticDubbingStartedRef.current) {
         automaticDubbingStartedRef.current = true;
         void generateChapterDubbing(true);
@@ -1846,31 +2764,46 @@ function App() {
   }
 
   function addUtteranceAfter(paragraphId: string, afterUtteranceId?: string) {
-    const paragraph = paragraphs.find((item) => item.paragraphId === paragraphId);
+    const paragraph = paragraphs.find(
+      (item) => item.paragraphId === paragraphId,
+    );
     if (!paragraph) return;
     setUtterancesByParagraph((current) => {
       const list = current[paragraphId] ?? [];
-      const nextNumber = list.reduce((max, utterance) => {
-        const match = utterance.utteranceId.match(/-u-(\d+)$/);
-        return Math.max(max, match ? Number(match[1]) : 0);
-      }, 0) + 1;
+      const nextNumber =
+        list.reduce((max, utterance) => {
+          const match = utterance.utteranceId.match(/-u-(\d+)$/);
+          return Math.max(max, match ? Number(match[1]) : 0);
+        }, 0) + 1;
       const draft = {
         ...makeUtteranceDraft({ ...paragraph, text: "" }),
         utteranceId: `${paragraphId}-u-${String(nextNumber).padStart(3, "0")}`,
       };
-      const insertIndex = afterUtteranceId ? list.findIndex((item) => item.utteranceId === afterUtteranceId) + 1 : list.length;
+      const insertIndex = afterUtteranceId
+        ? list.findIndex((item) => item.utteranceId === afterUtteranceId) + 1
+        : list.length;
       const safeIndex = insertIndex <= 0 ? list.length : insertIndex;
       return {
         ...current,
-        [paragraphId]: [...list.slice(0, safeIndex), draft, ...list.slice(safeIndex)],
+        [paragraphId]: [
+          ...list.slice(0, safeIndex),
+          draft,
+          ...list.slice(safeIndex),
+        ],
       };
     });
+  }
+
+  function addCurrentUtteranceAfter(utterance: UtteranceDraft) {
+    addUtteranceAfter(utterance.paragraphId, utterance.utteranceId);
   }
 
   function deleteUtterance(paragraphId: string, utteranceId: string) {
     setUtterancesByParagraph((current) => ({
       ...current,
-      [paragraphId]: (current[paragraphId] ?? []).filter((utterance) => utterance.utteranceId !== utteranceId),
+      [paragraphId]: (current[paragraphId] ?? []).filter(
+        (utterance) => utterance.utteranceId !== utteranceId,
+      ),
     }));
   }
 
@@ -1945,10 +2878,14 @@ function App() {
           setChapterPlaybackState("playing");
           setApiStatus(`继续播放配音：${chapterPlaybackUtteranceId}`);
         })
-        .catch((error) => setApiStatus(apiFailureMessage("继续播放失败", error)));
+        .catch((error) =>
+          setApiStatus(apiFailureMessage("继续播放失败", error)),
+        );
       return;
     }
-    const queue = flattenedUtterances.filter((utterance) => utteranceAudioSource(utterance));
+    const queue = flattenedUtterances.filter((utterance) =>
+      utteranceAudioSource(utterance),
+    );
     if (queue.length === 0) {
       setApiStatus("当前章节没有已生成配音的台词");
       return;
@@ -1961,10 +2898,20 @@ function App() {
   async function generateAudio(utterance: UtteranceDraft) {
     if (queuedUtteranceIdsRef.current.has(utterance.utteranceId)) return;
     queuedUtteranceIdsRef.current.add(utterance.utteranceId);
-    setGeneratingUtteranceIds((current) => ({ ...current, [utterance.utteranceId]: true }));
-    updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "已加入配音生成队列");
+    setGeneratingUtteranceIds((current) => ({
+      ...current,
+      [utterance.utteranceId]: true,
+    }));
+    updateUtterance(
+      utterance.paragraphId,
+      utterance.utteranceId,
+      "audioStatus",
+      "已加入配音生成队列",
+    );
 
-    const task = dubbingQueueRef.current.then(() => generateAudioNow(utterance));
+    const task = dubbingQueueRef.current.then(() =>
+      generateAudioNow(utterance),
+    );
     dubbingQueueRef.current = task.catch(() => undefined);
     await task;
   }
@@ -1972,9 +2919,17 @@ function App() {
   async function generateAudioNow(utterance: UtteranceDraft) {
     const role = roles.find((item) => item.roleId === utterance.roleId);
     if (!role) {
-      updateUtterance(utterance.paragraphId, utterance.utteranceId, "audioStatus", "音频生成失败：角色不存在");
+      updateUtterance(
+        utterance.paragraphId,
+        utterance.utteranceId,
+        "audioStatus",
+        "音频生成失败：角色不存在",
+      );
       queuedUtteranceIdsRef.current.delete(utterance.utteranceId);
-      setGeneratingUtteranceIds((current) => ({ ...current, [utterance.utteranceId]: false }));
+      setGeneratingUtteranceIds((current) => ({
+        ...current,
+        [utterance.utteranceId]: false,
+      }));
       return;
     }
     updateUtterance(
@@ -1988,38 +2943,43 @@ function App() {
       const result = await requestJson<{
         audio_url: string;
         duration_seconds?: number;
-        voice_job: { status: string; output_path?: string; provider?: string; response_format?: string };
+        voice_job: {
+          status: string;
+          output_path?: string;
+          provider?: string;
+          response_format?: string;
+        };
         warning?: string;
-      }>(
-        `/dubbing-segments/${utterance.utteranceId}/dubbing-jobs`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            role_id: role.roleId,
-            voice_resource_id: role.voiceResourceId,
-            text: utterance.text,
-            voice_mode: role.voiceMode,
-            language: "Auto",
-          }),
-        },
-      );
+      }>(`/dubbing-segments/${utterance.utteranceId}/dubbing-jobs`, {
+        method: "POST",
+        body: JSON.stringify({
+          role_id: role.roleId,
+          voice_resource_id: role.voiceResourceId,
+          text: utterance.text,
+          voice_mode: role.voiceMode,
+          language: "Auto",
+        }),
+      });
       const audioStatus =
-        result.voice_job.status === "substitute" ? "本地 TTS 未启动，已生成可播放占位音频" : "音频生成完成";
+        result.voice_job.status === "substitute"
+          ? "本地 TTS 未启动，已生成可播放占位音频"
+          : "音频生成完成";
       setUtterancesByParagraph((current) => ({
         ...current,
-        [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map((item) =>
-          item.utteranceId === utterance.utteranceId
-            ? {
-                ...item,
-                audioStatus,
-                audioUrl: result.audio_url,
-                audioPath: result.voice_job.output_path,
-                audioDuration: result.duration_seconds,
-                audioProvider: result.voice_job.provider,
-                audioModel: result.voice_job.response_format,
-                audioError: undefined,
-              }
-            : item,
+        [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map(
+          (item) =>
+            item.utteranceId === utterance.utteranceId
+              ? {
+                  ...item,
+                  audioStatus,
+                  audioUrl: result.audio_url,
+                  audioPath: result.voice_job.output_path,
+                  audioDuration: result.duration_seconds,
+                  audioProvider: result.voice_job.provider,
+                  audioModel: result.voice_job.response_format,
+                  audioError: undefined,
+                }
+              : item,
         ),
       }));
       setVoiceGenerationProgress(100);
@@ -2027,16 +2987,24 @@ function App() {
       const message = apiFailureMessage("音频生成失败", error);
       setUtterancesByParagraph((current) => ({
         ...current,
-        [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map((item) =>
-          item.utteranceId === utterance.utteranceId
-            ? { ...item, audioStatus: message, audioError: apiFailureDetail(error) }
-            : item,
+        [utterance.paragraphId]: (current[utterance.paragraphId] ?? []).map(
+          (item) =>
+            item.utteranceId === utterance.utteranceId
+              ? {
+                  ...item,
+                  audioStatus: message,
+                  audioError: apiFailureDetail(error),
+                }
+              : item,
         ),
       }));
       setVoiceGenerationProgress(100);
     } finally {
       queuedUtteranceIdsRef.current.delete(utterance.utteranceId);
-      setGeneratingUtteranceIds((current) => ({ ...current, [utterance.utteranceId]: false }));
+      setGeneratingUtteranceIds((current) => ({
+        ...current,
+        [utterance.utteranceId]: false,
+      }));
     }
   }
 
@@ -2052,7 +3020,9 @@ function App() {
     }
     dubbingInFlightRef.current = true;
     setVoiceGenerationProgress(10);
-    setWorkflowState((current) => transitionWorkflow(current, { type: "CONTINUE" }));
+    setWorkflowState((current) =>
+      transitionWorkflow(current, { type: "CONTINUE" }),
+    );
     setApiStatus("正在按角色/音色分组批量生成当前章节配音");
     try {
       const data = await requestJson<{
@@ -2071,11 +3041,18 @@ function App() {
         }),
       });
       setUtterancesByParagraph((current) =>
-        mergeApiAudioByUtteranceId(current, data.utterances_by_paragraph, paragraphs, roles),
+        mergeApiAudioByUtteranceId(
+          current,
+          data.utterances_by_paragraph,
+          paragraphs,
+          roles,
+        ),
       );
       setVoiceGenerationProgress(100);
       setApiStatus(formatBatchDubbingStatus(data));
-      setWorkflowState((current) => transitionWorkflow(current, { type: "AGENT_COMPLETED" }));
+      setWorkflowState((current) =>
+        transitionWorkflow(current, { type: "AGENT_COMPLETED" }),
+      );
     } catch (error) {
       setVoiceGenerationProgress(100);
       setApiStatus(apiFailureMessage("批量生成配音失败", error));
@@ -2121,9 +3098,16 @@ function App() {
     }
   }
 
-  async function saveVoiceResource(payload: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & { suitableRoleTypes?: string[] | string }): Promise<boolean> {
+  async function saveVoiceResource(
+    payload: Omit<Partial<VoiceResource>, "suitableRoleTypes"> & {
+      suitableRoleTypes?: string[] | string;
+    },
+  ): Promise<boolean> {
     try {
-      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>("/voice-profiles", {
+      const data = await requestJson<{
+        voice: ApiVoiceResource;
+        voices: ApiVoiceResource[];
+      }>("/voice-profiles", {
         method: "POST",
         body: JSON.stringify(toApiVoice(payload)),
       });
@@ -2138,7 +3122,10 @@ function App() {
 
   async function updateVoiceResource(voice: VoiceResource) {
     try {
-      const data = await requestJson<{ voice: ApiVoiceResource; voices: ApiVoiceResource[] }>(`/voice-profiles/${voice.voiceId}`, {
+      const data = await requestJson<{
+        voice: ApiVoiceResource;
+        voices: ApiVoiceResource[];
+      }>(`/voice-profiles/${voice.voiceId}`, {
         method: "PATCH",
         body: JSON.stringify(toApiVoice(voice)),
       });
@@ -2149,17 +3136,22 @@ function App() {
     }
   }
 
-  async function handleReferenceAudioFile(event: ChangeEvent<HTMLInputElement>) {
+  async function handleReferenceAudioFile(
+    event: ChangeEvent<HTMLInputElement>,
+  ) {
     const file = event.target.files?.[0];
     if (!file) return;
     setApiStatus(`正在上传参考音频文件：${file.name}`);
     try {
       const form = new FormData();
       form.append("file", file);
-      const data = await requestJson<{ reference_audio_path: string }>("/voice-profiles/reference-audio", {
-        method: "POST",
-        body: form,
-      });
+      const data = await requestJson<{ reference_audio_path: string }>(
+        "/voice-profiles/reference-audio",
+        {
+          method: "POST",
+          body: form,
+        },
+      );
       if (newVoiceAudioPreviewUrl) URL.revokeObjectURL(newVoiceAudioPreviewUrl);
       setNewVoiceAudioPreviewUrl(URL.createObjectURL(file));
       setNewVoice((current) => ({
@@ -2187,26 +3179,27 @@ function App() {
         generation_status: "succeeded" | "substitute";
         generation_note: string;
         model_requirement?: string | null;
-      }>(
-        "/voice-profiles/generate",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            name: generatedVoice.name,
-            description: generatedVoice.description,
-            gender: generatedVoice.gender,
-            suitable_role_types: generatedVoice.suitableRoleTypes
-              .split(/[，,、]/)
-              .map((item) => item.trim())
-              .filter(Boolean),
-            reference_text: generatedVoice.referenceText || DEFAULT_GENERATED_VOICE_TEXT,
-          }),
-        },
-      );
+      }>("/voice-profiles/generate", {
+        method: "POST",
+        body: JSON.stringify({
+          name: generatedVoice.name,
+          description: generatedVoice.description,
+          gender: generatedVoice.gender,
+          suitable_role_types: generatedVoice.suitableRoleTypes
+            .split(/[，,、]/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+          reference_text:
+            generatedVoice.referenceText || DEFAULT_GENERATED_VOICE_TEXT,
+        }),
+      });
       setGeneratedVoiceProgress(100);
       setGeneratedVoicePreview(fromApiVoice(data.voice));
       setGeneratedVoicePreviewUrl(data.audio_url);
-      const prefix = data.generation_status === "substitute" ? "生成音色使用占位预览" : "生成音色成功";
+      const prefix =
+        data.generation_status === "substitute"
+          ? "生成音色使用占位预览"
+          : "生成音色成功";
       setApiStatus(`${prefix}：${data.generation_note}`);
     } catch (error) {
       setGeneratedVoiceProgress(100);
@@ -2244,7 +3237,9 @@ function App() {
       anchor.download = `音色库-${new Date().toISOString().slice(0, 10)}.zip`;
       anchor.click();
       URL.revokeObjectURL(objectUrl);
-      setApiStatus(data.message || `音色库导出完成：${data.voice_count} 个音色`);
+      setApiStatus(
+        data.message || `音色库导出完成：${data.voice_count} 个音色`,
+      );
     } catch (error) {
       setApiStatus(apiFailureMessage("导出音色库失败", error));
     }
@@ -2259,9 +3254,12 @@ function App() {
     try {
       let remaining = voices;
       for (const voice of selected) {
-        const data = await requestJson<{ voices: ApiVoiceResource[] }>(`/voice-profiles/${voice.voiceId}`, {
-          method: "DELETE",
-        });
+        const data = await requestJson<{ voices: ApiVoiceResource[] }>(
+          `/voice-profiles/${voice.voiceId}`,
+          {
+            method: "DELETE",
+          },
+        );
         remaining = data.voices.map(fromApiVoice);
       }
       setVoices(remaining);
@@ -2319,7 +3317,8 @@ function App() {
   async function testBackendConnection() {
     applyBackendApiBaseInput();
     try {
-      const data = await requestJson<ConnectionTestResponse>("/connection-test");
+      const data =
+        await requestJson<ConnectionTestResponse>("/connection-test");
       setApiStatus(data.message || "后端 API 连接成功");
     } catch (error) {
       setApiStatus(apiFailureMessage("测试连接失败", error));
@@ -2333,14 +3332,17 @@ function App() {
     setApiStatus("正在测试文本模型与 TTS 模型 API");
     try {
       const secretPayload = await createSecretExchangePayload(textModelApiKey);
-      const data = await requestJson<ModelApisTestResponse>("/model-config/models/test", {
-        method: "POST",
-        body: JSON.stringify({
-          text_model: modelConfig.text_model,
-          tts: modelConfig.tts,
-          ...(secretPayload ? { text_model_secret: secretPayload } : {}),
-        }),
-      });
+      const data = await requestJson<ModelApisTestResponse>(
+        "/model-config/models/test",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            text_model: modelConfig.text_model,
+            tts: modelConfig.tts,
+            ...(secretPayload ? { text_model_secret: secretPayload } : {}),
+          }),
+        },
+      );
       setTextModelApiKey("");
       setApiStatus(data.message || "模型 API 测试成功");
     } catch (error) {
@@ -2353,12 +3355,17 @@ function App() {
   async function deployTtsModels() {
     if (ttsDeployment.status === "running") return;
     applyBackendApiBaseInput();
-    setApiStatus("已开始后台下载并部署 TTS 模型；其他不依赖 TTS 的功能可继续使用");
+    setApiStatus(
+      "已开始后台下载并部署 TTS 模型；其他不依赖 TTS 的功能可继续使用",
+    );
     try {
-      const data = await requestJson<{ deployment: TtsDeploymentStatus }>("/model-config/tts/deploy", {
-        method: "POST",
-        body: JSON.stringify({ tts: modelConfig.tts }),
-      });
+      const data = await requestJson<{ deployment: TtsDeploymentStatus }>(
+        "/model-config/tts/deploy",
+        {
+          method: "POST",
+          body: JSON.stringify({ tts: modelConfig.tts }),
+        },
+      );
       const status = applyTtsDeployment(data.deployment);
       setApiStatus(status.message);
     } catch (error) {
@@ -2369,15 +3376,27 @@ function App() {
   function renderMainPage() {
     return (
       <main
-        className={chapterSidebarCollapsed ? "workbench chapters-collapsed" : "workbench"}
+        className={
+          chapterSidebarCollapsed ? "workbench chapters-collapsed" : "workbench"
+        }
         aria-label={`${APP_BRAND} v${APP_VERSION} 主页面`}
       >
-        <aside className={chapterSidebarCollapsed ? "chapter-sidebar collapsed" : "chapter-sidebar"}>
+        <aside
+          className={
+            chapterSidebarCollapsed
+              ? "chapter-sidebar collapsed"
+              : "chapter-sidebar"
+          }
+        >
           <button
             className="sidebar-toggle"
             type="button"
-            aria-label={chapterSidebarCollapsed ? "展开小说章节边栏" : "收起小说章节边栏"}
-            title={chapterSidebarCollapsed ? "展开小说章节边栏" : "收起小说章节边栏"}
+            aria-label={
+              chapterSidebarCollapsed ? "展开小说章节边栏" : "收起小说章节边栏"
+            }
+            title={
+              chapterSidebarCollapsed ? "展开小说章节边栏" : "收起小说章节边栏"
+            }
             onClick={() => setChapterSidebarCollapsed((current) => !current)}
           >
             {chapterSidebarCollapsed ? "›" : "‹"}
@@ -2389,10 +3408,18 @@ function App() {
               <section className="panel">
                 <div className="section-title">小说章节</div>
                 <div className="toolbar-row">
-                  <button className="tool-button sky" type="button" onClick={() => fileInputRef.current?.click()}>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
                     上传小说
                   </button>
-                  <button className="tool-button amber" type="button" onClick={() => void runAiChapterSplit()}>
+                  <button
+                    className="tool-button amber"
+                    type="button"
+                    onClick={() => void runAiChapterSplit()}
+                  >
                     文档解析
                   </button>
                 </div>
@@ -2405,9 +3432,18 @@ function App() {
                   onChange={handleTxtFile}
                 />
                 <ProgressBar label="上传小说进度" value={uploadProgress} />
-                <ProgressBar label="小说格式解析进度" value={chapterSplitProgress} />
-                <ProgressBar label="配音编排 Agent 进度" value={roleMatchingProgress} />
-                <ProgressBar label="语音生成进度" value={voiceGenerationProgress} />
+                <ProgressBar
+                  label="小说格式解析进度"
+                  value={chapterSplitProgress}
+                />
+                <ProgressBar
+                  label="配音编排 Agent 进度"
+                  value={roleMatchingProgress}
+                />
+                <ProgressBar
+                  label="语音生成进度"
+                  value={voiceGenerationProgress}
+                />
                 <div className="novel-preview" aria-label="小说开头预览">
                   {novelPreview}
                 </div>
@@ -2415,7 +3451,9 @@ function App() {
                 <div className="chapter-list" aria-label="章节列表">
                   {chapters.map((chapter) => (
                     <button
-                      className={chapter.chapterId === activeChapterId ? "active" : ""}
+                      className={
+                        chapter.chapterId === activeChapterId ? "active" : ""
+                      }
                       key={chapter.chapterId}
                       type="button"
                       onClick={() => void selectChapter(chapter.chapterId)}
@@ -2426,22 +3464,237 @@ function App() {
                 </div>
               </section>
 
+              <section className="panel project-workspace-panel">
+                <div className="section-heading">
+                  <div>
+                    <div className="section-title">项目工作区</div>
+                    <small>当前项目：{activeProject?.name ?? "default"}</small>
+                  </div>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => void loadProjects()}
+                  >
+                    刷新
+                  </button>
+                </div>
+                <div className="toolbar-row">
+                  <input
+                    aria-label="新建项目名称"
+                    placeholder="新建项目名称"
+                    value={newProjectName}
+                    onChange={(event) => setNewProjectName(event.target.value)}
+                  />
+                  <button
+                    className="tool-button teal"
+                    type="button"
+                    onClick={() => void createProject()}
+                  >
+                    新建项目
+                  </button>
+                </div>
+                <div className="project-roots">
+                  <span>
+                    音频：
+                    {activeProject?.output_roots?.audio ??
+                      "outputs/default/audio"}
+                  </span>
+                  <span>
+                    导出：
+                    {activeProject?.output_roots?.exports ??
+                      "outputs/default/exports"}
+                  </span>
+                </div>
+                <div className="section-title">最近项目</div>
+                <div className="recent-project-list" aria-label="最近项目">
+                  {projects.length === 0 ? (
+                    <small>还没有项目记录，默认项目会兼容旧数据。</small>
+                  ) : (
+                    projects.map((project) => (
+                      <article
+                        className={
+                          project.project_id === activeProjectId
+                            ? "project-card active"
+                            : "project-card"
+                        }
+                        key={project.project_id}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => selectProject(project.project_id)}
+                        >
+                          <strong>{project.name}</strong>
+                          <span>{project.project_id}</span>
+                        </button>
+                        <button
+                          className="tool-button amber"
+                          type="button"
+                          disabled={project.project_id === "default"}
+                          onClick={() => void deleteProject(project.project_id)}
+                        >
+                          删除项目
+                        </button>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </section>
+
+              <section className="panel quality-panel">
+                <div className="section-heading">
+                  <div>
+                    <div className="section-title">质量检查面板</div>
+                    <small>
+                      生成前检查和导出前检查共用当前章节、角色、台词与配音状态。
+                    </small>
+                  </div>
+                </div>
+                <div className="toolbar-row">
+                  <button
+                    className="tool-button teal"
+                    type="button"
+                    onClick={() => void runQualityCheck("generate")}
+                  >
+                    生成前检查
+                  </button>
+                  <button
+                    className="tool-button amber"
+                    type="button"
+                    onClick={() => void runQualityCheck("export")}
+                  >
+                    导出前检查
+                  </button>
+                </div>
+                <div className="quality-summary-grid" aria-label="质量检查统计">
+                  {QUALITY_SUMMARY_KEYS.map((key) => (
+                    <button
+                      className={
+                        qualityReport.summary[key] > 0
+                          ? "quality-summary-item active"
+                          : "quality-summary-item"
+                      }
+                      key={key}
+                      type="button"
+                      onClick={() => void loadReviewQueue(key)}
+                    >
+                      <span>{QUALITY_LABELS[key]}</span>
+                      <strong>{qualityReport.summary[key]}</strong>
+                    </button>
+                  ))}
+                </div>
+                <small className="status-message" aria-label="质量检查反馈">
+                  {qualityStatus}
+                </small>
+
+                <div className="review-queue-panel" aria-label="审稿队列">
+                  <div className="section-heading">
+                    <div>
+                      <div className="section-title">审稿队列</div>
+                      <small>
+                        集中处理
+                        needs_human_review、低置信度角色、超长台词和配音失败。
+                      </small>
+                    </div>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => void loadReviewQueue()}
+                    >
+                      刷新队列
+                    </button>
+                  </div>
+                  <div className="toolbar-row compact">
+                    <button
+                      className="tool-button teal"
+                      type="button"
+                      onClick={() => bulkConfirmReviewItems()}
+                    >
+                      批量确认
+                    </button>
+                    <button
+                      className="tool-button amber"
+                      type="button"
+                      onClick={() => bulkChangeReviewRole()}
+                    >
+                      批量改角色
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => bulkRetryDubbing()}
+                    >
+                      批量重试
+                    </button>
+                  </div>
+                  <div className="review-filter-row" aria-label="审稿筛选">
+                    {(
+                      [
+                        "needs_human_review",
+                        "unselected_role",
+                        "long_utterance",
+                        "dubbing_failed",
+                      ] as (keyof QualitySummary)[]
+                    ).map((issueType) => (
+                      <button
+                        key={issueType}
+                        type="button"
+                        onClick={() => void loadReviewQueue(issueType)}
+                      >
+                        {QUALITY_LABELS[issueType]}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="review-item-list">
+                    {reviewQueue.items.length === 0 ? (
+                      <small>审稿队列暂无可处理项。</small>
+                    ) : (
+                      reviewQueue.items.map((item) => (
+                        <button
+                          className="review-item-card"
+                          key={item.issue_id}
+                          type="button"
+                          onClick={() => focusQualityIssue(item)}
+                        >
+                          <strong>{QUALITY_LABELS[item.issue_type]}</strong>
+                          <span>{item.message}</span>
+                          <small>
+                            {item.chapter_id || "整本书"} ·{" "}
+                            {item.paragraph_id || item.role_id || "项目级"} ·{" "}
+                            {(item.actions ?? []).join(" / ") || "jump"}
+                          </small>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </section>
+
               <section className="panel">
                 <div className="section-heading">
                   <div className="section-title">角色列表</div>
-                  <button className="tool-button teal" type="button" onClick={() => void addRole()}>
+                  <button
+                    className="tool-button teal"
+                    type="button"
+                    onClick={() => void addRole()}
+                  >
                     新增角色
                   </button>
                 </div>
                 <div className="role-stack">
                   {roles.map((role) => {
-                    const voice = voices.find((item) => item.voiceId === role.voiceResourceId);
+                    const voice = voices.find(
+                      (item) => item.voiceId === role.voiceResourceId,
+                    );
                     return (
                       <article className="role-card" key={role.roleId}>
                         <input
                           aria-label={`${role.name} 角色名展示`}
                           value={role.name}
-                          onChange={(event) => updateRole(role.roleId, { name: event.target.value })}
+                          onChange={(event) =>
+                            updateRole(role.roleId, {
+                              name: event.target.value,
+                            })
+                          }
                         />
                         <input
                           aria-label={`${role.name} 别名`}
@@ -2460,31 +3713,50 @@ function App() {
                           aria-label={`${role.name} 性别`}
                           placeholder="性别"
                           value={role.gender}
-                          onChange={(event) => updateRole(role.roleId, { gender: event.target.value })}
+                          onChange={(event) =>
+                            updateRole(role.roleId, {
+                              gender: event.target.value,
+                            })
+                          }
                         />
                         <textarea
                           aria-label={`${role.name} 人设身份性格`}
                           placeholder="人设/身份/性格"
                           value={role.profile}
-                          onChange={(event) => updateRole(role.roleId, { profile: event.target.value })}
+                          onChange={(event) =>
+                            updateRole(role.roleId, {
+                              profile: event.target.value,
+                            })
+                          }
                         />
                         <div className="inline-select">
                           <label>
                             音色选择
                             <select
                               value={role.voiceResourceId}
-                              onChange={(event) => updateRole(role.roleId, { voiceResourceId: event.target.value })}
+                              onChange={(event) =>
+                                updateRole(role.roleId, {
+                                  voiceResourceId: event.target.value,
+                                })
+                              }
                             >
                               <option value="">未选择音色</option>
                               {voices.map((item) => {
                                 const owner = roles.find(
                                   (candidateRole) =>
                                     candidateRole.roleId !== role.roleId &&
-                                    candidateRole.voiceResourceId === item.voiceId,
+                                    candidateRole.voiceResourceId ===
+                                      item.voiceId,
                                 );
                                 return (
-                                  <option disabled={Boolean(owner)} key={item.voiceId} value={item.voiceId}>
-                                    {owner ? `${item.name}（已分配给${owner.name}）` : item.name}
+                                  <option
+                                    disabled={Boolean(owner)}
+                                    key={item.voiceId}
+                                    value={item.voiceId}
+                                  >
+                                    {owner
+                                      ? `${item.name}（已分配给${owner.name}）`
+                                      : item.name}
                                   </option>
                                 );
                               })}
@@ -2493,18 +3765,30 @@ function App() {
                         </div>
                         <p>
                           <strong>音色描述</strong>
-                          {voice?.description || role.voiceDescription || role.description || "未选择音色"}
+                          {voice?.description ||
+                            role.voiceDescription ||
+                            role.description ||
+                            "未选择音色"}
                         </p>
                         <p>
                           <strong>语音具体内容</strong>
-                          {voice?.referenceText || role.voiceSampleText || role.referenceText || "未选择音色"}
+                          {voice?.referenceText ||
+                            role.voiceSampleText ||
+                            role.referenceText ||
+                            "未选择音色"}
                         </p>
                         <p>
                           <strong>音色匹配</strong>
                           {role.voiceMatchReason ?? "用户可手动调整"}
                         </p>
-                        {voice && <AuthorizedAudio source={voiceAudioSrc(voice)} />}
-                        <button className="tool-button amber" type="button" onClick={() => void deleteRole(role.roleId)}>
+                        {voice && (
+                          <AuthorizedAudio source={voiceAudioSrc(voice)} />
+                        )}
+                        <button
+                          className="tool-button amber"
+                          type="button"
+                          onClick={() => void deleteRole(role.roleId)}
+                        >
                           删除角色
                         </button>
                       </article>
@@ -2512,18 +3796,41 @@ function App() {
                   })}
                 </div>
                 {aiRoleCandidates.length > 0 && (
-                  <div className="role-analysis-panel" aria-label="角色分析建议">
+                  <div
+                    className="role-analysis-panel"
+                    aria-label="角色分析建议"
+                  >
                     <div className="section-title">角色分析建议</div>
-                    <small>请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“配音编排 Agent”。模型建议仅作参考。</small>
+                    <small>
+                      请检查角色列表，必要时手动调整角色或音色；随后点击章节顶部“配音编排
+                      Agent”。模型建议仅作参考。
+                    </small>
                     {aiRoleCandidates.map((candidate, index) => (
-                      <article className="role-candidate-card" key={`${candidate.name ?? "unknown"}-${index}`}>
+                      <article
+                        className="role-candidate-card"
+                        key={`${candidate.name ?? "unknown"}-${index}`}
+                      >
                         <strong>{candidate.name ?? "未知角色"}</strong>
-                        <p>别名/称呼：{candidate.aliases.length ? candidate.aliases.join("、") : "待确认"}</p>
+                        <p>
+                          别名/称呼：
+                          {candidate.aliases.length
+                            ? candidate.aliases.join("、")
+                            : "待确认"}
+                        </p>
                         <p>性别：{candidate.gender ?? "待确认"}</p>
                         <p>人设/身份/性格：{candidate.profile ?? "待确认"}</p>
-                        <p>推荐音色方向：{candidate.voice_direction ?? "待确认"}</p>
-                        <p>证据片段：{candidate.evidence.join(" / ") || "待确认"}</p>
-                        <p>置信度：{Math.round(candidate.confidence * 100)}%；{candidate.needs_human_review ? "需要人工确认" : "仍可人工编辑"}</p>
+                        <p>
+                          推荐音色方向：{candidate.voice_direction ?? "待确认"}
+                        </p>
+                        <p>
+                          证据片段：{candidate.evidence.join(" / ") || "待确认"}
+                        </p>
+                        <p>
+                          置信度：{Math.round(candidate.confidence * 100)}%；
+                          {candidate.needs_human_review
+                            ? "需要人工确认"
+                            : "仍可人工编辑"}
+                        </p>
                       </article>
                     ))}
                   </div>
@@ -2544,7 +3851,10 @@ function App() {
             <div className="empty-state">
               <div className="section-title">当前章节</div>
               <h2>请选择小说章节</h2>
-              <p>选择某个章节后，左侧显示完整正文，右侧显示配音编排 Agent 生成后的台词。</p>
+              <p>
+                选择某个章节后，左侧显示完整正文，右侧显示配音编排 Agent
+                生成后的台词。
+              </p>
             </div>
           ) : (
             <>
@@ -2566,7 +3876,11 @@ function App() {
                     className="tool-button purple"
                     type="button"
                     onClick={() => void runAiRoleMatching()}
-                    disabled={agentRunRunning || !agentRunWaitingForRoles || !agentRunThreadId}
+                    disabled={
+                      agentRunRunning ||
+                      !agentRunWaitingForRoles ||
+                      !agentRunThreadId
+                    }
                   >
                     配音编排 Agent
                   </button>
@@ -2634,16 +3948,24 @@ function App() {
               />
 
               <section className="chapter-workspace-grid">
-                <article className="panel chapter-reader" aria-label="当前章节完整小说内容">
+                <article
+                  className="panel chapter-reader"
+                  aria-label="当前章节完整小说内容"
+                >
                   <div className="section-heading">
                     <div className="section-title">当前章节完整小说内容</div>
                     <div className="status-legend" aria-label="正文状态图例">
-                      {Object.entries(PARAGRAPH_STATUS_META).map(([status, meta]) => (
-                        <span className={`status-legend-item ${status}`} key={status}>
-                          <i />
-                          {meta.label}
-                        </span>
-                      ))}
+                      {Object.entries(PARAGRAPH_STATUS_META).map(
+                        ([status, meta]) => (
+                          <span
+                            className={`status-legend-item ${status}`}
+                            key={status}
+                          >
+                            <i />
+                            {meta.label}
+                          </span>
+                        ),
+                      )}
                     </div>
                   </div>
                   <div className="chapter-reader-body">
@@ -2654,8 +3976,11 @@ function App() {
                             className={[
                               "reader-paragraph",
                               item.status,
-                              highlightParagraphId === item.paragraphId ? "attention" : "",
-                              activeParagraphStatusFilter && activeParagraphStatusFilter !== item.status
+                              highlightParagraphId === item.paragraphId
+                                ? "attention"
+                                : "",
+                              activeParagraphStatusFilter &&
+                              activeParagraphStatusFilter !== item.status
                                 ? "dimmed"
                                 : "",
                             ]
@@ -2675,7 +4000,10 @@ function App() {
                   </div>
                 </article>
 
-                <article className="panel statement-panel" aria-label="划分台词与角色匹配">
+                <article
+                  className="panel statement-panel"
+                  aria-label="划分台词与角色匹配"
+                >
                   <div className="section-heading">
                     <div className="section-title">划分台词与角色匹配</div>
                     <div className="toolbar-row compact">
@@ -2706,14 +4034,20 @@ function App() {
                     </div>
                   </div>
                   {paragraphStatusItems.length > 0 && (
-                    <div className="chapter-status-map" aria-label="章节状态小地图">
+                    <div
+                      className="chapter-status-map"
+                      aria-label="章节状态小地图"
+                    >
                       {paragraphStatusItems.map((item, index) => (
                         <button
                           className={[
                             "status-map-cell",
                             item.status,
-                            highlightParagraphId === item.paragraphId ? "attention" : "",
-                            activeParagraphStatusFilter && activeParagraphStatusFilter !== item.status
+                            highlightParagraphId === item.paragraphId
+                              ? "attention"
+                              : "",
+                            activeParagraphStatusFilter &&
+                            activeParagraphStatusFilter !== item.status
                               ? "dimmed"
                               : "",
                           ]
@@ -2723,7 +4057,12 @@ function App() {
                           title={`${item.paragraphId} ${item.label}`}
                           type="button"
                           aria-label={`跳转到${item.paragraphId}：${item.label}`}
-                          onClick={() => focusParagraphStatusItem(item, `已跳转到${item.label}段落：${item.paragraphId}`)}
+                          onClick={() =>
+                            focusParagraphStatusItem(
+                              item,
+                              `已跳转到${item.label}段落：${item.paragraphId}`,
+                            )
+                          }
                         >
                           {index + 1}
                         </button>
@@ -2732,12 +4071,17 @@ function App() {
                   )}
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
-                      <span>当前章节可手动添加台词、选择角色并生成配音；也可以稍后使用配音编排 Agent 自动辅助。</span>
+                      <span>
+                        当前章节可手动添加台词、选择角色并生成配音；也可以稍后使用配音编排
+                        Agent 自动辅助。
+                      </span>
                       {primaryStatementParagraphId && (
                         <button
                           className="tool-button amber"
                           type="button"
-                          onClick={() => addUtteranceAfter(primaryStatementParagraphId)}
+                          onClick={() =>
+                            addUtteranceAfter(primaryStatementParagraphId)
+                          }
                         >
                           添加第一条台词
                         </button>
@@ -2749,8 +4093,12 @@ function App() {
                         <article
                           className={[
                             "utterance-card",
-                            highlightUtteranceId === utterance.utteranceId ? "attention" : "",
-                            chapterPlaybackUtteranceId === utterance.utteranceId ? "playing" : "",
+                            highlightUtteranceId === utterance.utteranceId
+                              ? "attention"
+                              : "",
+                            chapterPlaybackUtteranceId === utterance.utteranceId
+                              ? "playing"
+                              : "",
                           ]
                             .filter(Boolean)
                             .join(" ")}
@@ -2762,11 +4110,21 @@ function App() {
                             <button
                               className="tool-button amber"
                               type="button"
-                              onClick={() => addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)}
+                              onClick={() =>
+                                addCurrentUtteranceAfter(utterance)
+                              }
                             >
                               在此后添加台词
                             </button>
-                            <button type="button" onClick={() => deleteUtterance(utterance.paragraphId, utterance.utteranceId)}>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                deleteUtterance(
+                                  utterance.paragraphId,
+                                  utterance.utteranceId,
+                                )
+                              }
+                            >
                               删除台词
                             </button>
                           </div>
@@ -2775,7 +4133,12 @@ function App() {
                             <input
                               value={utterance.text}
                               onChange={(event) =>
-                                updateUtterance(utterance.paragraphId, utterance.utteranceId, "text", event.target.value)
+                                updateUtterance(
+                                  utterance.paragraphId,
+                                  utterance.utteranceId,
+                                  "text",
+                                  event.target.value,
+                                )
                               }
                               aria-label={`${utterance.utteranceId} 台词文本`}
                             />
@@ -2785,7 +4148,12 @@ function App() {
                             <select
                               value={utterance.roleId}
                               onChange={(event) =>
-                                updateUtterance(utterance.paragraphId, utterance.utteranceId, "roleId", event.target.value)
+                                updateUtterance(
+                                  utterance.paragraphId,
+                                  utterance.utteranceId,
+                                  "roleId",
+                                  event.target.value,
+                                )
                               }
                             >
                               <option value="">请选择角色</option>
@@ -2801,7 +4169,10 @@ function App() {
                               type="checkbox"
                               checked={!utterance.needsHumanReview}
                               onChange={(event) => {
-                                if (event.target.checked && (!utterance.roleId || !utterance.text.trim())) {
+                                if (
+                                  event.target.checked &&
+                                  (!utterance.roleId || !utterance.text.trim())
+                                ) {
                                   updateUtterance(
                                     utterance.paragraphId,
                                     utterance.utteranceId,
@@ -2809,7 +4180,9 @@ function App() {
                                     true,
                                   );
                                   setConfirmed(false);
-                                  setApiStatus("请选择角色并填写台词文本后再确认");
+                                  setApiStatus(
+                                    "请选择角色并填写台词文本后再确认",
+                                  );
                                   return;
                                 }
                                 updateUtterance(
@@ -2818,7 +4191,11 @@ function App() {
                                   "needsHumanReview",
                                   !event.target.checked,
                                 );
-                                if (event.target.checked && utterance.roleId && utterance.text.trim()) {
+                                if (
+                                  event.target.checked &&
+                                  utterance.roleId &&
+                                  utterance.text.trim()
+                                ) {
                                   setConfirmed(true);
                                 } else {
                                   setConfirmed(false);
@@ -2828,7 +4205,9 @@ function App() {
                             已确认台词与角色
                           </label>
                           {(() => {
-                            const isGeneratingThisUtterance = Boolean(generatingUtteranceIds[utterance.utteranceId]);
+                            const isGeneratingThisUtterance = Boolean(
+                              generatingUtteranceIds[utterance.utteranceId],
+                            );
                             return (
                               <button
                                 className="tool-button sky"
@@ -2836,13 +4215,17 @@ function App() {
                                 disabled={isGeneratingThisUtterance}
                                 onClick={() => void generateAudio(utterance)}
                               >
-                                {isGeneratingThisUtterance ? "正在生成" : "生成配音"}
+                                {isGeneratingThisUtterance
+                                  ? "正在生成"
+                                  : "生成配音"}
                               </button>
                             );
                           })()}
                           <output>{utterance.audioStatus}</output>
                           {utteranceAudioSource(utterance) && (
-                            <AuthorizedAudio source={utteranceAudioSource(utterance) ?? ""} />
+                            <AuthorizedAudio
+                              source={utteranceAudioSource(utterance) ?? ""}
+                            />
                           )}
                         </article>
                       ))}
@@ -2863,11 +4246,17 @@ function App() {
         <section className="panel">
           <div className="section-heading">
             <div className="section-title">音色列表</div>
-            <button className="tool-button teal" type="button" onClick={() => void exportVoiceLibrary()}>
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => void exportVoiceLibrary()}
+            >
               导出音色库
             </button>
           </div>
-          <small className="status-message" aria-label="音色库反馈">{apiStatus}</small>
+          <small className="status-message" aria-label="音色库反馈">
+            {apiStatus}
+          </small>
           <div className="voice-grid">
             {voices.map((voice) => (
               <article className="voice-card" key={voice.voiceId}>
@@ -2876,7 +4265,10 @@ function App() {
                     type="checkbox"
                     checked={Boolean(selectedVoiceIds[voice.voiceId])}
                     onChange={(event) =>
-                      setSelectedVoiceIds((current) => ({ ...current, [voice.voiceId]: event.target.checked }))
+                      setSelectedVoiceIds((current) => ({
+                        ...current,
+                        [voice.voiceId]: event.target.checked,
+                      }))
                     }
                   />
                   勾选删除
@@ -2888,7 +4280,9 @@ function App() {
                     onChange={(event) =>
                       setVoices((current) =>
                         current.map((item) =>
-                          item.voiceId === voice.voiceId ? { ...item, name: event.target.value } : item,
+                          item.voiceId === voice.voiceId
+                            ? { ...item, name: event.target.value }
+                            : item,
                         ),
                       )
                     }
@@ -2901,7 +4295,9 @@ function App() {
                     onChange={(event) =>
                       setVoices((current) =>
                         current.map((item) =>
-                          item.voiceId === voice.voiceId ? { ...item, gender: event.target.value } : item,
+                          item.voiceId === voice.voiceId
+                            ? { ...item, gender: event.target.value }
+                            : item,
                         ),
                       )
                     }
@@ -2914,7 +4310,9 @@ function App() {
                     onChange={(event) =>
                       setVoices((current) =>
                         current.map((item) =>
-                          item.voiceId === voice.voiceId ? { ...item, description: event.target.value } : item,
+                          item.voiceId === voice.voiceId
+                            ? { ...item, description: event.target.value }
+                            : item,
                         ),
                       )
                     }
@@ -2948,7 +4346,9 @@ function App() {
                     onChange={(event) =>
                       setVoices((current) =>
                         current.map((item) =>
-                          item.voiceId === voice.voiceId ? { ...item, referenceText: event.target.value } : item,
+                          item.voiceId === voice.voiceId
+                            ? { ...item, referenceText: event.target.value }
+                            : item,
                         ),
                       )
                     }
@@ -2961,20 +4361,33 @@ function App() {
                     onChange={(event) =>
                       setVoices((current) =>
                         current.map((item) =>
-                          item.voiceId === voice.voiceId ? { ...item, referenceAudioPath: event.target.value } : item,
+                          item.voiceId === voice.voiceId
+                            ? {
+                                ...item,
+                                referenceAudioPath: event.target.value,
+                              }
+                            : item,
                         ),
                       )
                     }
                   />
                 </label>
                 <AuthorizedAudio source={voiceAudioSrc(voice)} />
-                <button className="tool-button teal" type="button" onClick={() => void updateVoiceResource(voice)}>
+                <button
+                  className="tool-button teal"
+                  type="button"
+                  onClick={() => void updateVoiceResource(voice)}
+                >
                   保存音色
                 </button>
               </article>
             ))}
           </div>
-          <button className="tool-button amber" type="button" onClick={() => void deleteSelectedVoices()}>
+          <button
+            className="tool-button amber"
+            type="button"
+            onClick={() => void deleteSelectedVoices()}
+          >
             删除选中音色
           </button>
         </section>
@@ -2985,27 +4398,52 @@ function App() {
             <input
               placeholder="音色名称"
               value={newVoice.name}
-              onChange={(event) => setNewVoice((current) => ({ ...current, name: event.target.value }))}
+              onChange={(event) =>
+                setNewVoice((current) => ({
+                  ...current,
+                  name: event.target.value,
+                }))
+              }
             />
             <input
               placeholder="音色性别"
               value={newVoice.gender}
-              onChange={(event) => setNewVoice((current) => ({ ...current, gender: event.target.value }))}
+              onChange={(event) =>
+                setNewVoice((current) => ({
+                  ...current,
+                  gender: event.target.value,
+                }))
+              }
             />
             <textarea
               placeholder="音色描述"
               value={newVoice.description}
-              onChange={(event) => setNewVoice((current) => ({ ...current, description: event.target.value }))}
+              onChange={(event) =>
+                setNewVoice((current) => ({
+                  ...current,
+                  description: event.target.value,
+                }))
+              }
             />
             <input
               placeholder="适合角色类型，用逗号分隔"
               value={newVoice.suitableRoleTypes}
-              onChange={(event) => setNewVoice((current) => ({ ...current, suitableRoleTypes: event.target.value }))}
+              onChange={(event) =>
+                setNewVoice((current) => ({
+                  ...current,
+                  suitableRoleTypes: event.target.value,
+                }))
+              }
             />
             <textarea
               placeholder="语音具体内容"
               value={newVoice.referenceText}
-              onChange={(event) => setNewVoice((current) => ({ ...current, referenceText: event.target.value }))}
+              onChange={(event) =>
+                setNewVoice((current) => ({
+                  ...current,
+                  referenceText: event.target.value,
+                }))
+              }
             />
             <input
               ref={voiceAudioInputRef}
@@ -3015,14 +4453,24 @@ function App() {
               aria-label="添加参考音频文件"
               onChange={(event) => void handleReferenceAudioFile(event)}
             />
-            <button className="tool-button sky" type="button" onClick={() => voiceAudioInputRef.current?.click()}>
+            <button
+              className="tool-button sky"
+              type="button"
+              onClick={() => voiceAudioInputRef.current?.click()}
+            >
               添加参考音频文件
             </button>
-            {newVoice.referenceAudioPath && <small>已选择：{newVoice.referenceAudioPath}</small>}
+            {newVoice.referenceAudioPath && (
+              <small>已选择：{newVoice.referenceAudioPath}</small>
+            )}
             {newVoiceAudioPreviewUrl && (
               <AuthorizedAudio source={newVoiceAudioPreviewUrl} />
             )}
-            <button className="tool-button teal" type="button" onClick={() => void saveVoiceResource(newVoice)}>
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => void saveVoiceResource(newVoice)}
+            >
               保存音色
             </button>
           </div>
@@ -3032,30 +4480,59 @@ function App() {
             <input
               placeholder="音色名称"
               value={generatedVoice.name}
-              onChange={(event) => setGeneratedVoice((current) => ({ ...current, name: event.target.value }))}
+              onChange={(event) =>
+                setGeneratedVoice((current) => ({
+                  ...current,
+                  name: event.target.value,
+                }))
+              }
             />
             <input
               placeholder="音色性别"
               value={generatedVoice.gender}
-              onChange={(event) => setGeneratedVoice((current) => ({ ...current, gender: event.target.value }))}
+              onChange={(event) =>
+                setGeneratedVoice((current) => ({
+                  ...current,
+                  gender: event.target.value,
+                }))
+              }
             />
             <textarea
               placeholder="音色描述"
               value={generatedVoice.description}
-              onChange={(event) => setGeneratedVoice((current) => ({ ...current, description: event.target.value }))}
+              onChange={(event) =>
+                setGeneratedVoice((current) => ({
+                  ...current,
+                  description: event.target.value,
+                }))
+              }
             />
             <input
               placeholder="适合角色类型，用逗号分隔"
               value={generatedVoice.suitableRoleTypes}
-              onChange={(event) => setGeneratedVoice((current) => ({ ...current, suitableRoleTypes: event.target.value }))}
+              onChange={(event) =>
+                setGeneratedVoice((current) => ({
+                  ...current,
+                  suitableRoleTypes: event.target.value,
+                }))
+              }
             />
             <textarea
               placeholder="语音具体内容"
               value={generatedVoice.referenceText}
-              onChange={(event) => setGeneratedVoice((current) => ({ ...current, referenceText: event.target.value }))}
+              onChange={(event) =>
+                setGeneratedVoice((current) => ({
+                  ...current,
+                  referenceText: event.target.value,
+                }))
+              }
             />
             <ProgressBar label="生成音色进度" value={generatedVoiceProgress} />
-            <button className="tool-button purple" type="button" onClick={() => void generateVoiceResource()}>
+            <button
+              className="tool-button purple"
+              type="button"
+              onClick={() => void generateVoiceResource()}
+            >
               生成音色
             </button>
             {generatedVoicePreviewUrl && (
@@ -3064,9 +4541,187 @@ function App() {
                 <AuthorizedAudio source={generatedVoicePreviewUrl} />
               </div>
             )}
-            <button className="tool-button teal" type="button" onClick={() => void saveGeneratedVoiceResource()}>
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => void saveGeneratedVoiceResource()}
+            >
               保存音色
             </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  function renderAgentTracePage() {
+    const trace = selectedAgentTrace ?? agentTraces[0] ?? null;
+    return (
+      <main className="trace-page">
+        <section className="panel trace-list-panel">
+          <div className="section-heading">
+            <div>
+              <div className="section-title">Agent追踪</div>
+              <h2>Run History</h2>
+            </div>
+            <button
+              className="tool-button sky"
+              type="button"
+              onClick={() => void loadAgentRunHistory()}
+            >
+              刷新
+            </button>
+          </div>
+          <small className="status-message" aria-label="Agent追踪反馈">
+            {agentTraceStatus}
+          </small>
+          <div className="trace-run-list" aria-label="Agent运行记录">
+            {agentTraces.length === 0 ? (
+              <article className="trace-run-card empty">
+                <strong>暂无记录</strong>
+                <small>
+                  完成一次角色分析或配音编排后，这里会显示可审计的 Agent run。
+                </small>
+              </article>
+            ) : (
+              agentTraces.map((item) => (
+                <button
+                  className={
+                    trace?.run_id === item.run_id &&
+                    trace.agent_id === item.agent_id
+                      ? "trace-run-card active"
+                      : "trace-run-card"
+                  }
+                  key={`${item.run_id}-${item.agent_id}`}
+                  type="button"
+                  onClick={() => void selectAgentTrace(item)}
+                >
+                  <strong>{item.agent_name || item.agent_id}</strong>
+                  <span>{item.chapter_id || "default chapter"}</span>
+                  <small>
+                    {formatTraceTimestamp(item.updated_at ?? item.created_at)}
+                  </small>
+                </button>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section
+          className="panel trace-detail-panel"
+          aria-label="Agent追踪详情"
+        >
+          <div className="section-heading">
+            <div>
+              <div className="section-title">追踪详情</div>
+              <h2>{trace?.agent_name ?? "等待 Agent run"}</h2>
+            </div>
+            <small>{trace?.run_id ?? "run_id 待生成"}</small>
+          </div>
+
+          <div className="trace-metric-grid">
+            <div>
+              <span>Prompt版本</span>
+              <strong>
+                {trace
+                  ? `${trace.prompt_id}.v${trace.prompt_version}`
+                  : "未记录"}
+              </strong>
+            </div>
+            <div>
+              <span>Prompt SHA</span>
+              <strong>{trace?.prompt_sha256 ?? "未记录"}</strong>
+            </div>
+            <div>
+              <span>Token预算</span>
+              <strong>
+                {trace
+                  ? `${trace.estimated_total_tokens}/${trace.context_window}`
+                  : "等待估算"}
+              </strong>
+            </div>
+            <div>
+              <span>模型</span>
+              <strong>{trace?.model_name || "未配置"}</strong>
+            </div>
+            <div>
+              <span>JSON校验</span>
+              <strong>{trace?.validation_status ?? "未运行"}</strong>
+            </div>
+            <div>
+              <span>最终决策</span>
+              <strong>{trace?.final_decision ?? "未运行"}</strong>
+            </div>
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">输入摘要</div>
+            <p>{trace?.input_summary || "暂无输入摘要"}</p>
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">上下文预算策略</div>
+            <pre>
+              {formatTraceJson(
+                trace?.token_context_report ?? {
+                  Prompt: "系统 prompt 必保留",
+                  CurrentChapter: "当前章节优先",
+                  RAGEvidence: "RAG 证据预留上限",
+                  OutputTokens: "输出 tokens 必须预留",
+                },
+              )}
+            </pre>
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">Tool Calls</div>
+            {(trace?.tool_calls ?? []).length === 0 ? (
+              <p>暂无工具调用记录：参数摘要、返回摘要、失败原因将在工具执行后显示。</p>
+            ) : (
+              <div className="tool-call-list" aria-label="工具调用记录">
+                {(trace?.tool_calls ?? []).map((toolCall) => (
+                  <article className="tool-call-card" key={toolCall.tool_call_id}>
+                    <div>
+                      <strong>{toolCall.tool_name}</strong>
+                      <span>{toolCall.status}</span>
+                    </div>
+                    <small>
+                      {toolCall.permission_scope ?? "project scoped"} · {toolCall.duration_ms ?? 0} ms
+                    </small>
+                    <dl>
+                      <dt>参数摘要</dt>
+                      <dd>{toolCall.arguments_summary || "{}"}</dd>
+                      <dt>返回摘要</dt>
+                      <dd>{toolCall.output_summary || "{}"}</dd>
+                      <dt>失败原因</dt>
+                      <dd>{toolCall.failure || "无"}</dd>
+                    </dl>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">模型输出</div>
+            <pre>{formatTraceJson(trace?.raw_model_output)}</pre>
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">解析结果</div>
+            <pre>{formatTraceJson(trace?.parsed_output)}</pre>
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">Reflection</div>
+            <pre>
+              {formatTraceJson({
+                reflection_count: trace?.reflection_count ?? 0,
+                reflection_trace: trace?.reflection_trace ?? [],
+                validation_errors: trace?.validation_errors ?? [],
+                human_review_count: trace?.human_review_count ?? 0,
+              })}
+            </pre>
           </div>
         </section>
       </main>
@@ -3078,7 +4733,9 @@ function App() {
       <main className="model-page">
         <section className="panel">
           <div className="section-title">后端 API</div>
-          <small className="status-message" aria-label="模型配置反馈">{apiStatus}</small>
+          <small className="status-message" aria-label="模型配置反馈">
+            {apiStatus}
+          </small>
           <label>
             Base URL
             <input
@@ -3089,10 +4746,18 @@ function App() {
             />
           </label>
           <div className="toolbar-row">
-            <button className="tool-button teal" type="button" onClick={() => saveBackendApiBase()}>
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => saveBackendApiBase()}
+            >
               保存后端地址
             </button>
-            <button className="tool-button sky" type="button" onClick={() => void testBackendConnection()}>
+            <button
+              className="tool-button sky"
+              type="button"
+              onClick={() => void testBackendConnection()}
+            >
               测试连接
             </button>
           </div>
@@ -3108,7 +4773,10 @@ function App() {
               onChange={(event) =>
                 setModelConfig((current) => ({
                   ...current,
-                  text_model: { ...current.text_model, base_url: event.target.value },
+                  text_model: {
+                    ...current.text_model,
+                    base_url: event.target.value,
+                  },
                 }))
               }
             />
@@ -3121,7 +4789,10 @@ function App() {
               onChange={(event) =>
                 setModelConfig((current) => ({
                   ...current,
-                  text_model: { ...current.text_model, model: event.target.value },
+                  text_model: {
+                    ...current.text_model,
+                    model: event.target.value,
+                  },
                 }))
               }
             />
@@ -3137,15 +4808,31 @@ function App() {
               onChange={(event) => setTextModelApiKey(event.target.value)}
             />
           </label>
-          <p className="config-secret-status">临时密钥：{modelConfig.text_model.has_api_key ? "后端内存已配置" : "未输入"}</p>
+          <p className="config-secret-status">
+            临时密钥：
+            {modelConfig.text_model.has_api_key ? "后端内存已配置" : "未输入"}
+          </p>
           <div className="toolbar-row">
-            <button className="tool-button teal" type="button" onClick={() => void saveTextModelConfig()}>
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => void saveTextModelConfig()}
+            >
               保存模型配置
             </button>
-            <button className="tool-button sky" type="button" onClick={() => void testBackendConnection()}>
+            <button
+              className="tool-button sky"
+              type="button"
+              onClick={() => void testBackendConnection()}
+            >
               测试连接
             </button>
-            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testModelApis()}>
+            <button
+              className="tool-button purple"
+              type="button"
+              disabled={localTtsStarting}
+              onClick={() => void testModelApis()}
+            >
               {localTtsStarting ? "测试中" : "测试模型"}
             </button>
           </div>
@@ -3158,7 +4845,10 @@ function App() {
             <input
               value={modelConfig.tts.base_url}
               onChange={(event) =>
-                setModelConfig((current) => ({ ...current, tts: { ...current.tts, base_url: event.target.value } }))
+                setModelConfig((current) => ({
+                  ...current,
+                  tts: { ...current.tts, base_url: event.target.value },
+                }))
               }
             />
           </label>
@@ -3167,7 +4857,10 @@ function App() {
             <input
               value={modelConfig.tts.model_path}
               onChange={(event) =>
-                setModelConfig((current) => ({ ...current, tts: { ...current.tts, model_path: event.target.value } }))
+                setModelConfig((current) => ({
+                  ...current,
+                  tts: { ...current.tts, model_path: event.target.value },
+                }))
               }
             />
           </label>
@@ -3178,15 +4871,27 @@ function App() {
               onChange={(event) =>
                 setModelConfig((current) => ({
                   ...current,
-                  tts: { ...current.tts, voice_design_model_path: event.target.value },
+                  tts: {
+                    ...current.tts,
+                    voice_design_model_path: event.target.value,
+                  },
                 }))
               }
             />
           </label>
-          <ProgressBar label="TTS模型下载并部署进度" value={ttsDeployment.progress} />
-          <small className="status-message" aria-label="TTS模型部署反馈">{ttsDeployment.message}</small>
+          <ProgressBar
+            label="TTS模型下载并部署进度"
+            value={ttsDeployment.progress}
+          />
+          <small className="status-message" aria-label="TTS模型部署反馈">
+            {ttsDeployment.message}
+          </small>
           <div className="toolbar-row">
-            <button className="tool-button teal" type="button" onClick={() => void saveLocalModelConfig()}>
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => void saveLocalModelConfig()}
+            >
               保存模型配置
             </button>
             <button
@@ -3197,7 +4902,12 @@ function App() {
             >
               {ttsDeployment.status === "running" ? "部署中" : "下载并部署"}
             </button>
-            <button className="tool-button purple" type="button" disabled={localTtsStarting} onClick={() => void testModelApis()}>
+            <button
+              className="tool-button purple"
+              type="button"
+              disabled={localTtsStarting}
+              onClick={() => void testModelApis()}
+            >
               {localTtsStarting ? "测试中" : "测试模型"}
             </button>
           </div>
@@ -3211,10 +4921,16 @@ function App() {
       <header className="topbar">
         <div className="brand-block">
           <h1>
-            <img className="brand-logo" src={`${runtimeConfig.pagesBase}shuyi-agent-zh.svg`} alt={APP_BRAND} />
+            <img
+              className="brand-logo"
+              src={`${runtimeConfig.pagesBase}shuyi-agent-zh.svg`}
+              alt={APP_BRAND}
+            />
             <span>v{APP_VERSION}</span>
           </h1>
-          <p className="product-subtitle">基于 Agent 的多人有声书自动配音工作台</p>
+          <p className="product-subtitle">
+            基于 Agent 的多人有声书自动配音工作台
+          </p>
         </div>
         <div className="topbar-actions">
           <div className="mode-selector" role="group" aria-label="配音模式">
@@ -3229,7 +4945,10 @@ function App() {
                 type="button"
                 onClick={() =>
                   setWorkflowState((current) =>
-                    transitionWorkflow(current, { type: "SET_MODE", mode: mode as WorkflowMode }),
+                    transitionWorkflow(current, {
+                      type: "SET_MODE",
+                      mode: mode as WorkflowMode,
+                    }),
                   )
                 }
               >
@@ -3241,6 +4960,7 @@ function App() {
             {[
               ["main", "主页面"],
               ["voices", "音色库"],
+              ["agent-runs", "Agent追踪"],
               ["models", "模型配置"],
             ].map(([value, label]) => (
               <button
@@ -3257,6 +4977,7 @@ function App() {
       </header>
       {page === "main" && renderMainPage()}
       {page === "voices" && renderVoiceLibraryPage()}
+      {page === "agent-runs" && renderAgentTracePage()}
       {page === "models" && renderModelConfigPage()}
     </div>
   );

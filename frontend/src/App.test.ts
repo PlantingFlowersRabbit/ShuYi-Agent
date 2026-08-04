@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.5.5 application shell", () => {
+describe("v0.6.4 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.5.5 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.6.4 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.5.5 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.5.5");
+    expect(markup).toContain("v0.6.4");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.5.5 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.5.5 model configuration with separate backend and model tests", async () => {
+  it("renders v0.6.4 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -61,7 +61,7 @@ describe("v0.5.5 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.5.5 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.6.4 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -75,6 +75,31 @@ describe("v0.5.5 application shell", () => {
     expect(markup).toContain("导出音色库");
     expect(markup).toContain("添加音色");
     expect(markup).toContain("生成音色");
+  });
+
+  it("renders v0.6.4 Agent trace history with audit fields", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { search: "?page=agent-runs" } },
+    });
+    const { default: App } = await import("./App");
+
+    const markup = renderToStaticMarkup(createElement(App));
+
+    expect(markup).toContain("Agent追踪");
+    expect(markup).toContain("Run History");
+    expect(markup).toContain("Prompt SHA");
+    expect(markup).toContain("Token预算");
+    expect(markup).toContain("输入摘要");
+    expect(markup).toContain("模型输出");
+    expect(markup).toContain("JSON校验");
+    expect(markup).toContain("Tool Calls");
+    expect(markup).toContain("参数摘要");
+    expect(markup).toContain("返回摘要");
+    expect(markup).toContain("失败原因");
+    expect(markup).toContain("Reflection");
+    expect(markup).toContain("最终决策");
   });
 
   it("renames user-facing statement controls to dialogue copy", async () => {
@@ -99,6 +124,20 @@ describe("v0.5.5 application shell", () => {
     expect(appSource).toContain("未划分");
     expect(appSource).toContain("未选角色");
     expect(appSource).toContain("未配音");
+    expect(appSource).toContain("项目工作区");
+    expect(appSource).toContain("最近项目");
+    expect(appSource).toContain("质量检查面板");
+    expect(appSource).toContain("审稿队列");
+    expect(appSource).toContain("配音失败");
+    expect(appSource).toContain("超长台词");
+    expect(appSource).toContain("重复音色");
+    expect(appSource).toContain("角色无音色");
+    expect(appSource).toContain("needs_human_review");
+    expect(appSource).toContain("生成前检查");
+    expect(appSource).toContain("导出前检查");
+    expect(appSource).toContain("批量确认");
+    expect(appSource).toContain("批量改角色");
+    expect(appSource).toContain("批量重试");
     expect(appSource).toContain("章节状态小地图");
     expect(appSource).toContain("chapter-status-map");
     expect(appSource).toContain("reader-paragraph");

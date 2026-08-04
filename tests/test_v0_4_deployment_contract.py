@@ -83,6 +83,19 @@ def test_v0_5_dockerfile_defines_cpu_and_cuda_runtime_targets():
     assert {"cpu-runtime", "cuda-runtime"}.issubset(targets)
 
 
+def test_v0_62_qdrant_compose_adds_local_vector_store():
+    """v0.6.4 ships an optional Qdrant service for Story Bible RAG indexing."""
+    compose_path = ROOT / "compose.qdrant.yaml"
+    assert compose_path.exists()
+    config = _compose_config("compose.qdrant.yaml")
+    qdrant = config["services"]["qdrant"]
+
+    assert qdrant["image"].startswith("qdrant/qdrant:")
+    assert any(port.get("target") == 6333 for port in qdrant["ports"])
+    assert any(volume.get("target") == "/qdrant/storage" for volume in qdrant["volumes"])
+    assert "qdrant-data" in config["volumes"]
+
+
 def test_v0_5_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
     pipeline = (ROOT / ".cnb.yml").read_text(encoding="utf-8")
 
@@ -92,9 +105,9 @@ def test_v0_5_cnb_pipeline_has_cpu_gpu_build_and_versioned_publish_contracts():
         "--gpus all",
         "--target cpu-runtime",
         "--target cuda-runtime",
-        "v0.5.5-cpu",
+        "v0.6.4-cpu",
         "CNB_TAG:-}",
-        "v0.5.5-cuda",
+        "v0.6.4-cuda",
         "CNB_COMMIT_SHA",
     ]:
         assert required in pipeline

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import wave
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,17 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from backend.app.agents.registry import AgentRegistry
 from backend.app.application.runtime_state import restore_runtime_state, save_runtime_state
+from backend.app.domain.agent_memory import (
+    build_long_term_memory_fact,
+    build_run_memory_snapshot,
+    build_story_memory_context,
+)
+from backend.app.domain.agent_trace import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_RESERVED_OUTPUT_TOKENS,
+    build_token_context_report,
+    summarize_for_trace,
+)
 from backend.app.domain.ai_chapter_agent import AiChapterSplitAgent, ChapterSplitSkill
 from backend.app.domain.ai_segmentation_agent import AiSegmentationAgent, LangChainSegmentationSkill
 from backend.app.domain.audio import (
@@ -47,8 +59,39 @@ from backend.app.domain.dubbing_workflow import (
 from backend.app.domain.llm import MissingProviderCredential
 from backend.app.domain.novel import Chapter, ChapterWorkbench, ParagraphModule, parse_novel_text
 from backend.app.domain.novel_files import NovelFileError, extract_novel_file
+from backend.app.domain.project_workspace import (
+    DEFAULT_PROJECT_ID,
+    build_quality_report,
+    build_review_queue,
+    default_project,
+    project_from_payload,
+    safe_project_id,
+    with_output_roots,
+)
 from backend.app.domain.providers import default_provider_registry
 from backend.app.domain.roles import RoleCard, RoleCollection, default_role_cards
+from backend.app.domain.story_memory import (
+    DEFAULT_EMBEDDING_API_KEY_ENV,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_QDRANT_COLLECTION,
+    OpenAICompatibleEmbeddingClient,
+    QdrantMemoryStore,
+    attach_memory_citations_to_role_candidates,
+    build_story_memory_chunks,
+    derive_story_bible_facts,
+    memory_result_from_chunk,
+    search_memory_chunks,
+)
+from backend.app.domain.tool_registry import (
+    ToolDefinition,
+    ToolExecutionContext,
+    ToolPermissionError,
+    ToolRegistry,
+    ToolValidationError,
+    UnknownToolError,
+    execute_tool_plan,
+    summarize_tool_payload,
+)
 from backend.app.domain.voices import (
     VoiceResource,
     VoiceResourceCollection,
@@ -76,7 +119,7 @@ REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.5.5"
+SERVICE_VERSION = "0.6.4"
 PUBLIC_BROWSER_CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "*",
@@ -291,6 +334,166 @@ def _redacted_model_config(
         "tts": dict(normalized["tts"]),
     }
 
+
+def _configured_context_window() -> int:
+    raw = (
+        os.environ.get("SHUYI_TEXT_MODEL_CONTEXT_WINDOW")
+        or os.environ.get("SHUYI_CONTEXT_WINDOW")
+        or ""
+    )
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_CONTEXT_WINDOW
+    return value if value > 0 else DEFAULT_CONTEXT_WINDOW
+
+
+def _trace_input_text(
+    *,
+    chapter_title: str,
+    paragraphs: list[dict[str, Any]],
+    roles: list[dict[str, Any]],
+    utterances_by_paragraph: dict[str, list[dict[str, Any]]] | None = None,
+) -> str:
+    paragraph_text = "\n\n".join(str(item.get("text") or "") for item in paragraphs)
+    payload = {
+        "chapter_title": chapter_title,
+        "roles": roles,
+        "paragraphs": paragraphs,
+    }
+    if utterances_by_paragraph is not None:
+        payload["utterances_by_paragraph"] = utterances_by_paragraph
+    return f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n章节正文：\n{paragraph_text}"
+
+
+def _latest_raw_model_output(skill: Any) -> str:
+    invocations = getattr(skill, "invocation_trace", None)
+    if isinstance(invocations, list) and invocations:
+        latest = invocations[-1]
+        if isinstance(latest, dict) and latest.get("raw_model_output") is not None:
+            return str(latest["raw_model_output"])
+    return ""
+
+
+def _build_agent_trace_payload(
+    app: FastAPI,
+    *,
+    run_id: str,
+    project_id: str,
+    chapter_id: str,
+    agent_id: str,
+    input_text: str,
+    parsed_output: dict[str, Any],
+    raw_model_output: str,
+    validation_status: str,
+    validation_errors: list[Any],
+    reflection_count: int,
+    reflection_trace: list[Any],
+    final_decision: str,
+    human_review_count: int,
+    duration_ms: int,
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    agent = app.state.agent_registry.get(agent_id)
+    provider = _text_model_provider_from_config(app)
+    max_tokens = int(provider.get("max_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS)
+    raw_output = raw_model_output or json.dumps(
+        parsed_output, ensure_ascii=False, separators=(",", ":")
+    )
+    token_report = build_token_context_report(
+        system_prompt=agent.prompt_text,
+        input_text=input_text,
+        output_text=raw_output,
+        context_window=_configured_context_window(),
+        reserved_output_tokens=max_tokens,
+    )
+    return {
+        "run_id": run_id,
+        "project_id": project_id or "default",
+        "chapter_id": chapter_id,
+        "agent_id": agent.agent_id,
+        "agent_name": agent.display_name,
+        "prompt_id": agent.prompt_id,
+        "prompt_version": agent.prompt_version,
+        "prompt_sha256": agent.prompt_sha256,
+        "model_name": str(provider.get("model") or ""),
+        "provider_base_url": str(provider.get("base_url") or ""),
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "estimated_prompt_tokens": token_report["estimated_prompt_tokens"],
+        "estimated_input_tokens": token_report["estimated_input_tokens"],
+        "estimated_output_tokens": token_report["estimated_output_tokens"],
+        "estimated_total_tokens": token_report["estimated_total_tokens"],
+        "context_window": token_report["context_window"],
+        "input_summary": summarize_for_trace(input_text),
+        "raw_model_output": raw_output,
+        "parsed_output": parsed_output,
+        "validation_status": validation_status,
+        "validation_errors": validation_errors,
+        "reflection_count": reflection_count,
+        "reflection_trace": reflection_trace,
+        "final_decision": final_decision,
+        "human_review_count": human_review_count,
+        "duration_ms": duration_ms,
+        "token_context_report": token_report,
+        "tool_calls": tool_calls or [],
+    }
+
+
+def _save_dubbing_director_trace(
+    app: FastAPI,
+    repository: SQLiteRepository,
+    *,
+    thread_id: str,
+    project_id: str,
+    roles: list[dict[str, Any]],
+    utterances_by_paragraph: dict[str, list[dict[str, Any]]],
+    workflow: DubbingWorkflow,
+    result: Any,
+    duration_ms: int,
+) -> None:
+    run = repository.get_agent_run(thread_id) or {}
+    checkpoint = run.get("checkpoint") if isinstance(run.get("checkpoint"), dict) else {}
+    chapter_id = str(checkpoint.get("chapter_id") or "")
+    workbench = _state(app)["workbenches"].get(chapter_id)
+    chapter_title = workbench.chapter.title if workbench else chapter_id
+    paragraphs = (
+        [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs]
+        if workbench
+        else []
+    )
+    parsed_output = result.to_dict()
+    validation_errors = [result.failure] if getattr(result, "failure", None) else []
+    human_review_count = sum(
+        1
+        for utterances in parsed_output.get("utterances_by_paragraph", {}).values()
+        for utterance in utterances
+        if utterance.get("needs_human_review")
+    )
+    repository.save_agent_trace(
+        _build_agent_trace_payload(
+            app,
+            run_id=thread_id,
+            project_id=project_id or "default",
+            chapter_id=chapter_id,
+            agent_id="dubbing_director",
+            input_text=_trace_input_text(
+                chapter_title=chapter_title,
+                paragraphs=paragraphs,
+                roles=roles,
+                utterances_by_paragraph=utterances_by_paragraph,
+            ),
+            parsed_output=parsed_output,
+            raw_model_output=_latest_raw_model_output(workflow.role_skill),
+            validation_status="failed" if result.status == "failed" else "accepted",
+            validation_errors=validation_errors,
+            reflection_count=0,
+            reflection_trace=[],
+            final_decision=result.status,
+            human_review_count=human_review_count,
+            duration_ms=duration_ms,
+        )
+    )
 
 
 def _idle_tts_deployment_status(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -604,6 +807,7 @@ def create_app() -> FastAPI:
     repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3" if data_root else ":memory:")
     repository.initialize()
     app.state.repository = repository
+    app.state.data_root = data_root or DEFAULT_DATA_ROOT
     app.state.agent_registry = AgentRegistry.default()
     app.state.chapter_rule_dir = (
         data_root / "cache/chapter-rules" if data_root else CHAPTER_RULE_DIR
@@ -615,6 +819,8 @@ def create_app() -> FastAPI:
     app.state.tts_deployment_lock = threading.Lock()
     app.state.tts_deployment = _idle_tts_deployment_status(_default_model_config()["tts"])
     app.state.tts_synthesis_lock = threading.Lock()
+    if repository.get_project(DEFAULT_PROJECT_ID) is None:
+        repository.save_project(default_project(app.state.data_root))
 
     @app.middleware("http")
     async def versioned_api_boundary(request: Request, call_next):
@@ -657,6 +863,7 @@ def create_app() -> FastAPI:
     }
     restore_runtime_state(app.state.workflow, repository.get_workflow("application"))
     _state(app)["model_config"] = _normalize_model_config(_state(app).get("model_config"))
+    app.state.tool_registry = _build_tool_registry(app, repository)
 
     @app.get("/health/live")
     async def liveness_probe() -> dict[str, str]:
@@ -742,6 +949,227 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="下载资源不存在")
         return FileResponse(target, filename=target.name)
 
+    @app.get("/api/v1/projects")
+    async def list_projects() -> dict[str, Any]:
+        projects = [
+            with_output_roots(project, app.state.data_root)
+            for project in repository.list_projects()
+        ]
+        if not any(project["project_id"] == DEFAULT_PROJECT_ID for project in projects):
+            project = default_project(app.state.data_root)
+            repository.save_project(project)
+            projects.insert(0, project)
+        return {"projects": projects}
+
+    @app.post("/api/v1/projects")
+    async def create_project(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            project = project_from_payload(payload or {}, app.state.data_root)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        Path(project["output_roots"]["audio"]).mkdir(parents=True, exist_ok=True)
+        Path(project["output_roots"]["exports"]).mkdir(parents=True, exist_ok=True)
+        repository.save_project(project)
+        return {"project": project}
+
+    @app.get("/api/v1/projects/{project_id}")
+    async def get_project(project_id: str) -> dict[str, Any]:
+        safe_id = safe_project_id(project_id)
+        project = repository.get_project(safe_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        return {"project": with_output_roots(project, app.state.data_root)}
+
+    @app.delete("/api/v1/projects/{project_id}")
+    async def delete_project(project_id: str) -> dict[str, Any]:
+        safe_id = safe_project_id(project_id)
+        if safe_id == DEFAULT_PROJECT_ID:
+            raise HTTPException(status_code=409, detail="默认项目不能删除")
+        return {"project_id": safe_id, "deleted": repository.delete_project(safe_id)}
+
+    @app.post("/api/v1/projects/{project_id}/quality-check")
+    async def project_quality_check(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        quality_payload = _quality_payload_from_request(app, payload or {})
+        return build_quality_report(project_id=safe_id, **quality_payload)
+
+    @app.post("/api/v1/projects/{project_id}/review-queue")
+    async def project_review_queue(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        quality_payload = _quality_payload_from_request(app, payload)
+        report = build_quality_report(project_id=safe_id, **quality_payload)
+        return build_review_queue(
+            quality_report=report,
+            filters=payload.get("filters") if isinstance(payload.get("filters"), dict) else {},
+        )
+
+    @app.post("/api/v1/projects/{project_id}/memory/index")
+    async def index_project_memory(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        chunks = build_story_memory_chunks(project_id=safe_id, payload=payload)
+        facts = derive_story_bible_facts(project_id=safe_id, chunks=chunks, payload=payload)
+        repository.replace_story_memory(project_id=safe_id, chunks=chunks, facts=facts)
+        embedding_status, message = _try_vector_index_memory(app, safe_id, chunks)
+        return {
+            "project_id": safe_id,
+            "status": "indexed" if chunks else "empty",
+            "chunk_count": len(chunks),
+            "fact_count": len(facts),
+            "embedding_status": embedding_status,
+            "message": message,
+        }
+
+    @app.post("/api/v1/projects/{project_id}/memory/search")
+    async def search_project_memory(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        payload = payload or {}
+        query = str(payload.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="检索 query 不能为空")
+        top_k = max(1, min(int(payload.get("top_k") or 5), 20))
+        vector_results, retrieval_mode, message = _try_vector_search_memory(
+            project_id=safe_id,
+            query=query,
+            top_k=top_k,
+        )
+        if vector_results is not None:
+            return {
+                "project_id": safe_id,
+                "query": query,
+                "retrieval_mode": retrieval_mode,
+                "message": message,
+                "results": vector_results,
+            }
+        results = search_memory_chunks(
+            chunks=repository.list_story_memory_chunks(safe_id),
+            query=query,
+            top_k=top_k,
+        )
+        return {
+            "project_id": safe_id,
+            "query": query,
+            "retrieval_mode": "sqlite_lexical",
+            "message": message,
+            "results": results,
+        }
+
+    @app.get("/api/v1/projects/{project_id}/story-bible")
+    async def get_story_bible(project_id: str):
+        safe_id = _require_project(repository, project_id)
+        return {"project_id": safe_id, "facts": repository.list_story_bible_facts(safe_id)}
+
+    @app.post("/api/v1/projects/{project_id}/story-bible/facts")
+    async def create_story_bible_fact(project_id: str, payload: dict[str, Any]):
+        safe_id = _require_project(repository, project_id)
+        try:
+            fact = build_long_term_memory_fact(project_id=safe_id, payload=payload or {})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        repository.save_story_bible_fact(project_id=safe_id, fact=fact)
+        return {"project_id": safe_id, "fact": fact}
+
+    @app.get("/api/v1/projects/{project_id}/story-bible/memory-context")
+    async def get_story_bible_memory_context(
+        project_id: str,
+        query: str = "",
+        limit: int = 20,
+    ):
+        safe_id = _require_project(repository, project_id)
+        return {
+            "project_id": safe_id,
+            "query": query,
+            **build_story_memory_context(
+                facts=repository.list_story_bible_facts(safe_id),
+                query=query,
+                limit=limit,
+            ),
+        }
+
+    @app.patch("/api/v1/projects/{project_id}/story-bible/facts/{fact_id}")
+    async def update_story_bible_fact(project_id: str, fact_id: str, payload: dict[str, Any]):
+        safe_id = _require_project(repository, project_id)
+        fact = repository.update_story_bible_fact(
+            project_id=safe_id,
+            fact_id=fact_id,
+            updates=payload or {},
+        )
+        if fact is None:
+            raise HTTPException(status_code=404, detail="Story Bible fact 不存在")
+        return {"project_id": safe_id, "fact": fact}
+
+    @app.get("/api/v1/projects/{project_id}/run-memory/{run_id}")
+    async def get_run_memory(project_id: str, run_id: str):
+        safe_id = _require_project(repository, project_id)
+        memory = repository.get_run_memory(project_id=safe_id, run_id=run_id)
+        if memory is None:
+            raise HTTPException(status_code=404, detail="Run Memory 不存在")
+        return {"project_id": safe_id, "run_memory": memory}
+
+    @app.get("/api/v1/tools")
+    async def list_tools() -> dict[str, Any]:
+        return {
+            "tools": app.state.tool_registry.list_definitions(),
+            "tool_call_format": {
+                "tool_calls": [
+                    {
+                        "tool_name": "search_story_memory",
+                        "arguments": {"query": "林舟", "top_k": 3},
+                    }
+                ]
+            },
+        }
+
+    @app.post("/api/v1/projects/{project_id}/tools/execute")
+    async def execute_project_tools(project_id: str, payload: dict[str, Any] | None = None):
+        safe_id = _require_project(repository, project_id)
+        plan = payload or {}
+        started = time.perf_counter()
+        try:
+            result = execute_tool_plan(
+                app.state.tool_registry,
+                ToolExecutionContext(project_id=safe_id),
+                plan,
+            )
+        except UnknownToolError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ToolPermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ToolValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        run_id = str(plan.get("run_id") or f"tool-run-{secrets.token_hex(8)}")
+        agent_id = str(plan.get("agent_id") or "role_analyzer")
+        chapter_id = str(plan.get("chapter_id") or "")
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        trace = _build_tool_call_trace_payload(
+            app,
+            run_id=run_id,
+            project_id=safe_id,
+            chapter_id=chapter_id,
+            agent_id=agent_id,
+            plan=plan,
+            tool_results=result["tool_results"],
+            duration_ms=duration_ms,
+            final_decision=result["status"],
+        )
+        repository.save_agent_trace(trace)
+        repository.save_run_memory(
+            build_run_memory_snapshot(
+                project_id=safe_id,
+                run_id=run_id,
+                payload=plan,
+                tool_results=result["tool_results"],
+                final_status=result["status"],
+            )
+        )
+        return {
+            "project_id": safe_id,
+            "run_id": run_id,
+            **result,
+        }
+
     @app.post("/api/v1/books/parse")
     async def parse_novel(payload: dict[str, Any]) -> dict[str, Any]:
         text = payload.get("text")
@@ -779,6 +1207,22 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/chapters")
     async def list_chapters() -> dict[str, Any]:
         return {"chapters": [_chapter_to_dict(chapter) for chapter in _state(app)["chapters"]]}
+
+    @app.get("/api/v1/agent-runs")
+    async def list_agent_runs(project_id: str = "default", limit: int = 50) -> dict[str, Any]:
+        return {
+            "runs": repository.list_agent_traces(
+                project_id=project_id or "default",
+                limit=limit,
+            )
+        }
+
+    @app.get("/api/v1/agent-runs/{run_id}")
+    async def get_agent_run_trace(run_id: str, agent_id: str | None = None) -> dict[str, Any]:
+        trace = repository.get_agent_trace(run_id, agent_id=agent_id)
+        if trace is None:
+            raise HTTPException(status_code=404, detail="Agent 运行追踪不存在")
+        return {"trace": trace}
 
     @app.get("/api/v1/chapters/{chapter_id}")
     async def get_chapter(chapter_id: str) -> dict[str, Any]:
@@ -843,19 +1287,22 @@ def create_app() -> FastAPI:
     async def start_agent_run(
         chapter_id: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        payload = payload or {}
+        project_id = str(payload.get("project_id") or "default")
         state = _state(app)
         workbench = state["workbenches"].get(chapter_id)
         if workbench is None:
             raise HTTPException(status_code=404, detail="章节不存在")
         workflow = _create_dubbing_workflow(app)
+        paragraphs = [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs]
+        existing_roles = [role.to_dict() for role in state["roles"].list()]
+        started_at = time.perf_counter()
         try:
             result = workflow.start_role_analysis(
                 chapter_id=chapter_id,
                 chapter_title=workbench.chapter.title,
-                paragraphs=[
-                    _paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs
-                ],
-                existing_roles=[role.to_dict() for role in state["roles"].list()],
+                paragraphs=paragraphs,
+                existing_roles=existing_roles,
             )
         except MissingProviderCredential as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -863,6 +1310,19 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"角色分析 Agent 失败：{exc}") from exc
+        memory_chunks = repository.list_story_memory_chunks(project_id)
+        if memory_chunks:
+            result = replace(
+                result,
+                role_candidates=attach_memory_citations_to_role_candidates(
+                    result.role_candidates,
+                    search=lambda query, top_k=3: search_memory_chunks(
+                        chunks=memory_chunks,
+                        query=query,
+                        top_k=top_k,
+                    ),
+                ),
+            )
         state["dubbing_workflows"][result.thread_id] = workflow
         repository.save_agent_run(
             run_id=result.thread_id,
@@ -873,21 +1333,48 @@ def create_app() -> FastAPI:
                 "role_candidate_count": len(result.role_candidates),
             },
         )
+        parsed_output = result.to_dict()
+        repository.save_agent_trace(
+            _build_agent_trace_payload(
+                app,
+                run_id=result.thread_id,
+                project_id=project_id,
+                chapter_id=chapter_id,
+                agent_id="role_analyzer",
+                input_text=_trace_input_text(
+                    chapter_title=workbench.chapter.title,
+                    paragraphs=paragraphs,
+                    roles=existing_roles,
+                ),
+                parsed_output=parsed_output,
+                raw_model_output=_latest_raw_model_output(workflow.role_skill),
+                validation_status="accepted",
+                validation_errors=[],
+                reflection_count=0,
+                reflection_trace=[],
+                final_decision=result.status,
+                human_review_count=sum(
+                    1 for candidate in result.role_candidates if candidate.needs_human_review
+                ),
+                duration_ms=int((time.perf_counter() - started_at) * 1000),
+            )
+        )
         return result.to_dict()
 
     @app.post("/api/v1/agent-runs/{thread_id}/dubbing-arrangement")
     async def complete_dubbing_arrangement(
         thread_id: str, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        payload = payload or {}
         workflow = _dubbing_workflow(app, thread_id)
-        roles = _roles_for_dubbing_payload(app, payload or {})
+        roles = _roles_for_dubbing_payload(app, payload)
+        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload)
+        started_at = time.perf_counter()
         try:
             result = workflow.resume_after_roles(
                 thread_id=thread_id,
                 roles=roles,
-                existing_utterances_by_paragraph=_utterances_by_paragraph_from_payload(
-                    payload or {}
-                ),
+                existing_utterances_by_paragraph=utterances_by_paragraph,
             )
         except MissingProviderCredential as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -900,6 +1387,17 @@ def create_app() -> FastAPI:
         status_code = 422 if result.status == "failed" else 200
         if status_code != 200:
             raise HTTPException(status_code=status_code, detail=result.to_dict())
+        _save_dubbing_director_trace(
+            app,
+            repository,
+            thread_id=thread_id,
+            project_id=str(payload.get("project_id") or "default"),
+            roles=roles,
+            utterances_by_paragraph=utterances_by_paragraph,
+            workflow=workflow,
+            result=result,
+            duration_ms=int((time.perf_counter() - started_at) * 1000),
+        )
         return result.to_dict()
 
     @app.post("/api/v1/agent-runs/{thread_id}/events")
@@ -961,6 +1459,7 @@ def create_app() -> FastAPI:
             workflow = _dubbing_workflow(app, thread_id)
 
             def run_workflow() -> None:
+                started_at = time.perf_counter()
                 try:
                     result = workflow.resume_after_roles(
                         thread_id=thread_id,
@@ -970,6 +1469,17 @@ def create_app() -> FastAPI:
                     )
                     event_name = "failed" if result.status == "failed" else "completed"
                     emit(event_name, result.to_dict())
+                    _save_dubbing_director_trace(
+                        app,
+                        repository,
+                        thread_id=thread_id,
+                        project_id=str((payload or {}).get("project_id") or "default"),
+                        roles=roles,
+                        utterances_by_paragraph=utterances_by_paragraph,
+                        workflow=workflow,
+                        result=result,
+                        duration_ms=int((time.perf_counter() - started_at) * 1000),
+                    )
                     repository.save_agent_run(
                         run_id=thread_id,
                         agent_id="dubbing_director",
@@ -1916,6 +2426,585 @@ def _utterances_by_paragraph_from_payload(
             dict(item) for item in utterances if isinstance(item, dict)
         ]
     return normalized
+
+
+def _embedding_provider_from_env() -> dict[str, Any]:
+    return {
+        "base_url": _service_env("SHUYI_EMBEDDING_BASE_URL", "https://api.openai.com/v1"),
+        "model": _service_env("SHUYI_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
+        "api_key_env": _service_env("SHUYI_EMBEDDING_API_KEY_ENV", DEFAULT_EMBEDDING_API_KEY_ENV),
+        "timeout_seconds": int(_service_env("SHUYI_EMBEDDING_TIMEOUT_SECONDS", "60")),
+    }
+
+
+def _try_vector_index_memory(
+    _app: FastAPI,
+    project_id: str,
+    chunks: list[dict[str, Any]],
+) -> tuple[str, str]:
+    if not chunks:
+        return "skipped_empty", "没有可索引的 Story Memory chunk。"
+    provider = _embedding_provider_from_env()
+    try:
+        embeddings = OpenAICompatibleEmbeddingClient(
+            provider=provider,
+            api_key_lookup=os.environ.get,
+        ).embed_texts([str(chunk.get("text") or "") for chunk in chunks])
+    except MissingProviderCredential:
+        return (
+            "skipped_missing_api_key",
+            f"未配置 {provider['api_key_env']}，已保存 SQLite 文本索引并跳过向量化。",
+        )
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return "embedding_failed", f"Embedding 请求失败，已保留 SQLite 文本索引：{exc}"
+    qdrant_url = _service_env("SHUYI_QDRANT_URL", "").strip()
+    if not qdrant_url:
+        return "embedded_no_vector_store", "已生成 embedding，但未配置 SHUYI_QDRANT_URL。"
+    if not embeddings:
+        return "skipped_empty_embedding", "Embedding API 未返回可用向量。"
+    collection_name = _service_env("SHUYI_QDRANT_COLLECTION", DEFAULT_QDRANT_COLLECTION)
+    store = QdrantMemoryStore(
+        base_url=qdrant_url,
+        collection_name=collection_name,
+    )
+    try:
+        store.ensure_collection(len(embeddings[0]))
+        store.upsert(project_id=project_id, chunks=chunks, embeddings=embeddings)
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return "qdrant_failed", f"Qdrant 写入失败，已保留 SQLite 文本索引：{exc}"
+    return "qdrant_indexed", f"已写入 Qdrant collection：{collection_name}。"
+
+
+def _try_vector_search_memory(
+    *,
+    project_id: str,
+    query: str,
+    top_k: int,
+) -> tuple[list[dict[str, Any]] | None, str, str]:
+    qdrant_url = _service_env("SHUYI_QDRANT_URL", "").strip()
+    if not qdrant_url:
+        return None, "sqlite_lexical", "未配置 SHUYI_QDRANT_URL，使用 SQLite 文本检索。"
+
+    provider = _embedding_provider_from_env()
+    try:
+        embeddings = OpenAICompatibleEmbeddingClient(
+            provider=provider,
+            api_key_lookup=os.environ.get,
+        ).embed_texts([query])
+    except MissingProviderCredential:
+        return (
+            None,
+            "sqlite_lexical",
+            f"未配置 {provider['api_key_env']}，使用 SQLite 文本检索。",
+        )
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return None, "sqlite_lexical", f"Embedding 请求失败，使用 SQLite 文本检索：{exc}"
+
+    if not embeddings:
+        return None, "sqlite_lexical", "Embedding API 未返回可用向量，使用 SQLite 文本检索。"
+
+    store = QdrantMemoryStore(
+        base_url=qdrant_url,
+        collection_name=_service_env("SHUYI_QDRANT_COLLECTION", DEFAULT_QDRANT_COLLECTION),
+    )
+    try:
+        response = store.search(project_id=project_id, embedding=embeddings[0], top_k=top_k)
+    except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        return None, "sqlite_lexical", f"Qdrant 检索失败，使用 SQLite 文本检索：{exc}"
+    return _memory_results_from_qdrant_response(response, query=query), "qdrant_vector", "已使用 Qdrant 向量检索。"
+
+
+def _memory_results_from_qdrant_response(
+    response: dict[str, Any],
+    *,
+    query: str,
+) -> list[dict[str, Any]]:
+    hits = response.get("result")
+    if not isinstance(hits, list):
+        return []
+    results: list[dict[str, Any]] = []
+    for hit in hits:
+        if not isinstance(hit, dict) or not isinstance(hit.get("payload"), dict):
+            continue
+        chunk = hit["payload"]
+        required = {"chunk_id", "project_id", "source_type", "text"}
+        if not required.issubset(chunk):
+            continue
+        results.append(
+            memory_result_from_chunk(
+                chunk=chunk,
+                score=float(hit.get("score") or 0),
+                query=query,
+            )
+        )
+    return results
+
+
+def _build_tool_registry(app: FastAPI, repository: SQLiteRepository) -> ToolRegistry:
+    registry = ToolRegistry()
+
+    def register(
+        tool_name: str,
+        description: str,
+        input_schema: dict[str, Any],
+        output_schema: dict[str, Any],
+        permission_scope: str,
+        implementation,
+        timeout_seconds: int = 10,
+    ) -> None:
+        registry.register(
+            ToolDefinition(
+                tool_name=tool_name,
+                description=description,
+                input_schema=input_schema,
+                output_schema=output_schema,
+                permission_scope=permission_scope,
+                timeout_seconds=timeout_seconds,
+                implementation=implementation,
+            )
+        )
+
+    register(
+        "search_story_memory",
+        "Search project Story Memory and return grounded source citations.",
+        _object_schema({"query": "string", "top_k": "integer", "project_id": "string"}, ["query"]),
+        _object_schema({"retrieval_mode": "string", "results": "array"}),
+        "project:memory:read",
+        lambda context, arguments: _tool_search_story_memory(repository, context, arguments),
+    )
+    register(
+        "get_project_status",
+        "Build the current project quality report from supplied or active workflow state.",
+        _object_schema(
+            {
+                "chapters": "array",
+                "roles": "array",
+                "utterances_by_paragraph": "object",
+                "max_utterance_chars": "integer",
+                "project_id": "string",
+            }
+        ),
+        _object_schema({"quality_report": "object"}),
+        "project:status:read",
+        lambda context, arguments: {
+            "quality_report": build_quality_report(
+                project_id=context.project_id,
+                **_quality_payload_from_request(app, arguments),
+            )
+        },
+    )
+    register(
+        "list_roles",
+        "List known roles for the current project workspace.",
+        _object_schema({"project_id": "string"}),
+        _object_schema({"roles": "array"}),
+        "project:roles:read",
+        lambda _context, _arguments: {
+            "roles": [_public_role_to_dict(role) for role in _state(app)["roles"].list()]
+        },
+    )
+    register(
+        "get_role_profile",
+        "Fetch one role profile by role_id or name.",
+        _object_schema({"role_id": "string", "name": "string", "project_id": "string"}),
+        _object_schema({"role": "object"}),
+        "project:roles:read",
+        lambda _context, arguments: _tool_get_role_profile(app, arguments),
+    )
+    register(
+        "query_utterances",
+        "Query utterances by status, role, paragraph, or length constraints.",
+        _object_schema(
+            {
+                "utterances_by_paragraph": "object",
+                "status": "string",
+                "role_id": "string",
+                "paragraph_id": "string",
+                "max_chars": "integer",
+                "project_id": "string",
+            }
+        ),
+        _object_schema({"items": "array", "total_count": "integer"}),
+        "project:utterances:read",
+        lambda _context, arguments: _tool_query_utterances(arguments),
+    )
+    register(
+        "suggest_long_text_split",
+        "Suggest conservative punctuation-based splits for long TTS text.",
+        _object_schema({"text": "string", "max_chars": "integer", "project_id": "string"}, ["text"]),
+        _object_schema({"segments": "array", "text_conservation": "object"}),
+        "project:utterances:write-suggestion",
+        lambda _context, arguments: _tool_suggest_long_text_split(arguments),
+    )
+    register(
+        "check_text_conservation",
+        "Check whether split segments exactly preserve original text.",
+        _object_schema(
+            {"original_text": "string", "segments": "array", "project_id": "string"},
+            ["original_text", "segments"],
+        ),
+        _object_schema({"matches": "boolean"}),
+        "project:utterances:validate",
+        lambda _context, arguments: _tool_check_text_conservation(arguments),
+    )
+    register(
+        "check_tts_health",
+        "Check local TTS service health without exposing credentials.",
+        _object_schema({"base_url": "string", "project_id": "string"}),
+        _object_schema({"ready": "boolean", "health": "object"}),
+        "project:tts:read",
+        lambda _context, arguments: _tool_check_tts_health(app, arguments),
+    )
+    register(
+        "generate_voice_preview",
+        "Generate or dry-run a voice preview request through the controlled TTS path.",
+        _object_schema(
+            {
+                "name": "string",
+                "description": "string",
+                "reference_text": "string",
+                "dry_run": "boolean",
+                "allow_audio_generation": "boolean",
+                "project_id": "string",
+            },
+            ["name", "description"],
+        ),
+        _object_schema({"status": "string", "preview_text": "string", "audio_url": "string"}),
+        "project:tts:write",
+        lambda _context, arguments: _tool_generate_voice_preview(app, arguments),
+        timeout_seconds=30,
+    )
+    register(
+        "lookup_pronunciation",
+        "Look up pronunciation facts from project Story Bible and glossary chunks.",
+        _object_schema({"term": "string", "project_id": "string"}, ["term"]),
+        _object_schema({"facts": "array"}),
+        "project:memory:read",
+        lambda context, arguments: _tool_lookup_pronunciation(repository, context, arguments),
+    )
+    return registry
+
+
+def _object_schema(
+    properties: dict[str, str], required: list[str] | None = None
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": required or [],
+        "properties": {name: {"type": kind} for name, kind in properties.items()},
+    }
+
+
+def _tool_search_story_memory(
+    repository: SQLiteRepository,
+    context: ToolExecutionContext,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    query = str(arguments.get("query") or "").strip()
+    top_k = max(1, min(int(arguments.get("top_k") or 5), 20))
+    vector_results, retrieval_mode, message = _try_vector_search_memory(
+        project_id=context.project_id,
+        query=query,
+        top_k=top_k,
+    )
+    if vector_results is not None:
+        return {"retrieval_mode": retrieval_mode, "message": message, "results": vector_results}
+    results = search_memory_chunks(
+        chunks=repository.list_story_memory_chunks(context.project_id),
+        query=query,
+        top_k=top_k,
+    )
+    return {"retrieval_mode": "sqlite_lexical", "message": message, "results": results}
+
+
+def _tool_get_role_profile(app: FastAPI, arguments: dict[str, Any]) -> dict[str, Any]:
+    role_id = str(arguments.get("role_id") or "").strip()
+    name = str(arguments.get("name") or "").strip()
+    for role in _state(app)["roles"].list():
+        payload = _public_role_to_dict(role)
+        if (role_id and payload.get("role_id") == role_id) or (name and payload.get("name") == name):
+            return {"role": payload}
+    raise ValueError("角色不存在")
+
+
+def _tool_query_utterances(arguments: dict[str, Any]) -> dict[str, Any]:
+    utterances_by_paragraph = _utterances_by_paragraph_from_payload(arguments)
+    status = str(arguments.get("status") or "").strip()
+    role_id = str(arguments.get("role_id") or "").strip()
+    paragraph_filter = str(arguments.get("paragraph_id") or "").strip()
+    max_chars = int(arguments.get("max_chars") or arguments.get("max_utterance_chars") or 120)
+    items: list[dict[str, Any]] = []
+    for paragraph_id, utterances in utterances_by_paragraph.items():
+        if paragraph_filter and paragraph_id != paragraph_filter:
+            continue
+        for utterance in utterances:
+            item_role_id = str(utterance.get("speaker_role_id") or utterance.get("role_id") or "")
+            if role_id and item_role_id != role_id:
+                continue
+            if status and not _utterance_matches_tool_status(utterance, status, max_chars=max_chars):
+                continue
+            items.append({**utterance, "paragraph_id": str(utterance.get("paragraph_id") or paragraph_id)})
+    return {"items": items, "total_count": len(items)}
+
+
+def _utterance_matches_tool_status(
+    utterance: dict[str, Any], status: str, *, max_chars: int
+) -> bool:
+    role_id = str(utterance.get("speaker_role_id") or utterance.get("role_id") or "")
+    if status == "needs_human_review":
+        return bool(utterance.get("needs_human_review"))
+    if status == "unselected_role":
+        return not role_id
+    if status == "dubbing_failed":
+        return _tool_is_audio_failed(utterance)
+    if status == "undubbed":
+        return bool(role_id) and not _tool_has_audio(utterance) and not _tool_is_audio_failed(utterance)
+    if status == "long_utterance":
+        return len(str(utterance.get("text") or "")) > max_chars
+    return True
+
+
+def _tool_has_audio(utterance: dict[str, Any]) -> bool:
+    return bool(utterance.get("audio_url") or utterance.get("audio_path"))
+
+
+def _tool_is_audio_failed(utterance: dict[str, Any]) -> bool:
+    return bool(utterance.get("audio_error")) or str(
+        utterance.get("audio_status") or ""
+    ).lower() == "failed"
+
+
+def _tool_suggest_long_text_split(arguments: dict[str, Any]) -> dict[str, Any]:
+    text = str(arguments.get("text") or "")
+    max_chars = max(1, int(arguments.get("max_chars") or 120))
+    segments = _suggest_text_segments(text, max_chars=max_chars)
+    return {
+        "segments": segments,
+        "segment_count": len(segments),
+        "text_conservation": _text_conservation_report(text, segments),
+    }
+
+
+def _suggest_text_segments(text: str, *, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text] if text else []
+    parts = re.findall(r".+?[。！？!?；;，,、]|.+$", text)
+    segments: list[str] = []
+    current = ""
+    for part in parts:
+        if len(part) > max_chars:
+            if current:
+                segments.append(current)
+                current = ""
+            segments.extend(
+                part[index : index + max_chars] for index in range(0, len(part), max_chars)
+            )
+            continue
+        if current and len(current) + len(part) > max_chars:
+            segments.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _tool_check_text_conservation(arguments: dict[str, Any]) -> dict[str, Any]:
+    original = str(arguments.get("original_text") or "")
+    segments = [str(item) for item in arguments.get("segments") or []]
+    return _text_conservation_report(original, segments)
+
+
+def _text_conservation_report(original: str, segments: list[str]) -> dict[str, Any]:
+    joined = "".join(segments)
+    return {
+        "matches": joined == original,
+        "original_length": len(original),
+        "joined_length": len(joined),
+        "segment_count": len(segments),
+    }
+
+
+def _tool_check_tts_health(app: FastAPI, arguments: dict[str, Any]) -> dict[str, Any]:
+    base_url = str(
+        arguments.get("base_url") or _state(app)["model_config"]["tts"].get("base_url") or ""
+    )
+    health = _fetch_tts_health(base_url or "http://127.0.0.1:7811")
+    return {"ready": _is_tts_ready(health), "health": health}
+
+
+def _tool_generate_voice_preview(app: FastAPI, arguments: dict[str, Any]) -> dict[str, Any]:
+    name = str(arguments.get("name") or "").strip()
+    description = str(arguments.get("description") or "").strip()
+    reference_text = str(arguments.get("reference_text") or "").strip() or generated_voice_content(
+        name, description
+    )
+    if bool(arguments.get("dry_run", True)) or not bool(arguments.get("allow_audio_generation")):
+        return {"status": "dry_run", "preview_text": reference_text, "audio_url": ""}
+    preview_id = f"preview-{len(_state(app)['voice_previews']) + 1:04d}"
+    output_path = OUTPUT_VOICE_RESOURCE_DIR / f"{preview_id}.wav"
+    duration_seconds = _write_substitute_wav(output_path)
+    resource = VoiceResource(
+        voice_id=preview_id,
+        name=name,
+        description=description,
+        reference_text=reference_text,
+        reference_audio_path=str(output_path),
+        generated=True,
+        playable_audio_path=str(output_path),
+    )
+    _state(app)["voice_previews"][preview_id] = resource
+    return {
+        "status": "generated",
+        "preview_text": reference_text,
+        "audio_url": f"/api/v1/downloads/voice-profiles/{preview_id}.wav",
+        "duration_seconds": duration_seconds,
+    }
+
+
+def _tool_lookup_pronunciation(
+    repository: SQLiteRepository,
+    context: ToolExecutionContext,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    term = str(arguments.get("term") or "").strip()
+    memory_context = build_story_memory_context(
+        facts=[
+            fact
+            for fact in repository.list_story_bible_facts(context.project_id)
+            if str(fact.get("subject") or "") == term and fact.get("predicate") == "pronunciation"
+        ],
+        query=term,
+    )
+    facts = memory_context["facts_for_prompt"]
+    glossary_chunks = [
+        chunk
+        for chunk in repository.list_story_memory_chunks(context.project_id)
+        if chunk.get("source_type") == "glossary" and term in str(chunk.get("text") or "")
+    ]
+    return {
+        "term": term,
+        "facts": facts,
+        "candidate_facts": memory_context["candidate_facts"],
+        "rejected_facts": memory_context["rejected_facts"],
+        "glossary_chunks": glossary_chunks,
+    }
+
+
+def _build_tool_call_trace_payload(
+    app: FastAPI,
+    *,
+    run_id: str,
+    project_id: str,
+    chapter_id: str,
+    agent_id: str,
+    plan: dict[str, Any],
+    tool_results: list[dict[str, Any]],
+    duration_ms: int,
+    final_decision: str,
+) -> dict[str, Any]:
+    try:
+        agent = app.state.agent_registry.get(agent_id)
+        prompt_text = agent.prompt_text
+        agent_name = agent.display_name
+        prompt_id = agent.prompt_id
+        prompt_version = agent.prompt_version
+        prompt_sha256 = agent.prompt_sha256
+    except KeyError:
+        prompt_text = "Tool Calling Registry executes declared project-scoped tools only."
+        agent_name = "Tool Calling Registry"
+        prompt_id = "tool_registry"
+        prompt_version = "1"
+        prompt_sha256 = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+    provider = _text_model_provider_from_config(app)
+    input_text = summarize_tool_payload(plan, max_chars=2000)
+    parsed_output = {"tool_results": tool_results}
+    raw_output = json.dumps(parsed_output, ensure_ascii=False, separators=(",", ":"))
+    max_tokens = int(provider.get("max_tokens") or DEFAULT_RESERVED_OUTPUT_TOKENS)
+    token_report = build_token_context_report(
+        system_prompt=prompt_text,
+        input_text=input_text,
+        output_text=raw_output,
+        context_window=_configured_context_window(),
+        reserved_output_tokens=max_tokens,
+    )
+    failures = [item for item in tool_results if item.get("status") == "failed"]
+    return {
+        "run_id": run_id,
+        "project_id": project_id or "default",
+        "chapter_id": chapter_id,
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "prompt_id": prompt_id,
+        "prompt_version": prompt_version,
+        "prompt_sha256": prompt_sha256,
+        "model_name": str(provider.get("model") or ""),
+        "provider_base_url": str(provider.get("base_url") or ""),
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "estimated_prompt_tokens": token_report["estimated_prompt_tokens"],
+        "estimated_input_tokens": token_report["estimated_input_tokens"],
+        "estimated_output_tokens": token_report["estimated_output_tokens"],
+        "estimated_total_tokens": token_report["estimated_total_tokens"],
+        "context_window": token_report["context_window"],
+        "input_summary": summarize_for_trace(input_text),
+        "raw_model_output": raw_output,
+        "parsed_output": parsed_output,
+        "validation_status": "failed" if failures else "accepted",
+        "validation_errors": failures,
+        "reflection_count": 0,
+        "reflection_trace": [],
+        "final_decision": final_decision,
+        "human_review_count": 0,
+        "duration_ms": duration_ms,
+        "token_context_report": token_report,
+        "tool_calls": tool_results,
+    }
+
+
+def _require_project(repository: SQLiteRepository, project_id: str) -> str:
+    try:
+        safe_id = safe_project_id(project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if repository.get_project(safe_id) is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return safe_id
+
+
+def _quality_payload_from_request(app: FastAPI, payload: dict[str, Any]) -> dict[str, Any]:
+    chapters = payload.get("chapters")
+    if not isinstance(chapters, list):
+        chapters = _chapters_for_quality_payload(app)
+    roles = payload.get("roles")
+    if not isinstance(roles, list):
+        roles = [role.to_dict() for role in _state(app)["roles"].list()]
+    return {
+        "chapters": [dict(item) for item in chapters if isinstance(item, dict)],
+        "roles": [dict(item) for item in roles if isinstance(item, dict)],
+        "utterances_by_paragraph": _utterances_by_paragraph_from_payload(payload),
+        "max_utterance_chars": int(payload.get("max_utterance_chars") or 120),
+    }
+
+
+def _chapters_for_quality_payload(app: FastAPI) -> list[dict[str, Any]]:
+    chapters: list[dict[str, Any]] = []
+    for chapter in _state(app)["chapters"]:
+        workbench = _state(app)["workbenches"].get(chapter.chapter_id)
+        paragraphs = (
+            [_paragraph_to_dict(paragraph) for paragraph in workbench.visible_paragraphs]
+            if workbench
+            else []
+        )
+        chapters.append(
+            {
+                "chapter_id": chapter.chapter_id,
+                "title": chapter.title,
+                "paragraphs": paragraphs,
+            }
+        )
+    return chapters
 
 
 def _write_substitute_wav(

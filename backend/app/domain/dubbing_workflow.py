@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -33,6 +34,7 @@ class RoleAnalysisCandidate:
     evidence: list[str] = field(default_factory=list)
     confidence: float = 0.0
     needs_human_review: bool = True
+    source_citations: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -161,6 +163,7 @@ class LangChainRoleAnalysisSkill:
     ):
         self.provider = provider
         self.api_key_lookup = api_key_lookup
+        self.invocation_trace: list[dict[str, Any]] = []
         self.role_analysis_system_prompt = role_analysis_system_prompt or (
             "你是书弈 Agent 的角色分析 Agent，只返回严格 JSON。"
         )
@@ -316,6 +319,7 @@ class LangChainRoleAnalysisSkill:
     def _invoke(self, messages: list[dict[str, str]]) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
+        started = time.perf_counter()
         converted = [
             SystemMessage(content=message["content"])
             if message.get("role") == "system"
@@ -323,7 +327,19 @@ class LangChainRoleAnalysisSkill:
             for message in messages
         ]
         response = self._chat_model().invoke(converted)
-        return str(response.content)
+        raw_output = str(response.content)
+        self.invocation_trace.append(
+            {
+                "messages": messages,
+                "raw_model_output": raw_output,
+                "model_name": str(self.provider.get("model") or ""),
+                "provider_base_url": str(self.provider.get("base_url") or ""),
+                "temperature": 0,
+                "max_tokens": int(self.provider.get("max_tokens") or 0),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            }
+        )
+        return raw_output
 
 
 class AiSegmentationService:
@@ -1452,6 +1468,9 @@ def _candidate_from_any(candidate: Any) -> RoleAnalysisCandidate:
         evidence=[str(item) for item in candidate.get("evidence") or []],
         confidence=max(0.0, min(1.0, _safe_float(candidate.get("confidence"), default=0.0))),
         needs_human_review=bool(candidate.get("needs_human_review", True)),
+        source_citations=[
+            item for item in candidate.get("source_citations") or [] if isinstance(item, dict)
+        ],
     )
 
 
