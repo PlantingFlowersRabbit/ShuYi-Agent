@@ -730,6 +730,18 @@ small {
   font-size: 13px;
 }
 
+.delivery-hint {
+  flex-basis: 100%;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e3a8a;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
 .status-filter-bar {
   display: flex;
   flex-basis: 100%;

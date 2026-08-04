@@ -22,8 +22,8 @@ def test_v0_5_package_versions_are_consistent():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
 
-    assert project["project"]["version"] == "0.6.6"
-    assert frontend["version"] == "0.6.6"
+    assert project["project"]["version"] == "0.7.0"
+    assert frontend["version"] == "0.7.0"
 
 
 def test_v0_5_harness_prompt_is_ignored():

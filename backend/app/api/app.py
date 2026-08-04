@@ -136,7 +136,7 @@ REAL_VOICE_ROOT = Path(_service_env("SHUYI_REAL_VOICE_ROOT", str(ROOT / "assets/
 DEFAULT_TTS_SCRIPT = ROOT / "backend/tts/qwen3_tts_server.py"
 DEFAULT_TTS_STARTUP_TIMEOUT_SECONDS = 300.0
 SERVICE_NAME = "shuyi-agent"
-SERVICE_VERSION = "0.6.6"
+SERVICE_VERSION = "0.7.0"
 PUBLIC_BROWSER_CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "*",
@@ -961,6 +961,15 @@ def create_app() -> FastAPI:
         directory = directories.get(category)
         if directory is None:
             raise HTTPException(status_code=404, detail="下载资源不存在")
+        target = (directory / filename).resolve()
+        if not _is_inside(target, directory) or not target.is_file():
+            raise HTTPException(status_code=404, detail="下载资源不存在")
+        return FileResponse(target, filename=target.name)
+
+    @app.get("/api/v1/projects/{project_id}/downloads/exports/{filename:path}")
+    async def download_project_export(project_id: str, filename: str):
+        project = _require_project_with_roots(repository, app.state.data_root, project_id)
+        directory = Path(project["output_roots"]["exports"]).resolve()
         target = (directory / filename).resolve()
         if not _is_inside(target, directory) or not target.is_file():
             raise HTTPException(status_code=404, detail="下载资源不存在")
@@ -2431,11 +2440,10 @@ def create_app() -> FastAPI:
     async def export_chapter_audio_endpoint(
         chapter_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        roles = _roles_for_dubbing_payload(app, payload or {})
+        roles = _roles_for_export_payload(app, payload or {})
         utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
         chapter_title = str((payload or {}).get("chapter_title") or chapter_id)
-        pause_ms = int((payload or {}).get("pause_ms") or 300)
-        speed = float((payload or {}).get("speed") or 1.0)
+        export_options = _export_options_from_payload(payload or {})
         export_dir = (
             OUTPUT_EXPORT_DIR
             / f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
@@ -2447,8 +2455,7 @@ def create_app() -> FastAPI:
             utterances_by_paragraph=utterances_by_paragraph,
             roles=roles,
             output_dir=export_dir,
-            pause_ms=pause_ms,
-            speed=speed,
+            **export_options,
         )
         archive_path = Path(
             await asyncio.to_thread(shutil.make_archive, str(export_dir), "zip", export_dir)
@@ -2459,6 +2466,50 @@ def create_app() -> FastAPI:
             "missing_count": report.missing_count,
             "message": report.message,
             "download_url": f"/api/v1/downloads/exports/{archive_path.name}",
+            "manifest_path": report.manifest_path,
+            "full_audio_path": report.full_audio_path,
+            "full_mp3_path": report.full_mp3_path,
+            "package_files": report.package_files,
+        }
+
+    @app.post("/api/v1/projects/{project_id}/exports/{chapter_id}")
+    async def export_project_chapter_audio_endpoint(
+        project_id: str, chapter_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        project = _require_project_with_roots(repository, app.state.data_root, project_id)
+        export_root = Path(project["output_roots"]["exports"])
+        export_root.mkdir(parents=True, exist_ok=True)
+        roles = _roles_for_export_payload(app, payload or {})
+        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+        chapter_title = str((payload or {}).get("chapter_title") or chapter_id)
+        export_options = _export_options_from_payload(payload or {})
+        export_dir = export_root / (
+            f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
+        )
+        report = await asyncio.to_thread(
+            export_chapter_audio,
+            chapter_id=chapter_id,
+            chapter_title=chapter_title,
+            utterances_by_paragraph=utterances_by_paragraph,
+            roles=roles,
+            output_dir=export_dir,
+            **export_options,
+        )
+        archive_path = Path(
+            await asyncio.to_thread(shutil.make_archive, str(export_dir), "zip", export_dir)
+        )
+        safe_id = str(project["project_id"])
+        return {
+            "project_id": safe_id,
+            "status": report.status,
+            "item_count": report.item_count,
+            "missing_count": report.missing_count,
+            "message": report.message,
+            "download_url": f"/api/v1/projects/{safe_id}/downloads/exports/{archive_path.name}",
+            "manifest_path": report.manifest_path,
+            "full_audio_path": report.full_audio_path,
+            "full_mp3_path": report.full_mp3_path,
+            "package_files": report.package_files,
         }
 
     return app
@@ -2593,6 +2644,13 @@ def _roles_for_dubbing_payload(app: FastAPI, payload: dict[str, Any]) -> list[di
             if isinstance(raw_role, dict) and raw_role.get("role_id"):
                 collection.upsert(_role_payload_with_resource(app, raw_role))
     return [role.to_dict() for role in collection.list()]
+
+
+def _roles_for_export_payload(app: FastAPI, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_roles = payload.get("roles")
+    if isinstance(raw_roles, list):
+        return [dict(role) for role in raw_roles if isinstance(role, dict)]
+    return [role.to_dict() for role in _state(app)["roles"].list()]
 
 
 def _utterances_by_paragraph_from_payload(
@@ -3119,6 +3177,32 @@ def _require_project(repository: SQLiteRepository, project_id: str) -> str:
     if repository.get_project(safe_id) is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     return safe_id
+
+
+def _require_project_with_roots(
+    repository: SQLiteRepository, data_root: Path, project_id: str
+) -> dict[str, Any]:
+    safe_id = _require_project(repository, project_id)
+    project = repository.get_project(safe_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return with_output_roots(project, data_root)
+
+
+def _export_options_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_formats = payload.get("export_formats") or payload.get("formats") or ["wav", "mp3"]
+    if not isinstance(raw_formats, list):
+        raw_formats = [raw_formats]
+    return {
+        "pause_ms": int(payload.get("pause_ms") or 300),
+        "speed": float(payload.get("speed") or 1.0),
+        "trim_silence": bool(payload.get("trim_silence", False)),
+        "normalize_audio": bool(
+            payload.get("normalize_audio", payload.get("loudness_normalization", False))
+        ),
+        "target_peak": float(payload.get("target_peak") or 0.9),
+        "export_formats": [str(item) for item in raw_formats if str(item).strip()],
+    }
 
 
 def _registered_tool_names(registry: ToolRegistry) -> set[str]:

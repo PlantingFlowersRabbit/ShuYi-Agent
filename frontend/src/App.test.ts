@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.6.6 application shell", () => {
+describe("v0.7.0 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.6.6 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.7.0 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.6.6 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.6.6");
+    expect(markup).toContain("v0.7.0");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.6.6 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.6.6 model configuration with separate backend and model tests", async () => {
+  it("renders v0.7.0 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -61,7 +61,7 @@ describe("v0.6.6 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.6.6 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.7.0 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -77,7 +77,7 @@ describe("v0.6.6 application shell", () => {
     expect(markup).toContain("生成音色");
   });
 
-  it("renders v0.6.6 Agent trace history with audit fields", async () => {
+  it("renders v0.7.0 Agent trace history with audit fields", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -120,6 +120,12 @@ describe("v0.6.6 application shell", () => {
     expect(appSource).toContain("一键播放");
     expect(appSource).toContain("暂停播放");
     expect(appSource).toContain("继续播放");
+    expect(appSource).toContain("上一句");
+    expect(appSource).toContain("下一句");
+    expect(appSource).toContain("整章播放列表");
+    expect(appSource).toContain("当前播放台词高亮");
+    expect(appSource).toContain("playPreviousQueuedChapterAudio");
+    expect(appSource).toContain("playNextQueuedChapterAudio");
     expect(appSource).toContain("状态筛选");
     expect(appSource).toContain("未划分");
     expect(appSource).toContain("未选角色");
@@ -147,6 +153,16 @@ describe("v0.6.6 application shell", () => {
     expect(appSource).toContain("/utterances/bulk-role");
     expect(appSource).toContain("splitRetryUtterances");
     expect(appSource).toContain("配音重试队列");
+    expect(appSource).toContain("完整 WAV/MP3");
+    expect(appSource).toContain("CSV 台本");
+    expect(appSource).toContain("SRT/LRC 字幕");
+    expect(appSource).toContain("角色表");
+    expect(appSource).toContain("音色表");
+    expect(appSource).toContain("失败清单");
+    expect(appSource).toContain("片段间停顿");
+    expect(appSource).toContain("头尾静音裁剪");
+    expect(appSource).toContain("响度归一化");
+    expect(appSource).toContain("/projects/${encodeURIComponent(projectId)}/exports/");
     expect(appSource).toContain("制作任务 Planner");
     expect(appSource).toContain("把当前章节处理到可导出");
     expect(appSource).toContain("生成计划");

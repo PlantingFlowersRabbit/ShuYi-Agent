@@ -1,6 +1,6 @@
 # 书弈 Agent 后端
 
-后端基于 FastAPI，包含小说解析、角色/音色管理、台词长句拆分、配音失败重试、制作任务 Planner、短期/长期记忆、Tool Calling Registry、Story Bible RAG、SQLite 仓储、可选 Qdrant 向量库和本地 Qwen3-TTS 服务。
+后端基于 FastAPI，包含小说解析、角色/音色管理、台词长句拆分、配音失败重试、整章导出制作包、制作任务 Planner、短期/长期记忆、Tool Calling Registry、Story Bible RAG、SQLite 仓储、可选 Qdrant 向量库和本地 Qwen3-TTS 服务。
 
 ## 本地启动
 
@@ -26,6 +26,16 @@ v0.6.1 新增项目工作区和 Human-in-the-loop 质量 API：
 - `POST /api/v1/projects/{project_id}/review-queue`：从质量报告中筛出可操作审稿项，支持按 issue、章节或角色过滤。
 
 这些接口仍使用 SQLite 持久化，所有新 API 都会校验并规范化 `project_id`，避免路径穿越和项目输出串线。
+
+## 整章导出与音频制作
+
+v0.7.0 新增项目级整章导出 API：
+
+- `POST /api/v1/projects/{project_id}/exports/{chapter_id}`：生成隔离在 `outputs/{project_id}/exports/` 下的章节交付制作包。
+- `GET /api/v1/projects/{project_id}/downloads/exports/{filename}`：只允许下载该项目 export root 内的压缩包。
+- `POST /api/v1/exports/{chapter_id}`：保留旧兼容入口，继续写入全局 exports 目录。
+
+制作包包含逐句音频、`chapter_full.wav`、`manifest.json`、`script.csv`、`subtitles.srt`、`subtitles.lrc`、`roles.csv`、`voices.csv` 和 `failures.csv`。请求 `export_formats=["wav","mp3"]` 时会尝试用 ffmpeg 生成 `chapter_full.mp3`；如果缺少 ffmpeg，manifest 会写入 `mp3_error`，其他交付物仍可下载。导出参数 `pause_ms`、`trim_silence`、`normalize_audio` 和 `target_peak` 会进入 manifest，便于审计片段间停顿、头尾静音裁剪和简单响度归一化。
 
 ## 长句拆分与台词编辑
 

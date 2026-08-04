@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import base64
+import csv
 import datetime as dt
 import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import urllib.error
 import urllib.request
 import wave
+from array import array
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -105,6 +109,8 @@ class ChapterAudioExportReport:
     missing_count: int
     full_audio_path: str | None
     message: str
+    full_mp3_path: str | None = None
+    package_files: dict[str, str | None] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -604,17 +610,30 @@ def export_chapter_audio(
     output_dir: Path,
     pause_ms: int = 300,
     speed: float = 1.0,
+    trim_silence: bool = False,
+    normalize_audio: bool = False,
+    target_peak: float = 0.9,
+    export_formats: list[str] | None = None,
+    mp3_encoder: Callable[[Path, Path], None] | None = None,
 ) -> ChapterAudioExportReport:
     output_dir.mkdir(parents=True, exist_ok=True)
     role_by_id = {_role_id(role): role for role in roles}
     items: list[dict[str, Any]] = []
+    script_rows: list[dict[str, Any]] = []
+    failure_rows: list[dict[str, Any]] = []
     completed_audio_paths: list[Path] = []
     missing_count = 0
+    cursor_seconds = 0.0
+    requested_formats = {
+        str(item).strip().lower() for item in (export_formats or ["wav"]) if str(item).strip()
+    }
+    if "mp3" in requested_formats:
+        requested_formats.add("wav")
 
     for index, utterance in enumerate(_iter_utterances(utterances_by_paragraph), start=1):
         text = str(utterance.get("text") or "").strip()
         role_id = _utterance_role_id(utterance)
-        if not text or not role_id:
+        if not text:
             continue
         role = role_by_id.get(role_id)
         role_name = str(_role_field(role, "name") or role_id)
@@ -622,10 +641,35 @@ def export_chapter_audio(
         statement_id = _statement_id(utterance)
         filename = _export_audio_filename(chapter_id, paragraph_id, statement_id, role_name)
         source_path = Path(str(utterance.get("audio_path") or ""))
+        row_base = {
+            "order": len(script_rows) + 1,
+            "chapter_id": chapter_id,
+            "chapter_title": chapter_title,
+            "paragraph_id": paragraph_id,
+            "utterance_id": statement_id,
+            "role_id": role_id,
+            "role_name": role_name,
+            "text": text,
+        }
+        script_rows.append(
+            {
+                **row_base,
+                "audio_status": str(utterance.get("audio_status") or ""),
+                "audio_file": filename if source_path else "",
+                "start_time": "",
+                "end_time": "",
+            }
+        )
         if source_path and utterance.get("audio_status") == "success" and source_path.exists():
             target = output_dir / filename
             shutil.copy2(source_path, target)
             completed_audio_paths.append(target)
+            duration = float(utterance.get("audio_duration") or validate_wav_duration(target))
+            start_time = cursor_seconds
+            end_time = cursor_seconds + duration
+            cursor_seconds = end_time + max(0, pause_ms) / 1000
+            script_rows[-1]["start_time"] = _subtitle_timestamp(start_time, separator=".")
+            script_rows[-1]["end_time"] = _subtitle_timestamp(end_time, separator=".")
             items.append(
                 {
                     "chapter_id": chapter_id,
@@ -641,24 +685,132 @@ def export_chapter_audio(
                     "voice_name": _role_field(role, "voice_description")
                     or _role_field(role, "description"),
                     "filename": filename,
-                    "duration": utterance.get("audio_duration"),
+                    "duration": duration,
+                    "start_time": start_time,
+                    "end_time": end_time,
                     "generated_at": utterance.get("audio_generated_at"),
                 }
             )
         else:
             missing_count += 1
+            failure_rows.append(
+                {
+                    **row_base,
+                    "audio_status": str(utterance.get("audio_status") or "missing"),
+                    "audio_error": str(utterance.get("audio_error") or "音频文件缺失或未生成"),
+                }
+            )
+
+    role_rows = [_role_export_row(role) for role in roles]
+    voice_rows = _voice_export_rows(roles)
+    _write_csv(
+        output_dir / "script.csv",
+        [
+            "order",
+            "chapter_id",
+            "chapter_title",
+            "paragraph_id",
+            "utterance_id",
+            "role_id",
+            "role_name",
+            "text",
+            "audio_status",
+            "audio_file",
+            "start_time",
+            "end_time",
+        ],
+        script_rows,
+    )
+    _write_csv(
+        output_dir / "roles.csv",
+        ["role_id", "role_name", "voice_resource_id", "voice_mode", "description"],
+        role_rows,
+    )
+    _write_csv(
+        output_dir / "voices.csv",
+        ["voice_resource_id", "voice_name", "reference_audio_path", "reference_text", "voice_mode"],
+        voice_rows,
+    )
+    _write_csv(
+        output_dir / "failures.csv",
+        [
+            "order",
+            "chapter_id",
+            "chapter_title",
+            "paragraph_id",
+            "utterance_id",
+            "role_id",
+            "role_name",
+            "text",
+            "audio_status",
+            "audio_error",
+        ],
+        failure_rows,
+    )
+    (output_dir / "subtitles.srt").write_text(_build_srt(items), encoding="utf-8")
+    (output_dir / "subtitles.lrc").write_text(_build_lrc(items), encoding="utf-8")
+
+    full_audio_path: str | None = None
+    full_mp3_path: str | None = None
+    mp3_error: str | None = None
+    if missing_count == 0 and completed_audio_paths:
+        full_path = output_dir / "chapter_full.wav"
+        _concatenate_wavs(
+            completed_audio_paths,
+            full_path,
+            pause_ms=pause_ms,
+            trim_silence=trim_silence,
+            normalize_audio=normalize_audio,
+            target_peak=target_peak,
+        )
+        full_audio_path = str(full_path)
+        if "mp3" in requested_formats:
+            mp3_path = output_dir / "chapter_full.mp3"
+            try:
+                (mp3_encoder or _encode_mp3_with_ffmpeg)(full_path, mp3_path)
+            except TTSServiceError as exc:
+                mp3_error = str(exc)
+            else:
+                full_mp3_path = str(mp3_path)
+
+    deliverables: dict[str, str | None] = {
+        "full_audio_wav": "chapter_full.wav" if full_audio_path else None,
+        "full_audio_mp3": "chapter_full.mp3" if full_mp3_path else None,
+        "script_csv": "script.csv",
+        "subtitles_srt": "subtitles.srt",
+        "subtitles_lrc": "subtitles.lrc",
+        "roles_csv": "roles.csv",
+        "voices_csv": "voices.csv",
+        "failures_csv": "failures.csv",
+        "manifest_json": "manifest.json",
+    }
 
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(
         json.dumps(
             {
+                "package_version": "v0.7.0",
+                "project_artifact_type": "chapter_delivery_package",
                 "chapter_id": chapter_id,
                 "chapter_title": chapter_title,
                 "exported_at": _utc_now(),
                 "pause_ms": pause_ms,
                 "speed": speed,
+                "post_processing": {
+                    "pause_ms": pause_ms,
+                    "speed": speed,
+                    "trim_silence": trim_silence,
+                    "normalize_audio": normalize_audio,
+                    "target_peak": target_peak,
+                },
+                "deliverables": deliverables,
                 "missing_count": missing_count,
+                "failure_count": len(failure_rows),
                 "items": items,
+                "failures": failure_rows,
+                "roles": role_rows,
+                "voices": voice_rows,
+                **({"mp3_error": mp3_error} if mp3_error else {}),
             },
             ensure_ascii=False,
             indent=2,
@@ -666,14 +818,8 @@ def export_chapter_audio(
         encoding="utf-8",
     )
 
-    full_audio_path: str | None = None
-    if missing_count == 0 and completed_audio_paths:
-        full_path = output_dir / "chapter_full.wav"
-        _concatenate_wavs(completed_audio_paths, full_path, pause_ms=pause_ms)
-        full_audio_path = str(full_path)
-
     message = (
-        "导出完成，已包含完整拼接音频。"
+        "导出完成，已包含完整 WAV/MP3 制作包。"
         if full_audio_path
         else f"导出完成；还有 {missing_count} 条台词未完成配音，未生成完整拼接音频。"
     )
@@ -684,6 +830,8 @@ def export_chapter_audio(
         item_count=len(items),
         missing_count=missing_count,
         full_audio_path=full_audio_path,
+        full_mp3_path=full_mp3_path,
+        package_files=deliverables,
         message=message,
     )
 
@@ -827,7 +975,102 @@ def _safe_file_stem(value: str) -> str:
     return re.sub(r"[^\w\u4e00-\u9fff-]+", "-", value).strip("-") or "audio"
 
 
-def _concatenate_wavs(paths: list[Path], output_path: Path, *, pause_ms: int) -> None:
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _role_export_row(role: RoleCard | dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role_id": _role_id(role),
+        "role_name": _role_field(role, "name") or _role_id(role),
+        "voice_resource_id": _role_field(role, "voice_resource_id") or "",
+        "voice_mode": _role_field(role, "voice_mode") or "voice_cloning",
+        "description": _role_field(role, "description") or _role_field(role, "profile") or "",
+    }
+
+
+def _voice_export_rows(roles: list[RoleCard | dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for role in roles:
+        voice_resource_id = str(_role_field(role, "voice_resource_id") or "")
+        if not voice_resource_id or voice_resource_id in seen:
+            continue
+        seen.add(voice_resource_id)
+        rows.append(
+            {
+                "voice_resource_id": voice_resource_id,
+                "voice_name": _role_field(role, "voice_description")
+                or _role_field(role, "description")
+                or voice_resource_id,
+                "reference_audio_path": _role_field(role, "reference_audio_path") or "",
+                "reference_text": _role_field(role, "reference_text") or "",
+                "voice_mode": _role_field(role, "voice_mode") or "voice_cloning",
+            }
+        )
+    return rows
+
+
+def _subtitle_timestamp(seconds: float, *, separator: str) -> str:
+    total_ms = max(0, round(seconds * 1000))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}{separator}{millis:03d}"
+
+
+def _lrc_timestamp(seconds: float) -> str:
+    total_cs = max(0, round(seconds * 100))
+    minutes, remainder = divmod(total_cs, 6000)
+    secs, centis = divmod(remainder, 100)
+    return f"{minutes:02d}:{secs:02d}.{centis:02d}"
+
+
+def _build_srt(items: list[dict[str, Any]]) -> str:
+    blocks = []
+    for index, item in enumerate(items, start=1):
+        start = _subtitle_timestamp(float(item.get("start_time") or 0.0), separator=",")
+        end = _subtitle_timestamp(float(item.get("end_time") or 0.0), separator=",")
+        blocks.append(f"{index}\n{start} --> {end}\n{item.get('text') or ''}")
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def _build_lrc(items: list[dict[str, Any]]) -> str:
+    lines = [
+        f"[{_lrc_timestamp(float(item.get('start_time') or 0.0))}]{item.get('text') or ''}"
+        for item in items
+    ]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _encode_mp3_with_ffmpeg(source_wav: Path, target_mp3: Path) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise TTSServiceError("未找到 ffmpeg，已跳过 MP3 生成")
+    completed = subprocess.run(
+        [ffmpeg, "-y", "-loglevel", "error", "-i", str(source_wav), str(target_mp3)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "ffmpeg 转码失败"
+        raise TTSServiceError(detail)
+
+
+def _concatenate_wavs(
+    paths: list[Path],
+    output_path: Path,
+    *,
+    pause_ms: int,
+    trim_silence: bool = False,
+    normalize_audio: bool = False,
+    target_peak: float = 0.9,
+) -> None:
     first_params = None
     frames: list[bytes] = []
     for path in paths:
@@ -843,7 +1086,12 @@ def _concatenate_wavs(paths: list[Path], output_path: Path, *, pause_ms: int) ->
                 raise TTSServiceError(
                     "export requires matching wav channel count, sample width, and sample rate"
                 )
-            frames.append(wav_file.readframes(wav_file.getnframes()))
+            frame_block = wav_file.readframes(wav_file.getnframes())
+            if trim_silence:
+                frame_block = _trim_silence_frames(frame_block, params)
+            if normalize_audio:
+                frame_block = _normalize_peak_frames(frame_block, params, target_peak=target_peak)
+            frames.append(frame_block)
     if first_params is None:
         return
     pause_frames = int(first_params.framerate * max(0, pause_ms) / 1000)
@@ -857,6 +1105,48 @@ def _concatenate_wavs(paths: list[Path], output_path: Path, *, pause_ms: int) ->
             if index:
                 output.writeframes(pause)
             output.writeframes(frame_block)
+
+
+def _trim_silence_frames(frame_block: bytes, params: wave._wave_params) -> bytes:
+    if params.sampwidth != 2 or not frame_block:
+        return frame_block
+    samples = array("h")
+    samples.frombytes(frame_block)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    threshold = 128
+    start = 0
+    end = len(samples)
+    while start < end and abs(samples[start]) <= threshold:
+        start += params.nchannels
+    while end > start and abs(samples[end - 1]) <= threshold:
+        end -= params.nchannels
+    if start >= end:
+        return frame_block
+    trimmed = array("h", samples[start:end])
+    if sys.byteorder != "little":
+        trimmed.byteswap()
+    return trimmed.tobytes()
+
+
+def _normalize_peak_frames(
+    frame_block: bytes, params: wave._wave_params, *, target_peak: float
+) -> bytes:
+    if params.sampwidth != 2 or not frame_block:
+        return frame_block
+    samples = array("h")
+    samples.frombytes(frame_block)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    peak = max((abs(sample) for sample in samples), default=0)
+    if peak == 0:
+        return frame_block
+    target = int(32767 * min(max(target_peak, 0.1), 1.0))
+    gain = target / peak
+    normalized = array("h", (max(-32768, min(32767, int(sample * gain))) for sample in samples))
+    if sys.byteorder != "little":
+        normalized.byteswap()
+    return normalized.tobytes()
 
 
 def _utc_now() -> str:

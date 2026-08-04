@@ -1,6 +1,6 @@
 # 书弈 Agent 前端
 
-前端使用 React 19、TypeScript 和 Vite，提供小说导入、角色确认、长句台词拆分、制作任务 Planner、配音编排与结果导出工作台。
+前端使用 React 19、TypeScript 和 Vite，提供小说导入、角色确认、长句台词拆分、整章播放列表、制作任务 Planner、配音编排与结果导出工作台。
 
 ## 本地开发
 
@@ -29,6 +29,12 @@ v0.6.1 主页面侧栏新增 **项目工作区**、**质量检查面板** 和 **
 - 审稿队列调用 `/api/v1/projects/{project_id}/review-queue`，集中处理 `needs_human_review`、未选角色、超长台词和配音失败，并提供批量确认、批量改角色、批量拆分超长台词和批量重试入口。
 
 前端只保存最近项目 id 和后端地址等 UI 偏好；项目元数据、输出目录和质量检查结果以后端为准。
+
+## 整章播放与制作包导出
+
+v0.7.0 在当前章节工具栏补齐整章播放列表控制：一键播放、暂停、继续、上一句、下一句，并沿用台词卡 `playing` 高亮显示当前播放台词。导出制作包现在调用 `/api/v1/projects/{project_id}/exports/{chapter_id}`，下载 URL 同样带 project_id，避免不同项目的导出包串线。
+
+制作包提示覆盖完整 WAV/MP3、逐句音频 + manifest、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单；前端请求默认启用 `pause_ms=300`、`trim_silence=true`、`normalize_audio=true` 和 `export_formats=["wav","mp3"]`。
 
 ## 长句拆分与配音重试
 

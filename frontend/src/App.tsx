@@ -1628,6 +1628,10 @@ function App() {
   const hasGeneratedAudioUtterance = flattenedUtterances.some((utterance) =>
     Boolean(utteranceAudioSource(utterance)),
   );
+  const playableChapterQueue = useMemo(
+    () => flattenedUtterances.filter((utterance) => utteranceAudioSource(utterance)),
+    [flattenedUtterances],
+  );
   const primaryStatementParagraphId = visibleParagraphs[0]?.paragraphId ?? "";
   const roleOptions = useMemo(
     () => roles.map((role) => ({ value: role.roleId, label: role.name })),
@@ -3171,7 +3175,27 @@ function App() {
       });
   }
 
+  function ensureChapterPlaybackQueue(): UtteranceDraft[] {
+    if (chapterPlaybackQueueRef.current.length > 0) return chapterPlaybackQueueRef.current;
+    chapterPlaybackQueueRef.current = playableChapterQueue;
+    return chapterPlaybackQueueRef.current;
+  }
+
+  function playPreviousQueuedChapterAudio() {
+    const queue = ensureChapterPlaybackQueue();
+    if (queue.length === 0) {
+      setApiStatus("整章播放列表为空：当前章节没有已生成配音的台词");
+      return;
+    }
+    playQueuedChapterAudioAt(Math.max(0, chapterPlaybackIndexRef.current - 1));
+  }
+
   function playNextQueuedChapterAudio() {
+    const queue = ensureChapterPlaybackQueue();
+    if (queue.length === 0) {
+      setApiStatus("整章播放列表为空：当前章节没有已生成配音的台词");
+      return;
+    }
     playQueuedChapterAudioAt(chapterPlaybackIndexRef.current + 1);
   }
 
@@ -3199,9 +3223,7 @@ function App() {
         );
       return;
     }
-    const queue = flattenedUtterances.filter((utterance) =>
-      utteranceAudioSource(utterance),
-    );
+    const queue = playableChapterQueue;
     if (queue.length === 0) {
       setApiStatus("当前章节没有已生成配音的台词");
       return;
@@ -3382,15 +3404,19 @@ function App() {
       setApiStatus("导出制作包失败：请先选择章节");
       return;
     }
-    setApiStatus("正在导出当前章节逐条音频和 manifest");
+    setApiStatus("正在导出当前章节完整 WAV/MP3、逐句音频和 manifest");
     try {
+      const projectId = activeProject?.project_id ?? activeProjectId;
       const data = await requestJson<{
         status: string;
         item_count: number;
         missing_count: number;
         download_url: string;
         message: string;
-      }>(`/exports/${activeChapter.chapterId}`, {
+        full_audio_path?: string | null;
+        full_mp3_path?: string | null;
+        package_files?: Record<string, string | null>;
+      }>(`/projects/${encodeURIComponent(projectId)}/exports/${activeChapter.chapterId}`, {
         method: "POST",
         body: JSON.stringify({
           chapter_title: activeChapter.title,
@@ -3398,6 +3424,10 @@ function App() {
           utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
           pause_ms: 300,
           speed: 1.0,
+          trim_silence: true,
+          normalize_audio: true,
+          target_peak: 0.9,
+          export_formats: ["wav", "mp3"],
         }),
       });
       const response = await fetch(mediaRequestUrl(data.download_url));
@@ -3408,7 +3438,9 @@ function App() {
       anchor.download = `${activeChapter.title || activeChapter.chapterId}-制作包.zip`;
       anchor.click();
       URL.revokeObjectURL(objectUrl);
-      setApiStatus(`制作包导出完成：${data.item_count} 条；${data.message}`);
+      setApiStatus(
+        `制作包导出完成：${data.item_count} 条；完整 WAV/MP3、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单已写入压缩包。${data.message}`,
+      );
     } catch (error) {
       setApiStatus(apiFailureMessage("导出制作包失败", error));
     }
@@ -4314,11 +4346,32 @@ function App() {
                         ? "继续播放"
                         : "一键播放"}
                   </button>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => playPreviousQueuedChapterAudio()}
+                    disabled={!hasGeneratedAudioUtterance}
+                  >
+                    上一句
+                  </button>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => playNextQueuedChapterAudio()}
+                    disabled={!hasGeneratedAudioUtterance}
+                  >
+                    下一句
+                  </button>
                   <span>
                     {confirmed && !hasPendingHumanReview
                       ? "台词已确认，可以批量配音或导出"
                       : "请完成角色分析、配音编排并确认所有配音片段"}
                   </span>
+                </div>
+                <div className="delivery-hint" aria-label="整章播放列表控制">
+                  整章播放列表支持播放、暂停、继续、上一句、下一句；当前播放台词高亮。
+                  导出制作包包含完整 WAV/MP3、逐句音频 + manifest、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单；
+                  音频后期默认应用片段间停顿、头尾静音裁剪和响度归一化。
                 </div>
                 <div className="status-filter-bar" aria-label="状态筛选">
                   <span>状态筛选</span>

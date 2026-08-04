@@ -24,22 +24,23 @@ src="https://img.shields.io/badge/Code_License-MIT-f5de53?&color=f5de53"/></a>
 3. [项目结构](#项目结构)
 4. [本地开发](#本地开发)
 5. [API 与 OpenAPI](#api-与-openapi)
-6. [长句拆分与台词编辑增强](#长句拆分与台词编辑增强)
-7. [制作任务 Planner](#制作任务-planner)
-8. [短期与长期记忆机制](#短期与长期记忆机制)
-9. [Tool Calling Registry](#tool-calling-registry)
-10. [Story Bible RAG 与 Qdrant](#story-bible-rag-与-qdrant)
-11. [项目工作区与审稿队列](#项目工作区与审稿队列)
-12. [Agent 追踪与上下文报告](#agent-追踪与上下文报告)
-13. [Docker CPU / GPU](#docker-cpu--gpu)
-14. [环境变量](#环境变量)
-15. [GitHub Pages](#github-pages)
-16. [CNB 镜像发布模板](#cnb-镜像发布模板)
-17. [验证](#验证)
+6. [整章导出与音频制作增强](#整章导出与音频制作增强)
+7. [长句拆分与台词编辑增强](#长句拆分与台词编辑增强)
+8. [制作任务 Planner](#制作任务-planner)
+9. [短期与长期记忆机制](#短期与长期记忆机制)
+10. [Tool Calling Registry](#tool-calling-registry)
+11. [Story Bible RAG 与 Qdrant](#story-bible-rag-与-qdrant)
+12. [项目工作区与审稿队列](#项目工作区与审稿队列)
+13. [Agent 追踪与上下文报告](#agent-追踪与上下文报告)
+14. [Docker CPU / GPU](#docker-cpu--gpu)
+15. [环境变量](#环境变量)
+16. [GitHub Pages](#github-pages)
+17. [CNB 镜像发布模板](#cnb-镜像发布模板)
+18. [验证](#验证)
 
 ## 简介
 
-书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.6.6 新增长句拆分与台词编辑增强，可检测 TTS 超长台词、按标点/窗口规则拆分并校验文本守恒，拆分后自动进入配音重试队列；v0.6.5 新增制作任务 Planner，可把“把当前章节处理到可导出”拆成可执行、可复盘、可恢复的工具计划；v0.6.4 新增短期 Run Memory、长期 Story Memory 可信度策略和错误记忆防污染；v0.6.3 新增 Tool Calling Registry、声明式工具 schema、JSON-plan fallback、项目级权限隔离和 Trace Viewer 工具调用审计；v0.6.2 新增 Story Bible RAG、OpenAI-compatible embedding、可选 Qdrant 向量库、SQLite 文本检索降级和带来源引用的角色证据；v0.6.1 增加项目/书籍工作区、按 `project_id` 隔离的输出路径、生成前/导出前质量检查和审稿队列；v0.6.0 已加入 Agent Run History、Prompt SHA、token/context 预算报告和可审计追踪详情。项目同时保留 v0.5.5 的公开 v1 API、前端一键后台下载并部署 TTS 模型、OpenAI SDK 兼容文本模型配置，以及“运行时不会生成或执行模型返回 Python 代码”的安全边界。
+书弈 Agent（Shuyi Agent）是基于 Agent 的多人有声书自动配音工作台，面向中文小说配音制作。v0.7.0 新增整章导出与音频制作增强，可生成项目隔离的交付制作包，包含完整 WAV/MP3、逐句音频、manifest、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单；v0.6.6 新增长句拆分与台词编辑增强，可检测 TTS 超长台词、按标点/窗口规则拆分并校验文本守恒，拆分后自动进入配音重试队列；v0.6.5 新增制作任务 Planner，可把“把当前章节处理到可导出”拆成可执行、可复盘、可恢复的工具计划；v0.6.4 新增短期 Run Memory、长期 Story Memory 可信度策略和错误记忆防污染；v0.6.3 新增 Tool Calling Registry、声明式工具 schema、JSON-plan fallback、项目级权限隔离和 Trace Viewer 工具调用审计；v0.6.2 新增 Story Bible RAG、OpenAI-compatible embedding、可选 Qdrant 向量库、SQLite 文本检索降级和带来源引用的角色证据；v0.6.1 增加项目/书籍工作区、按 `project_id` 隔离的输出路径、生成前/导出前质量检查和审稿队列；v0.6.0 已加入 Agent Run History、Prompt SHA、token/context 预算报告和可审计追踪详情。项目同时保留 v0.5.5 的公开 v1 API、前端一键后台下载并部署 TTS 模型、OpenAI SDK 兼容文本模型配置，以及“运行时不会生成或执行模型返回 Python 代码”的安全边界。
 
 ## 快速开始
 
@@ -113,6 +114,7 @@ npm --prefix frontend run dev
 - 项目工作区：`GET /api/v1/projects`、`POST /api/v1/projects`、`GET /api/v1/projects/{project_id}`、`DELETE /api/v1/projects/{project_id}`
 - 质量检查：`POST /api/v1/projects/{project_id}/quality-check`
 - 审稿队列：`POST /api/v1/projects/{project_id}/review-queue`
+- 整章导出：`POST /api/v1/projects/{project_id}/exports/{chapter_id}`、`GET /api/v1/projects/{project_id}/downloads/exports/{filename}`；旧兼容入口 `POST /api/v1/exports/{chapter_id}` 仍可用
 - 台词编辑：`POST /api/v1/projects/{project_id}/utterances/long-text/detect`、`POST /utterances/{utterance_id}/split-long-text`、`POST /utterances/merge`、`POST /utterances/bulk-role`、`POST /utterances/retry-queue`
 - Story Memory 索引：`POST /api/v1/projects/{project_id}/memory/index`
 - Story Memory 检索：`POST /api/v1/projects/{project_id}/memory/search`
@@ -129,6 +131,14 @@ npm --prefix frontend run dev
 - OpenAPI JSON：`http://127.0.0.1:8000/openapi.json`
 - Swagger UI：`http://127.0.0.1:8000/docs`
 - v1 接口默认公开访问，不再需要后端访问令牌；文本模型 API Key 可在前端临时输入，后端只在运行内存中读取，不写入持久化快照。
+
+## 整章导出与音频制作增强
+
+v0.7.0 将项目从“生成片段”推进到“可交付制作包”。项目级导出入口 `POST /api/v1/projects/{project_id}/exports/{chapter_id}` 会把产物写入 `outputs/{project_id}/exports/`，下载通过同项目下载路由返回，避免多项目导出串线。旧版 `POST /api/v1/exports/{chapter_id}` 保留为兼容入口。
+
+制作包包含逐句音频、`manifest.json`、完整 `chapter_full.wav`，并在请求 `export_formats=["wav","mp3"]` 时尝试通过 ffmpeg 生成 `chapter_full.mp3`；若本机缺少 ffmpeg，manifest 会记录 `mp3_error`，WAV 和其他交付物仍可使用。包内还会生成 `script.csv`、`subtitles.srt`、`subtitles.lrc`、`roles.csv`、`voices.csv` 和 `failures.csv`，便于交付给剪辑、审稿和后期流程。
+
+音频后期参数随 manifest 记录：`pause_ms` 控制片段间停顿，`trim_silence` 对 16-bit WAV 做头尾静音裁剪，`normalize_audio` 按目标峰值做简单响度归一化。前端整章播放列表支持播放、暂停、继续、上一句、下一句，并继续高亮当前播放台词。这个阶段的面试讲解重点是：如何把 Agent 输出变成可交付资产、如何管理后端文件生成/下载、以及如何用项目路径隔离导出包。
 
 ## 长句拆分与台词编辑增强
 
