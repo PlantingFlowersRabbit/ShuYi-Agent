@@ -206,6 +206,7 @@ small {
 .main-panel,
 .library-page,
 .model-page,
+.memory-page,
 .trace-page {
   min-width: 0;
 }
@@ -457,9 +458,94 @@ small {
 
 .project-workspace-panel,
 .quality-panel,
+.blocker-panel,
+.production-primary-panel,
 .planner-panel,
 .review-queue-panel {
   align-content: start;
+}
+
+.production-primary-panel {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+}
+
+.production-primary-button {
+  width: 100%;
+  border-radius: 10px;
+  background: #2563eb;
+  color: #ffffff;
+  padding: 12px 16px;
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.production-step-badge,
+.blocker-count {
+  width: fit-content;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.blocker-panel {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.blocker-action-row,
+.bulk-role-row,
+.export-preset-row,
+.export-advanced-grid,
+.memory-correction-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.blocker-action-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.bulk-role-row {
+  border: 1px dashed #f59e0b;
+  border-radius: 10px;
+  background: #fffbeb;
+  padding: 10px;
+}
+
+.blocker-list,
+.memory-fact-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.blocker-card,
+.memory-fact-card {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #334155;
+  padding: 10px;
+  text-align: left;
+  white-space: normal;
+}
+
+.blocker-card strong {
+  color: #b45309;
+  font-size: 12px;
+}
+
+.blocker-card span,
+.memory-fact-card span {
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .project-roots {
@@ -725,6 +811,31 @@ small {
   letter-spacing: 0;
 }
 
+.chapter-primary-action {
+  display: grid;
+  gap: 8px;
+  min-width: min(100%, 320px);
+}
+
+.advanced-action-panel {
+  flex-basis: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 8px 10px;
+}
+
+.advanced-action-panel summary {
+  color: #475569;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.advanced-action-panel .gate {
+  margin-top: 10px;
+}
+
 .gate span {
   color: #64748b;
   font-size: 13px;
@@ -740,6 +851,64 @@ small {
   font-size: 12px;
   font-weight: 700;
   line-height: 1.5;
+}
+
+.export-settings-panel {
+  display: grid;
+  flex-basis: 100%;
+  gap: 10px;
+  border: 1px solid #ccfbf1;
+  border-radius: 10px;
+  background: #f0fdfa;
+  padding: 10px;
+}
+
+.export-preset-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.export-preset-row button {
+  display: grid;
+  gap: 4px;
+  min-height: 76px;
+  border: 1px solid #99f6e4;
+  background: #ffffff;
+  color: #0f766e;
+  padding: 10px;
+  text-align: left;
+  white-space: normal;
+}
+
+.export-preset-row button.active {
+  border-color: #0f766e;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.14);
+}
+
+.export-advanced-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.memory-control-panel {
+  grid-column: 1 / -1;
+}
+
+.memory-evidence-panel,
+.memory-correction-panel {
+  align-content: start;
+}
+
+.memory-two-column {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.memory-fact-card strong {
+  color: #334155;
+}
+
+.memory-correction-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .status-filter-bar {
@@ -1139,6 +1308,10 @@ small {
   grid-template-columns: minmax(280px, 34%) minmax(0, 1fr);
 }
 
+.memory-page {
+  grid-template-columns: minmax(280px, 30%) minmax(0, 1fr);
+}
+
 .trace-list-panel,
 .trace-detail-panel {
   align-content: start;
@@ -1356,6 +1529,7 @@ label {
   .chapter-reader,
   .statement-panel,
   .library-page,
+  .memory-page,
   .model-page,
   .trace-page {
     overflow: visible;
@@ -1363,6 +1537,12 @@ label {
 
   .chapter-workspace-grid,
   .two-column,
+  .memory-page,
+  .memory-two-column,
+  .memory-correction-grid,
+  .export-preset-row,
+  .export-advanced-grid,
+  .blocker-action-row,
   .model-page,
   .trace-page,
   .trace-metric-grid,

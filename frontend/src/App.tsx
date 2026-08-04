@@ -81,8 +81,9 @@ export function isRoleDeleteReferenceConflict(
   return typeof referencedCount === "number" && referencedCount > 0;
 }
 
-type Page = "main" | "voices" | "models" | "agent-runs";
+type Page = "main" | "voices" | "memory" | "agent-runs" | "models";
 type VoiceMode = "voice_cloning" | "voice_design";
+type ExportPreset = "preview" | "delivery" | "post";
 
 type Chapter = {
   chapterId: string;
@@ -405,6 +406,40 @@ type ReviewQueueResponse = {
   filters?: Record<string, string>;
 };
 
+type StoryBibleFact = {
+  fact_id: string;
+  project_id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  confidence:
+    | "model_suggested"
+    | "user_confirmed"
+    | "system_verified"
+    | "rejected"
+    | string;
+  source_id?: string;
+  source_type?: string;
+  writer?: string;
+  notes?: string;
+  metadata?: Record<string, unknown>;
+  updated_at?: string;
+};
+
+type StoryBibleResponse = {
+  project_id: string;
+  facts: StoryBibleFact[];
+};
+
+type StoryMemoryContextResponse = {
+  project_id: string;
+  query: string;
+  facts_for_prompt: StoryBibleFact[];
+  candidate_facts: StoryBibleFact[];
+  rejected_facts: StoryBibleFact[];
+  policy?: Record<string, unknown>;
+};
+
 type PlannerStep = {
   step_id: string;
   title: string;
@@ -474,6 +509,8 @@ type ProjectQualityPayload = {
   max_utterance_chars: number;
   filters?: Record<string, string>;
 };
+
+type ExportOptions = (typeof EXPORT_PRESETS)[ExportPreset];
 
 type BatchDubbingStatusPayload = {
   success_count: number;
@@ -619,9 +656,68 @@ const QUALITY_SUMMARY_KEYS = Object.keys(
   defaultQualitySummary,
 ) as (keyof QualitySummary)[];
 
+const BLOCKER_RECOMMENDATIONS: Record<keyof QualitySummary, string> = {
+  unsegmented: "先补齐章节段落与台词划分",
+  unselected_role: "为台词选择明确角色后再继续",
+  undubbed: "批量生成或重试缺失配音",
+  dubbing_failed: "查看失败原因，修复后加入重试队列",
+  long_utterance: "拆分超长台词并校验文本守恒",
+  duplicate_voice: "调整重复音色，避免角色混淆",
+  role_without_voice: "为角色绑定或生成音色",
+  needs_human_review: "人工确认低置信度角色或台词",
+};
+
+const EXPORT_PRESETS: Record<
+  ExportPreset,
+  {
+    label: string;
+    description: string;
+    pauseMs: number;
+    speed: number;
+    trimSilence: boolean;
+    normalizeAudio: boolean;
+    targetPeak: number;
+    exportFormats: ("wav" | "mp3")[];
+  }
+> = {
+  preview: {
+    label: "试听版",
+    description: "停顿短、保留 WAV，适合快速听审。",
+    pauseMs: 180,
+    speed: 1.0,
+    trimSilence: false,
+    normalizeAudio: false,
+    targetPeak: 0.9,
+    exportFormats: ["wav"],
+  },
+  delivery: {
+    label: "交付版",
+    description: "默认片段停顿、头尾静音裁剪和响度归一化。",
+    pauseMs: 300,
+    speed: 1.0,
+    trimSilence: true,
+    normalizeAudio: true,
+    targetPeak: 0.9,
+    exportFormats: ["wav", "mp3"],
+  },
+  post: {
+    label: "后期版",
+    description: "停顿更长，导出 WAV/MP3，便于剪辑后期处理。",
+    pauseMs: 500,
+    speed: 1.0,
+    trimSilence: true,
+    normalizeAudio: true,
+    targetPeak: 0.86,
+    exportFormats: ["wav", "mp3"],
+  },
+};
+
 function initialPageFromUrl(): Page {
   const page = new URLSearchParams(window.location.search).get("page");
-  return page === "voices" || page === "models" || page === "agent-runs"
+  return page === "voices" ||
+    page === "memory" ||
+    page === "models" ||
+    page === "agent-runs"
     ? page
     : "main";
 }
@@ -1555,11 +1651,30 @@ function App() {
     total_count: 0,
   });
   const [qualityStatus, setQualityStatus] =
-    useState("质量检查面板等待当前项目数据。");
+    useState("制作阻塞项等待当前项目数据。");
+  const [bulkRoleTargetId, setBulkRoleTargetId] = useState("");
+  const [bulkRolePreviewArmed, setBulkRolePreviewArmed] = useState(false);
   const [plannerGoal, setPlannerGoal] = useState("把当前章节处理到可导出");
   const [plannerRun, setPlannerRun] = useState<PlannerRun | null>(null);
   const [plannerStatus, setPlannerStatus] =
-    useState("制作任务 Planner 等待目标。");
+    useState("智能下一步助手会根据当前章节状态给出建议。");
+  const [exportPreset, setExportPreset] =
+    useState<ExportPreset>("delivery");
+  const [exportOptions, setExportOptions] = useState<ExportOptions>(
+    EXPORT_PRESETS.delivery,
+  );
+  const [storyBibleFacts, setStoryBibleFacts] = useState<StoryBibleFact[]>([]);
+  const [memoryContext, setMemoryContext] =
+    useState<StoryMemoryContextResponse | null>(null);
+  const [memoryQuery, setMemoryQuery] = useState("");
+  const [memoryStatus, setMemoryStatus] =
+    useState("项目记忆会展示角色证据、设定记忆和用户纠错。");
+  const [memoryCorrection, setMemoryCorrection] = useState({
+    subject: "",
+    predicate: "alias",
+    object: "",
+    notes: "",
+  });
   const [chapterPlaybackState, setChapterPlaybackState] = useState<
     "idle" | "playing" | "paused"
   >("idle");
@@ -1637,6 +1752,111 @@ function App() {
     () => roles.map((role) => ({ value: role.roleId, label: role.name })),
     [roles],
   );
+  const bulkRoleChangeIds = useMemo(
+    () => [
+      ...new Set(
+        reviewQueue.items
+          .filter(
+            (item) =>
+              item.issue_type === "unselected_role" ||
+              item.actions?.includes("change_role"),
+          )
+          .flatMap((item) => (item.utterance_id ? [item.utterance_id] : [])),
+      ),
+    ],
+    [reviewQueue.items],
+  );
+  const blockerItems = useMemo(() => {
+    const source = reviewQueue.items.length > 0 ? reviewQueue.items : qualityReport.issues;
+    const seen = new Set<string>();
+    return source.filter((item) => {
+      const id = item.issue_id || `${item.issue_type}:${item.utterance_id ?? item.paragraph_id ?? item.role_id ?? item.message}`;
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }, [qualityReport.issues, reviewQueue.items]);
+  const productionPrimaryAction = useMemo(() => {
+    if (!hasSplitChapters) {
+      return {
+        label: "开始制作",
+        detail: novelPreview
+          ? "继续解析小说章节，进入制作流程。"
+          : "先上传小说，随后解析章节并进入制作流程。",
+        disabled: false,
+      };
+    }
+    if (!activeChapter) {
+      return {
+        label: "继续下一步",
+        detail: "请选择一个章节后继续制作。",
+        disabled: chapters.length === 0,
+      };
+    }
+    if (blockerItems.length > 0 || hasPendingHumanReview) {
+      return {
+        label: "处理阻塞项",
+        detail: `当前有 ${Math.max(blockerItems.length, 1)} 个制作阻塞项需要处理。`,
+        disabled: false,
+      };
+    }
+    if (roles.length === 0 || flattenedUtterances.length === 0) {
+      return {
+        label: "开始制作",
+        detail: "运行 Agent 生成角色、台词和初始配音编排。",
+        disabled: agentRunRunning || visibleParagraphs.length === 0,
+      };
+    }
+    if (agentRunWaitingForRoles && agentRunThreadId) {
+      return {
+        label: "继续下一步",
+        detail: "角色已分析，继续执行配音编排。",
+        disabled: agentRunRunning,
+      };
+    }
+    if (!confirmed) {
+      return {
+        label: "继续下一步",
+        detail: "确认已选台词与角色后进入配音生成。",
+        disabled: flattenedUtterances.length === 0,
+      };
+    }
+    if (hasUngeneratedAudioUtterance) {
+      return {
+        label: "继续下一步",
+        detail: "批量生成当前章节缺失的配音。",
+        disabled: false,
+      };
+    }
+    if (hasGeneratedAudioUtterance) {
+      return {
+        label: "继续下一步",
+        detail: "导出制作包；需要听审时可在高级操作中播放整章。",
+        disabled: false,
+      };
+    }
+    return {
+      label: "处理阻塞项",
+      detail: "先刷新阻塞项，确认当前章节是否可继续。",
+      disabled: false,
+    };
+  }, [
+    activeChapter,
+    agentRunRunning,
+    agentRunThreadId,
+    agentRunWaitingForRoles,
+    blockerItems.length,
+    chapters.length,
+    confirmed,
+    flattenedUtterances.length,
+    hasGeneratedAudioUtterance,
+    hasPendingHumanReview,
+    hasSplitChapters,
+    hasUngeneratedAudioUtterance,
+    novelPreview,
+    roles.length,
+    visibleParagraphs.length,
+  ]);
 
   function resetAgentRunState() {
     setAiRoleCandidates([]);
@@ -1792,7 +2012,7 @@ function App() {
   async function runQualityCheck(purpose: "generate" | "export" = "generate") {
     const projectId = activeProject?.project_id ?? activeProjectId;
     setQualityStatus(
-      purpose === "export" ? "正在执行导出前检查" : "正在执行生成前检查",
+      purpose === "export" ? "正在刷新导出阻塞项" : "正在刷新制作阻塞项",
     );
     try {
       const data = await requestJson<QualityCheckResponse>(
@@ -1806,15 +2026,15 @@ function App() {
       setQualityStatus(
         purpose === "export"
           ? data.can_export
-            ? "导出前检查通过"
-            : `导出前检查发现 ${data.issues.length} 个问题`
+            ? "导出阻塞项已清空"
+            : `导出仍有 ${data.issues.length} 个阻塞项`
           : data.can_generate
-            ? "生成前检查通过"
-            : `生成前检查发现 ${data.issues.length} 个问题`,
+            ? "制作阻塞项已清空，可以继续生成"
+            : `制作仍有 ${data.issues.length} 个阻塞项`,
       );
       void loadReviewQueue();
     } catch (error) {
-      setQualityStatus(apiFailureMessage("质量检查失败", error));
+      setQualityStatus(apiFailureMessage("制作阻塞项刷新失败", error));
     }
   }
 
@@ -1834,9 +2054,9 @@ function App() {
       );
       setReviewQueue(data);
       if (issueType)
-        setQualityStatus(`审稿队列已筛选：${QUALITY_LABELS[issueType]}`);
+        setQualityStatus(`制作阻塞项已筛选：${QUALITY_LABELS[issueType]}`);
     } catch (error) {
-      setQualityStatus(apiFailureMessage("审稿队列读取失败", error));
+      setQualityStatus(apiFailureMessage("制作阻塞项读取失败", error));
     }
   }
 
@@ -1916,13 +2136,67 @@ function App() {
     }
   }
 
+  async function refreshProductionAssistant() {
+    if (!hasSplitChapters || !activeChapter) {
+      setPlannerStatus("智能下一步助手：先上传小说、解析章节并选择当前章节。");
+      return;
+    }
+    if (!plannerRun || plannerRun.chapter_id !== activeChapterId) {
+      await generatePlannerPlan();
+      return;
+    }
+    await reviewPlannerPlan();
+  }
+
+  async function handleProductionPrimaryAction() {
+    if (!hasSplitChapters) {
+      if (uploadedNovelFileRef.current || fullNovelTextRef.current.trim()) {
+        await runAiChapterSplit();
+      } else {
+        fileInputRef.current?.click();
+        setApiStatus("请选择小说文件，随后点击开始制作继续解析章节");
+      }
+      return;
+    }
+    if (!activeChapter) {
+      setApiStatus("请先选择一个章节，再继续制作");
+      return;
+    }
+    if (blockerItems.length > 0 || hasPendingHumanReview) {
+      await runQualityCheck("generate");
+      if (blockerItems[0]) focusQualityIssue(blockerItems[0]);
+      return;
+    }
+    if (roles.length === 0 || flattenedUtterances.length === 0) {
+      await runAiRoleAnalysis();
+      return;
+    }
+    if (agentRunWaitingForRoles && agentRunThreadId) {
+      await runAiRoleMatching();
+      return;
+    }
+    if (!confirmed) {
+      confirmAllReadyUtterances();
+      return;
+    }
+    if (hasUngeneratedAudioUtterance) {
+      await generateChapterDubbing();
+      return;
+    }
+    if (hasGeneratedAudioUtterance) {
+      await exportChapterAudio();
+      return;
+    }
+    await runQualityCheck("generate");
+  }
+
   function focusQualityIssue(issue: QualityIssue) {
     if (issue.utterance_id) {
       const utterance = flattenedUtterances.find(
         (item) => item.utteranceId === issue.utterance_id,
       );
       if (utterance) {
-        focusUtterance(utterance, `已跳转到审稿队列问题：${issue.message}`);
+        focusUtterance(utterance, `已跳转到制作阻塞项问题：${issue.message}`);
         return;
       }
     }
@@ -1967,24 +2241,22 @@ function App() {
   }
 
   async function bulkChangeReviewRole() {
-    const fallbackRole = roles.find((role) => role.voiceResourceId) ?? roles[0];
-    if (!fallbackRole) {
-      setQualityStatus("批量改角色失败：请先创建角色");
+    const targetRole = roles.find((role) => role.roleId === bulkRoleTargetId);
+    if (!targetRole) {
+      setBulkRolePreviewArmed(false);
+      setQualityStatus("批量改角色失败：请选择目标角色");
       return;
     }
-    const reviewIds = [
-      ...new Set(
-        reviewQueue.items
-          .filter(
-            (item) =>
-              item.issue_type === "unselected_role" ||
-              item.actions?.includes("change_role"),
-          )
-          .flatMap((item) => (item.utterance_id ? [item.utterance_id] : [])),
-      ),
-    ];
-    if (reviewIds.length === 0) {
-      setQualityStatus("审稿队列没有可批量改角色的台词");
+    if (bulkRoleChangeIds.length === 0) {
+      setBulkRolePreviewArmed(false);
+      setQualityStatus("制作阻塞项没有可批量改角色的台词");
+      return;
+    }
+    if (!bulkRolePreviewArmed) {
+      setBulkRolePreviewArmed(true);
+      setQualityStatus(
+        `预览影响：${bulkRoleChangeIds.length} 条台词将绑定到 ${targetRole.name}；再次点击确认批量改角色`,
+      );
       return;
     }
     const projectId = activeProject?.project_id ?? activeProjectId;
@@ -1995,9 +2267,9 @@ function App() {
           method: "POST",
           body: JSON.stringify({
             ...projectQualityPayload(),
-            utterance_ids: reviewIds,
-            role_id: fallbackRole.roleId,
-            speaker_name: fallbackRole.name,
+            utterance_ids: bulkRoleChangeIds,
+            role_id: targetRole.roleId,
+            speaker_name: targetRole.name,
           }),
         },
       );
@@ -2005,10 +2277,12 @@ function App() {
         fromApiUtteranceEditGroups(data.utterances_by_paragraph, paragraphs, roles),
       );
       setConfirmed(false);
+      setBulkRolePreviewArmed(false);
       setQualityStatus(
-        `批量改角色完成：${data.updated_count ?? reviewIds.length} 条台词已绑定到 ${fallbackRole.name}`,
+        `批量改角色完成：${data.updated_count ?? bulkRoleChangeIds.length} 条台词已绑定到 ${targetRole.name}`,
       );
     } catch (error) {
+      setBulkRolePreviewArmed(false);
       setQualityStatus(apiFailureMessage("批量改角色失败", error));
     }
   }
@@ -2018,7 +2292,7 @@ function App() {
       (item) => item.issue_type === "long_utterance" && item.utterance_id,
     );
     if (longItems.length === 0) {
-      setQualityStatus("审稿队列没有可批量拆分的超长台词");
+      setQualityStatus("制作阻塞项没有可批量拆分的超长台词");
       return;
     }
     let currentGroups = utterancesByParagraph;
@@ -2101,7 +2375,7 @@ function App() {
       retryIds.has(utterance.utteranceId),
     );
     if (retryUtterances.length === 0) {
-      setQualityStatus("审稿队列没有可批量重试的配音失败台词");
+      setQualityStatus("制作阻塞项没有可批量重试的配音失败台词");
       return;
     }
     try {
@@ -2191,11 +2465,11 @@ function App() {
       setSelectedAgentTrace((current) => current ?? data.runs[0] ?? null);
       setAgentTraceStatus(
         data.runs.length
-          ? `已载入 ${data.runs.length} 条 Agent 追踪`
+          ? `已载入 ${data.runs.length} 条 运行审计`
           : "暂无 Agent run 记录",
       );
     } catch (error) {
-      setAgentTraceStatus(apiFailureMessage("Agent追踪读取失败", error));
+      setAgentTraceStatus(apiFailureMessage("运行审计读取失败", error));
     }
   }
 
@@ -2207,7 +2481,78 @@ function App() {
       );
       setSelectedAgentTrace(data.trace);
     } catch (error) {
-      setAgentTraceStatus(apiFailureMessage("Agent追踪详情读取失败", error));
+      setAgentTraceStatus(apiFailureMessage("运行审计详情读取失败", error));
+    }
+  }
+
+  async function loadStoryBible() {
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    setMemoryStatus("正在读取项目记忆");
+    try {
+      const data = await requestJson<StoryBibleResponse>(
+        `/projects/${encodeURIComponent(projectId)}/story-bible`,
+      );
+      setStoryBibleFacts(data.facts);
+      setMemoryStatus(
+        data.facts.length
+          ? `已载入 ${data.facts.length} 条项目记忆`
+          : "项目记忆为空，可先索引正文或手动写入用户纠错",
+      );
+    } catch (error) {
+      setMemoryStatus(apiFailureMessage("项目记忆读取失败", error));
+    }
+  }
+
+  async function searchStoryMemoryContext() {
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    const query = memoryQuery.trim() || activeChapter?.title || "角色";
+    setMemoryStatus(`正在检索项目记忆：${query}`);
+    try {
+      const data = await requestJson<StoryMemoryContextResponse>(
+        `/projects/${encodeURIComponent(projectId)}/story-bible/memory-context?query=${encodeURIComponent(query)}`,
+      );
+      setMemoryContext(data);
+      setMemoryStatus(
+        `记忆上下文已更新：可信 ${data.facts_for_prompt.length} 条，候选 ${data.candidate_facts.length} 条，已拒绝 ${data.rejected_facts.length} 条`,
+      );
+    } catch (error) {
+      setMemoryStatus(apiFailureMessage("项目记忆检索失败", error));
+    }
+  }
+
+  async function saveMemoryCorrection() {
+    const subject = memoryCorrection.subject.trim();
+    const predicate = memoryCorrection.predicate.trim();
+    const object = memoryCorrection.object.trim();
+    if (!subject || !predicate || !object) {
+      setMemoryStatus("用户纠错需要填写主体、关系和事实内容");
+      return;
+    }
+    const projectId = activeProject?.project_id ?? activeProjectId;
+    try {
+      const data = await requestJson<{ fact: StoryBibleFact }>(
+        `/projects/${encodeURIComponent(projectId)}/story-bible/facts`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            subject,
+            predicate,
+            object,
+            notes: memoryCorrection.notes,
+            source_type: "user_correction",
+            writer: "user",
+            confidence: "user_confirmed",
+          }),
+        },
+      );
+      setStoryBibleFacts((current) => [
+        data.fact,
+        ...current.filter((fact) => fact.fact_id !== data.fact.fact_id),
+      ]);
+      setMemoryCorrection({ subject: "", predicate: "alias", object: "", notes: "" });
+      setMemoryStatus(`用户纠错已写入：${data.fact.subject} ${data.fact.predicate}`);
+    } catch (error) {
+      setMemoryStatus(apiFailureMessage("用户纠错写入失败", error));
     }
   }
 
@@ -2263,6 +2608,7 @@ function App() {
 
   useEffect(() => {
     if (page === "agent-runs") void loadAgentRunHistory();
+    if (page === "memory") void loadStoryBible();
   }, [page]);
 
   useEffect(() => {
@@ -3422,12 +3768,12 @@ function App() {
           chapter_title: activeChapter.title,
           roles: roles.map(toApiRole),
           utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
-          pause_ms: 300,
-          speed: 1.0,
-          trim_silence: true,
-          normalize_audio: true,
-          target_peak: 0.9,
-          export_formats: ["wav", "mp3"],
+          pause_ms: exportOptions.pauseMs,
+          speed: exportOptions.speed,
+          trim_silence: exportOptions.trimSilence,
+          normalize_audio: exportOptions.normalizeAudio,
+          target_peak: exportOptions.targetPeak,
+          export_formats: exportOptions.exportFormats,
         }),
       });
       const response = await fetch(mediaRequestUrl(data.download_url));
@@ -3439,7 +3785,7 @@ function App() {
       anchor.click();
       URL.revokeObjectURL(objectUrl);
       setApiStatus(
-        `制作包导出完成：${data.item_count} 条；完整 WAV/MP3、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单已写入压缩包。${data.message}`,
+        `${EXPORT_PRESETS[exportPreset].label}制作包导出完成：${data.item_count} 条；完整 WAV/MP3、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单已写入压缩包。${data.message}`,
       );
     } catch (error) {
       setApiStatus(apiFailureMessage("导出制作包失败", error));
@@ -3812,6 +4158,29 @@ function App() {
                 </div>
               </section>
 
+              <section className="panel production-primary-panel">
+                <div className="section-heading">
+                  <div>
+                    <div className="section-title">一键继续制作</div>
+                    <small>主流程只需要跟随这个按钮；高级操作仍保留在当前章节区。</small>
+                  </div>
+                  <span className="production-step-badge">
+                    {workflowState.mode === "automatic" ? "自动" : "分步"}
+                  </span>
+                </div>
+                <button
+                  className="production-primary-button"
+                  type="button"
+                  disabled={productionPrimaryAction.disabled}
+                  onClick={() => void handleProductionPrimaryAction()}
+                >
+                  {productionPrimaryAction.label}
+                </button>
+                <small className="status-message">
+                  {productionPrimaryAction.detail}
+                </small>
+              </section>
+
               <section className="panel project-workspace-panel">
                 <div className="section-heading">
                   <div>
@@ -3888,14 +4257,15 @@ function App() {
                 </div>
               </section>
 
-              <section className="panel quality-panel">
+              <section className="panel blocker-panel">
                 <div className="section-heading">
                   <div>
-                    <div className="section-title">质量检查面板</div>
+                    <div className="section-title">制作阻塞项</div>
                     <small>
-                      生成前检查和导出前检查共用当前章节、角色、台词与配音状态。
+                      汇总生成、导出和人工复核问题；每条都给出影响和推荐操作。
                     </small>
                   </div>
+                  <strong className="blocker-count">{blockerItems.length}</strong>
                 </div>
                 <div className="toolbar-row">
                   <button
@@ -3903,17 +4273,17 @@ function App() {
                     type="button"
                     onClick={() => void runQualityCheck("generate")}
                   >
-                    生成前检查
+                    刷新阻塞项
                   </button>
                   <button
                     className="tool-button amber"
                     type="button"
                     onClick={() => void runQualityCheck("export")}
                   >
-                    导出前检查
+                    导出阻塞项
                   </button>
                 </div>
-                <div className="quality-summary-grid" aria-label="质量检查统计">
+                <div className="quality-summary-grid" aria-label="制作阻塞项统计">
                   {QUALITY_SUMMARY_KEYS.map((key) => (
                     <button
                       className={
@@ -3930,58 +4300,133 @@ function App() {
                     </button>
                   ))}
                 </div>
-                <small className="status-message" aria-label="质量检查反馈">
+                <small className="status-message" aria-label="制作阻塞项反馈">
                   {qualityStatus}
                 </small>
 
-                <div className="planner-panel" aria-label="制作任务 Planner">
+                <div className="blocker-action-row">
+                  <button
+                    className="tool-button teal"
+                    type="button"
+                    onClick={() => bulkConfirmReviewItems()}
+                  >
+                    批量确认
+                  </button>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => void bulkSplitLongUtterances()}
+                  >
+                    批量拆分超长台词
+                  </button>
+                  <button
+                    className="tool-button sky"
+                    type="button"
+                    onClick={() => void bulkRetryDubbing()}
+                  >
+                    批量重试
+                  </button>
+                </div>
+                <div className="bulk-role-row">
+                  <label>
+                    目标角色
+                    <select
+                      value={bulkRoleTargetId}
+                      onChange={(event) => {
+                        setBulkRoleTargetId(event.target.value);
+                        setBulkRolePreviewArmed(false);
+                      }}
+                    >
+                      <option value="">请选择目标角色</option>
+                      {roles.map((role) => (
+                        <option key={role.roleId} value={role.roleId}>
+                          {role.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    className="tool-button amber"
+                    type="button"
+                    disabled={bulkRoleChangeIds.length === 0}
+                    onClick={() => void bulkChangeReviewRole()}
+                  >
+                    {bulkRolePreviewArmed ? "确认批量改角色" : "预览批量改角色"}
+                  </button>
+                  <small>
+                    预览影响 {bulkRoleChangeIds.length} 条台词；选择目标角色后需再次确认。
+                  </small>
+                </div>
+                <div className="review-filter-row" aria-label="阻塞项筛选">
+                  {(
+                    [
+                      "needs_human_review",
+                      "unselected_role",
+                      "long_utterance",
+                      "dubbing_failed",
+                    ] as (keyof QualitySummary)[]
+                  ).map((issueType) => (
+                    <button
+                      key={issueType}
+                      type="button"
+                      onClick={() => void loadReviewQueue(issueType)}
+                    >
+                      {QUALITY_LABELS[issueType]}
+                    </button>
+                  ))}
+                </div>
+                <div className="blocker-list" aria-label="制作阻塞项列表">
+                  {blockerItems.length === 0 ? (
+                    <small>暂无制作阻塞项；刷新后会显示需要人工处理的事项。</small>
+                  ) : (
+                    blockerItems.map((item) => (
+                      <button
+                        className="blocker-card"
+                        key={item.issue_id}
+                        type="button"
+                        onClick={() => focusQualityIssue(item)}
+                      >
+                        <strong>{QUALITY_LABELS[item.issue_type]}</strong>
+                        <span>严重级别：{item.severity || "warning"}</span>
+                        <span>影响：{item.message}</span>
+                        <small>
+                          推荐操作：{BLOCKER_RECOMMENDATIONS[item.issue_type]}
+                        </small>
+                        <small>
+                          处理状态：{(item.actions ?? []).join(" / ") || "jump"}
+                        </small>
+                      </button>
+                    ))
+                  )}
+                </div>
+
+                <div className="planner-panel" aria-label="智能下一步助手">
                   <div className="section-heading">
                     <div>
-                      <div className="section-title">制作任务 Planner</div>
-                      <small>把章节目标拆成可执行、可复盘、可恢复的工具计划。</small>
+                      <div className="section-title">智能下一步助手</div>
+                      <small>
+                        目标：{plannerGoal}。助手会把当前章节状态翻译成下一步建议。
+                      </small>
                     </div>
                     <span className={`planner-status ${plannerRun?.status ?? "idle"}`}>
                       {plannerRun?.status ?? "idle"}
                     </span>
                   </div>
-                  <input
-                    aria-label="Planner目标"
-                    value={plannerGoal}
-                    onChange={(event) => setPlannerGoal(event.target.value)}
-                  />
-                  <div className="toolbar-row compact">
-                    <button
-                      className="tool-button purple"
-                      type="button"
-                      onClick={() => void generatePlannerPlan()}
-                    >
-                      生成计划
-                    </button>
-                    <button
-                      className="tool-button teal"
-                      type="button"
-                      disabled={!plannerRun}
-                      onClick={() => void executePlannerPlan()}
-                    >
-                      执行计划
-                    </button>
-                    <button
-                      className="tool-button amber"
-                      type="button"
-                      disabled={!plannerRun}
-                      onClick={() => void reviewPlannerPlan()}
-                    >
-                      复盘计划
-                    </button>
-                  </div>
-                  <small className="status-message" aria-label="Planner反馈">
+                  <button
+                    className="tool-button purple"
+                    type="button"
+                    onClick={() => void refreshProductionAssistant()}
+                  >
+                    刷新建议
+                  </button>
+                  <small className="status-message" aria-label="智能下一步助手反馈">
                     {plannerStatus}
                   </small>
-                  <div className="planner-step-list" aria-label="Planner计划树">
+                  <div className="planner-step-list" aria-label="智能下一步建议">
                     {!plannerRun ? (
-                      <small>尚未生成计划，默认目标是“把当前章节处理到可导出”。</small>
+                      <small>尚未生成建议；点击刷新建议或使用主按钮继续制作。</small>
                     ) : (
-                      plannerRun.steps.map((step, index) => (
+                      plannerRun.steps.slice(0, 4).map((step, index) => (
                         <article
                           className={`planner-step-card ${step.status}`}
                           key={step.step_id}
@@ -4011,95 +4456,6 @@ function App() {
                       ))}
                     </div>
                   )}
-                </div>
-
-                <div className="review-queue-panel" aria-label="审稿队列">
-                  <div className="section-heading">
-                    <div>
-                      <div className="section-title">审稿队列</div>
-                      <small>
-                        集中处理
-                        needs_human_review、低置信度角色、超长台词和配音失败。
-                      </small>
-                    </div>
-                    <button
-                      className="tool-button sky"
-                      type="button"
-                      onClick={() => void loadReviewQueue()}
-                    >
-                      刷新队列
-                    </button>
-                  </div>
-                  <div className="toolbar-row compact">
-                    <button
-                      className="tool-button teal"
-                      type="button"
-                      onClick={() => bulkConfirmReviewItems()}
-                    >
-                      批量确认
-                    </button>
-                    <button
-                      className="tool-button amber"
-                      type="button"
-                      onClick={() => void bulkChangeReviewRole()}
-                    >
-                      批量改角色
-                    </button>
-                    <button
-                      className="tool-button sky"
-                      type="button"
-                      onClick={() => void bulkSplitLongUtterances()}
-                    >
-                      批量拆分超长台词
-                    </button>
-                    <button
-                      className="tool-button sky"
-                      type="button"
-                      onClick={() => void bulkRetryDubbing()}
-                    >
-                      批量重试
-                    </button>
-                  </div>
-                  <div className="review-filter-row" aria-label="审稿筛选">
-                    {(
-                      [
-                        "needs_human_review",
-                        "unselected_role",
-                        "long_utterance",
-                        "dubbing_failed",
-                      ] as (keyof QualitySummary)[]
-                    ).map((issueType) => (
-                      <button
-                        key={issueType}
-                        type="button"
-                        onClick={() => void loadReviewQueue(issueType)}
-                      >
-                        {QUALITY_LABELS[issueType]}
-                      </button>
-                    ))}
-                  </div>
-                  <div className="review-item-list">
-                    {reviewQueue.items.length === 0 ? (
-                      <small>审稿队列暂无可处理项。</small>
-                    ) : (
-                      reviewQueue.items.map((item) => (
-                        <button
-                          className="review-item-card"
-                          key={item.issue_id}
-                          type="button"
-                          onClick={() => focusQualityIssue(item)}
-                        >
-                          <strong>{QUALITY_LABELS[item.issue_type]}</strong>
-                          <span>{item.message}</span>
-                          <small>
-                            {item.chapter_id || "整本书"} ·{" "}
-                            {item.paragraph_id || item.role_id || "项目级"} ·{" "}
-                            {(item.actions ?? []).join(" / ") || "jump"}
-                          </small>
-                        </button>
-                      ))
-                    )}
-                  </div>
                 </div>
               </section>
 
@@ -4297,81 +4653,191 @@ function App() {
                   <div className="section-title">当前章节</div>
                   <h2>{activeChapter.title}</h2>
                 </div>
-                <div className="gate">
+                <div className="chapter-primary-action">
                   <button
-                    className="tool-button purple"
+                    className="production-primary-button"
                     type="button"
-                    onClick={() => void runAiRoleAnalysis()}
-                    disabled={agentRunRunning || visibleParagraphs.length === 0}
+                    disabled={productionPrimaryAction.disabled}
+                    onClick={() => void handleProductionPrimaryAction()}
                   >
-                    角色分析 Agent
+                    {productionPrimaryAction.label}
                   </button>
-                  <button
-                    className="tool-button purple"
-                    type="button"
-                    onClick={() => void runAiRoleMatching()}
-                    disabled={
-                      agentRunRunning ||
-                      !agentRunWaitingForRoles ||
-                      !agentRunThreadId
-                    }
-                  >
-                    配音编排 Agent
-                  </button>
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => void generateChapterDubbing()}
-                    disabled={!confirmed || hasPendingHumanReview}
-                  >
-                    批量生成配音
-                  </button>
-                  <button
-                    className="tool-button amber"
-                    type="button"
-                    onClick={() => void exportChapterAudio()}
-                    disabled={!confirmed || hasPendingHumanReview}
-                  >
-                    导出制作包
-                  </button>
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => toggleChapterPlayback()}
-                    disabled={!hasGeneratedAudioUtterance}
-                  >
-                    {chapterPlaybackState === "playing"
-                      ? "暂停播放"
-                      : chapterPlaybackState === "paused"
-                        ? "继续播放"
-                        : "一键播放"}
-                  </button>
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => playPreviousQueuedChapterAudio()}
-                    disabled={!hasGeneratedAudioUtterance}
-                  >
-                    上一句
-                  </button>
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => playNextQueuedChapterAudio()}
-                    disabled={!hasGeneratedAudioUtterance}
-                  >
-                    下一句
-                  </button>
-                  <span>
-                    {confirmed && !hasPendingHumanReview
-                      ? "台词已确认，可以批量配音或导出"
-                      : "请完成角色分析、配音编排并确认所有配音片段"}
-                  </span>
+                  <span>{productionPrimaryAction.detail}</span>
                 </div>
+                <details className="advanced-action-panel">
+                  <summary>高级操作</summary>
+                  <div className="gate">
+                    <button
+                      className="tool-button purple"
+                      type="button"
+                      onClick={() => void runAiRoleAnalysis()}
+                      disabled={agentRunRunning || visibleParagraphs.length === 0}
+                    >
+                      角色分析 Agent
+                    </button>
+                    <button
+                      className="tool-button purple"
+                      type="button"
+                      onClick={() => void runAiRoleMatching()}
+                      disabled={
+                        agentRunRunning ||
+                        !agentRunWaitingForRoles ||
+                        !agentRunThreadId
+                      }
+                    >
+                      配音编排 Agent
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => void generateChapterDubbing()}
+                      disabled={!confirmed || hasPendingHumanReview}
+                    >
+                      批量生成配音
+                    </button>
+                    <button
+                      className="tool-button amber"
+                      type="button"
+                      onClick={() => void exportChapterAudio()}
+                      disabled={!confirmed || hasPendingHumanReview}
+                    >
+                      导出制作包
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => toggleChapterPlayback()}
+                      disabled={!hasGeneratedAudioUtterance}
+                    >
+                      {chapterPlaybackState === "playing"
+                        ? "暂停播放"
+                        : chapterPlaybackState === "paused"
+                          ? "继续播放"
+                          : "一键播放"}
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => playPreviousQueuedChapterAudio()}
+                      disabled={!hasGeneratedAudioUtterance}
+                    >
+                      上一句
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => playNextQueuedChapterAudio()}
+                      disabled={!hasGeneratedAudioUtterance}
+                    >
+                      下一句
+                    </button>
+                    <span>
+                      {confirmed && !hasPendingHumanReview
+                        ? "台词已确认，可以批量配音或导出"
+                        : "请完成角色分析、配音编排并确认所有配音片段"}
+                    </span>
+                  </div>
+                </details>
                 <div className="delivery-hint" aria-label="整章播放列表控制">
                   整章播放列表支持播放、暂停、继续、上一句、下一句；当前播放台词高亮。
                   导出制作包包含完整 WAV/MP3、逐句音频 + manifest、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单；
                   音频后期默认应用片段间停顿、头尾静音裁剪和响度归一化。
+                </div>
+                <div className="export-settings-panel" aria-label="导出制作包参数">
+                  <div className="export-preset-row">
+                    {(Object.entries(EXPORT_PRESETS) as [ExportPreset, ExportOptions][]).map(
+                      ([preset, options]) => (
+                        <button
+                          className={exportPreset === preset ? "active" : ""}
+                          key={preset}
+                          type="button"
+                          onClick={() => {
+                            setExportPreset(preset);
+                            setExportOptions(options);
+                          }}
+                        >
+                          <strong>{options.label}</strong>
+                          <small>{options.description}</small>
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  <div className="export-advanced-grid">
+                    <label>
+                      片段间停顿 ms
+                      <input
+                        type="number"
+                        min="0"
+                        value={exportOptions.pauseMs}
+                        onChange={(event) =>
+                          setExportOptions((current) => ({
+                            ...current,
+                            pauseMs: Math.max(0, Number(event.target.value) || 0),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      语速
+                      <input
+                        type="number"
+                        min="0.5"
+                        step="0.05"
+                        value={exportOptions.speed}
+                        onChange={(event) =>
+                          setExportOptions((current) => ({
+                            ...current,
+                            speed: Math.max(0.5, Number(event.target.value) || 1),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      目标峰值
+                      <input
+                        type="number"
+                        min="0.1"
+                        max="1"
+                        step="0.01"
+                        value={exportOptions.targetPeak}
+                        onChange={(event) =>
+                          setExportOptions((current) => ({
+                            ...current,
+                            targetPeak: Math.min(
+                              1,
+                              Math.max(0.1, Number(event.target.value) || 0.9),
+                            ),
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="checkline">
+                      <input
+                        type="checkbox"
+                        checked={exportOptions.trimSilence}
+                        onChange={(event) =>
+                          setExportOptions((current) => ({
+                            ...current,
+                            trimSilence: event.target.checked,
+                          }))
+                        }
+                      />
+                      头尾静音裁剪
+                    </label>
+                    <label className="checkline">
+                      <input
+                        type="checkbox"
+                        checked={exportOptions.normalizeAudio}
+                        onChange={(event) =>
+                          setExportOptions((current) => ({
+                            ...current,
+                            normalizeAudio: event.target.checked,
+                          }))
+                        }
+                      />
+                      响度归一化
+                    </label>
+                  </div>
                 </div>
                 <div className="status-filter-bar" aria-label="状态筛选">
                   <span>状态筛选</span>
@@ -5023,6 +5489,149 @@ function App() {
     );
   }
 
+  function renderMemoryPage() {
+    const trustedFacts = memoryContext?.facts_for_prompt ?? storyBibleFacts.filter(
+      (fact) => ["user_confirmed", "system_verified"].includes(fact.confidence),
+    );
+    const candidateFacts = memoryContext?.candidate_facts ?? storyBibleFacts.filter(
+      (fact) => fact.confidence === "model_suggested",
+    );
+    const rejectedFacts = memoryContext?.rejected_facts ?? storyBibleFacts.filter(
+      (fact) => fact.confidence === "rejected",
+    );
+    const factCard = (fact: StoryBibleFact) => (
+      <article className="memory-fact-card" key={fact.fact_id}>
+        <strong>{fact.subject}</strong>
+        <span>
+          {fact.predicate}：{fact.object}
+        </span>
+        <small>
+          {fact.confidence} · {fact.source_type ?? "manual"} · {fact.source_id ?? fact.fact_id}
+        </small>
+        {fact.notes && <small>备注：{fact.notes}</small>}
+      </article>
+    );
+
+    return (
+      <main className="memory-page">
+        <section className="panel memory-control-panel">
+          <div className="section-heading">
+            <div>
+              <div className="section-title">项目记忆</div>
+              <h2>Story Bible / 证据面板</h2>
+            </div>
+            <button
+              className="tool-button sky"
+              type="button"
+              onClick={() => void loadStoryBible()}
+            >
+              刷新记忆
+            </button>
+          </div>
+          <small className="status-message" aria-label="项目记忆反馈">
+            {memoryStatus}
+          </small>
+          <div className="toolbar-row">
+            <input
+              aria-label="项目记忆检索词"
+              placeholder="输入角色、别名、术语或设定"
+              value={memoryQuery}
+              onChange={(event) => setMemoryQuery(event.target.value)}
+            />
+            <button
+              className="tool-button purple"
+              type="button"
+              onClick={() => void searchStoryMemoryContext()}
+            >
+              检索证据
+            </button>
+          </div>
+        </section>
+
+        <section className="panel memory-evidence-panel">
+          <div className="section-title">角色证据</div>
+          <small>可信事实会进入 Agent prompt；候选事实只作为人工判断参考。</small>
+          <div className="memory-fact-grid">
+            {trustedFacts.length === 0 ? <small>暂无可信角色证据。</small> : trustedFacts.map(factCard)}
+          </div>
+        </section>
+
+        <section className="panel memory-evidence-panel">
+          <div className="section-title">设定记忆</div>
+          <small>模型建议和被拒绝事实分开展示，避免错误记忆污染后续 Agent。</small>
+          <div className="memory-two-column">
+            <div>
+              <strong>候选事实</strong>
+              <div className="memory-fact-grid">
+                {candidateFacts.length === 0 ? <small>暂无候选事实。</small> : candidateFacts.map(factCard)}
+              </div>
+            </div>
+            <div>
+              <strong>已拒绝事实</strong>
+              <div className="memory-fact-grid">
+                {rejectedFacts.length === 0 ? <small>暂无已拒绝事实。</small> : rejectedFacts.map(factCard)}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="panel memory-correction-panel">
+          <div className="section-title">用户纠错</div>
+          <small>人工写入默认保存为 user_confirmed，后续 Agent 优先使用。</small>
+          <div className="memory-correction-grid">
+            <input
+              placeholder="主体，例如 林舟"
+              value={memoryCorrection.subject}
+              onChange={(event) =>
+                setMemoryCorrection((current) => ({
+                  ...current,
+                  subject: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="关系，例如 alias / pronunciation / identity"
+              value={memoryCorrection.predicate}
+              onChange={(event) =>
+                setMemoryCorrection((current) => ({
+                  ...current,
+                  predicate: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="事实内容"
+              value={memoryCorrection.object}
+              onChange={(event) =>
+                setMemoryCorrection((current) => ({
+                  ...current,
+                  object: event.target.value,
+                }))
+              }
+            />
+            <input
+              placeholder="备注，可选"
+              value={memoryCorrection.notes}
+              onChange={(event) =>
+                setMemoryCorrection((current) => ({
+                  ...current,
+                  notes: event.target.value,
+                }))
+              }
+            />
+          </div>
+          <button
+            className="tool-button teal"
+            type="button"
+            onClick={() => void saveMemoryCorrection()}
+          >
+            写入用户纠错
+          </button>
+        </section>
+      </main>
+    );
+  }
+
   function renderAgentTracePage() {
     const trace = selectedAgentTrace ?? agentTraces[0] ?? null;
     return (
@@ -5030,7 +5639,7 @@ function App() {
         <section className="panel trace-list-panel">
           <div className="section-heading">
             <div>
-              <div className="section-title">Agent追踪</div>
+              <div className="section-title">运行审计</div>
               <h2>Run History</h2>
             </div>
             <button
@@ -5041,10 +5650,10 @@ function App() {
               刷新
             </button>
           </div>
-          <small className="status-message" aria-label="Agent追踪反馈">
+          <small className="status-message" aria-label="运行审计反馈">
             {agentTraceStatus}
           </small>
-          <div className="trace-run-list" aria-label="Agent运行记录">
+          <div className="trace-run-list" aria-label="运行审计记录">
             {agentTraces.length === 0 ? (
               <article className="trace-run-card empty">
                 <strong>暂无记录</strong>
@@ -5078,7 +5687,7 @@ function App() {
 
         <section
           className="panel trace-detail-panel"
-          aria-label="Agent追踪详情"
+          aria-label="运行审计详情"
         >
           <div className="section-heading">
             <div>
@@ -5427,10 +6036,11 @@ function App() {
           </div>
           <nav className="tabbar" aria-label="页面切换">
             {[
-              ["main", "主页面"],
+              ["main", "制作台"],
               ["voices", "音色库"],
-              ["agent-runs", "Agent追踪"],
-              ["models", "模型配置"],
+              ["memory", "项目记忆"],
+              ["agent-runs", "运行审计"],
+              ["models", "设置"],
             ].map(([value, label]) => (
               <button
                 className={page === value ? "active" : ""}
@@ -5446,6 +6056,7 @@ function App() {
       </header>
       {page === "main" && renderMainPage()}
       {page === "voices" && renderVoiceLibraryPage()}
+      {page === "memory" && renderMemoryPage()}
       {page === "agent-runs" && renderAgentTracePage()}
       {page === "models" && renderModelConfigPage()}
     </div>

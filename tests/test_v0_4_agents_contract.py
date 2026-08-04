@@ -17,7 +17,7 @@ def test_v0_5_registry_exposes_exactly_three_versioned_agents():
     assert {agent.agent_id: agent.display_name for agent in agents} == AGENT_NAMES
     assert len(agents) == 3
     for agent in agents:
-        assert agent.release_version == "0.7.0"
+        assert agent.release_version == "0.7.1"
         assert agent.prompt_id == agent.agent_id
         assert agent.prompt_version
         assert agent.prompt_text.strip()

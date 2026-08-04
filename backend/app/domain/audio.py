@@ -789,7 +789,7 @@ def export_chapter_audio(
     manifest_path.write_text(
         json.dumps(
             {
-                "package_version": "v0.7.0",
+                "package_version": "v0.7.1",
                 "project_artifact_type": "chapter_delivery_package",
                 "chapter_id": chapter_id,
                 "chapter_title": chapter_title,

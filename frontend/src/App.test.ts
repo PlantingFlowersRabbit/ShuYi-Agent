@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.7.0 application shell", () => {
+describe("v0.7.1 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.7.0 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.7.1 shell with the SVG brand and no access token field", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,7 +20,7 @@ describe("v0.7.0 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.7.0");
+    expect(markup).toContain("v0.7.1");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
     expect(markup).toContain("文档解析");
@@ -32,7 +32,7 @@ describe("v0.7.0 application shell", () => {
     expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
   });
 
-  it("renders v0.7.0 model configuration with separate backend and model tests", async () => {
+  it("renders v0.7.1 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -61,7 +61,7 @@ describe("v0.7.0 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.7.0 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.7.1 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -77,7 +77,7 @@ describe("v0.7.0 application shell", () => {
     expect(markup).toContain("生成音色");
   });
 
-  it("renders v0.7.0 Agent trace history with audit fields", async () => {
+  it("renders v0.7.1 run audit history with agent trace fields", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -87,7 +87,7 @@ describe("v0.7.0 application shell", () => {
 
     const markup = renderToStaticMarkup(createElement(App));
 
-    expect(markup).toContain("Agent追踪");
+    expect(markup).toContain("运行审计");
     expect(markup).toContain("Run History");
     expect(markup).toContain("Prompt SHA");
     expect(markup).toContain("Token预算");
@@ -132,15 +132,16 @@ describe("v0.7.0 application shell", () => {
     expect(appSource).toContain("未配音");
     expect(appSource).toContain("项目工作区");
     expect(appSource).toContain("最近项目");
-    expect(appSource).toContain("质量检查面板");
-    expect(appSource).toContain("审稿队列");
+    expect(appSource).toContain("一键继续制作");
+    expect(appSource).toContain("制作阻塞项");
+    expect(appSource).toContain("智能下一步助手");
     expect(appSource).toContain("配音失败");
     expect(appSource).toContain("超长台词");
     expect(appSource).toContain("重复音色");
     expect(appSource).toContain("角色无音色");
     expect(appSource).toContain("needs_human_review");
-    expect(appSource).toContain("生成前检查");
-    expect(appSource).toContain("导出前检查");
+    expect(appSource).toContain("刷新阻塞项");
+    expect(appSource).toContain("导出阻塞项");
     expect(appSource).toContain("批量确认");
     expect(appSource).toContain("批量改角色");
     expect(appSource).toContain("批量重试");
@@ -163,11 +164,9 @@ describe("v0.7.0 application shell", () => {
     expect(appSource).toContain("头尾静音裁剪");
     expect(appSource).toContain("响度归一化");
     expect(appSource).toContain("/projects/${encodeURIComponent(projectId)}/exports/");
-    expect(appSource).toContain("制作任务 Planner");
+    expect(appSource).toContain("智能下一步助手");
     expect(appSource).toContain("把当前章节处理到可导出");
-    expect(appSource).toContain("生成计划");
-    expect(appSource).toContain("执行计划");
-    expect(appSource).toContain("复盘计划");
+    expect(appSource).toContain("刷新建议");
     expect(appSource).toContain("planner-step-list");
     expect(appSource).toContain("章节状态小地图");
     expect(appSource).toContain("chapter-status-map");
@@ -188,6 +187,72 @@ describe("v0.7.0 application shell", () => {
     expect(cssSource).toContain(".chapter-status-map");
     expect(cssSource).toContain(".status-filter-bar");
     expect(cssSource).not.toContain(".access-token-field");
+  });
+
+  it("renders v0.7.1 guided production controls, memory, blockers, export presets, and safer bulk role edits", async () => {
+    const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
+      import("node:fs"),
+      import("node:url"),
+    ]);
+    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
+
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { search: "" } },
+    });
+    const { default: App } = await import("./App");
+
+    const markup = renderToStaticMarkup(createElement(App));
+
+    expect(markup).toContain("制作台");
+    expect(markup).toContain("项目记忆");
+    expect(markup).toContain("运行审计");
+    expect(markup).toContain("设置");
+    expect(markup).not.toContain("Agent追踪</button>");
+    expect(markup).not.toContain("模型配置</button>");
+    expect(markup).not.toContain("加载红楼梦示例项目");
+
+    expect(appSource).toContain("type Page = \"main\" | \"voices\" | \"memory\" | \"agent-runs\" | \"models\"");
+    expect(appSource).toContain("renderMemoryPage");
+    expect(appSource).toContain("角色证据");
+    expect(appSource).toContain("设定记忆");
+    expect(appSource).toContain("用户纠错");
+    expect(appSource).toContain("/story-bible/memory-context");
+    expect(appSource).toContain("/story-bible/facts");
+
+    expect(appSource).toContain("productionPrimaryAction");
+    expect(appSource).toContain("开始制作");
+    expect(appSource).toContain("继续下一步");
+    expect(appSource).toContain("处理阻塞项");
+    expect(appSource).toContain("智能下一步助手");
+    expect(appSource).not.toContain(">生成计划</button>");
+    expect(appSource).not.toContain(">执行计划</button>");
+    expect(appSource).not.toContain(">复盘计划</button>");
+
+    expect(appSource).toContain("制作阻塞项");
+    expect(appSource).toContain("严重级别");
+    expect(appSource).toContain("影响");
+    expect(appSource).toContain("推荐操作");
+    expect(appSource).toContain("处理状态");
+    expect(appSource).not.toContain("质量检查面板");
+    expect(appSource).not.toContain("<div className=\"section-title\">审稿队列</div>");
+
+    expect(appSource).toContain("bulkRoleTargetId");
+    expect(appSource).toContain("bulkRolePreviewArmed");
+    expect(appSource).toContain("请选择目标角色");
+    expect(appSource).toContain("预览影响");
+    expect(appSource).not.toContain("const fallbackRole = roles.find");
+
+    expect(appSource).toContain("exportPreset");
+    expect(appSource).toContain("试听版");
+    expect(appSource).toContain("交付版");
+    expect(appSource).toContain("后期版");
+    expect(appSource).toContain("pause_ms: exportOptions.pauseMs");
+    expect(appSource).toContain("speed: exportOptions.speed");
+    expect(appSource).toContain("trim_silence: exportOptions.trimSilence");
+    expect(appSource).toContain("normalize_audio: exportOptions.normalizeAudio");
+    expect(appSource).toContain("target_peak: exportOptions.targetPeak");
   });
 
   it("classifies paragraph heatmap status with failure and completion priority", async () => {
