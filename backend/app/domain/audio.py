@@ -58,6 +58,7 @@ DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。"
 DEFAULT_TTS_MAX_INPUT_CHARS = 120
 DEFAULT_TTS_MAX_NEW_TOKENS = 8192
 DEFAULT_TTS_REQUEST_TIMEOUT_SECONDS = 120.0
+AUDIO_SUCCESS_STATUSES = {"success", "succeeded", "completed", "done"}
 
 
 @dataclass(frozen=True)
@@ -495,7 +496,7 @@ def generate_chapter_audio_batch(
             continue
         if (
             skip_success
-            and utterance.get("audio_status") == "success"
+            and _is_success_audio_status(utterance.get("audio_status"))
             and utterance.get("audio_path")
         ):
             skipped_count += 1
@@ -660,7 +661,11 @@ def export_chapter_audio(
                 "end_time": "",
             }
         )
-        if source_path and utterance.get("audio_status") == "success" and source_path.exists():
+        if (
+            source_path
+            and _audio_status_allows_export(utterance.get("audio_status"))
+            and source_path.exists()
+        ):
             target = output_dir / filename
             shutil.copy2(source_path, target)
             completed_audio_paths.append(target)
@@ -921,6 +926,17 @@ def synthesize_local_qwen3_batch(
 def _iter_utterances(utterances_by_paragraph: dict[str, list[dict[str, Any]]]):
     for utterances in utterances_by_paragraph.values():
         yield from utterances
+
+
+def _is_success_audio_status(status: Any) -> bool:
+    return str(status or "").strip().lower() in AUDIO_SUCCESS_STATUSES
+
+
+def _audio_status_allows_export(status: Any) -> bool:
+    cleaned = str(status or "").strip().lower()
+    if not cleaned:
+        return True
+    return cleaned in AUDIO_SUCCESS_STATUSES
 
 
 def _group_pending_audio(pending: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

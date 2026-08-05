@@ -239,13 +239,20 @@ class ChapterSplitSkill:
 
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(
-            api_key=api_key,
-            base_url=str(provider.get("base_url") or ""),
-            model=str(provider.get("model") or ""),
-            temperature=0,
-            timeout=int(provider.get("timeout_seconds", 120)),
-        )
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": str(provider.get("base_url") or ""),
+            "model": str(provider.get("model") or ""),
+            "temperature": 0,
+            "timeout": int(provider.get("timeout_seconds", 120)),
+        }
+        if provider.get("max_tokens"):
+            kwargs["max_tokens"] = int(provider["max_tokens"])
+        if provider.get("max_retries") is not None:
+            kwargs["max_retries"] = int(provider["max_retries"])
+        if provider.get("extra_body"):
+            kwargs["extra_body"] = dict(provider["extra_body"])
+        return ChatOpenAI(**kwargs)
 
     def create_parser_rule(
         self,

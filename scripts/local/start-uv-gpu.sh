@@ -133,6 +133,7 @@ start_services() {
   fi
 
   echo "启动后端：http://$BACKEND_HOST:$BACKEND_PORT"
+  SHUYI_DATA_DIR="${SHUYI_DATA_DIR:-$ROOT_DIR/data}" \
   SHUYI_DEVICE=cuda QWEN3_TTS_DEVICE=cuda \
     "$VENV_DIR/bin/python" -m uvicorn backend.app.api.app:app \
     --host "$BACKEND_HOST" \

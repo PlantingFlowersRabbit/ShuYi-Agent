@@ -81,7 +81,7 @@ export function isRoleDeleteReferenceConflict(
   return typeof referencedCount === "number" && referencedCount > 0;
 }
 
-type Page = "main" | "voices" | "memory" | "agent-runs" | "models";
+type Page = "main" | "projects" | "voices" | "memory" | "agent-runs" | "models";
 type VoiceMode = "voice_cloning" | "voice_design";
 type ExportPreset = "preview" | "delivery" | "post";
 type ServiceHealthState = "checking" | "connected" | "degraded" | "offline";
@@ -528,7 +528,12 @@ type BatchDubbingStatusPayload = {
 };
 
 export type ParagraphDubbingStatus =
-  "unsegmented" | "unselected-role" | "undubbed" | "dubbed" | "failed";
+  | "unsegmented"
+  | "unselected-role"
+  | "undubbed"
+  | "dubbed"
+  | "failed"
+  | "ignored";
 
 type ParagraphStatusUtterance = {
   roleId?: string | null;
@@ -585,7 +590,43 @@ type TtsDeploymentStatus = {
   voice_design_model_path?: string;
 };
 
-const MAX_NOVEL_PREVIEW_CHARS = 700;
+type OperationType =
+  | "upload"
+  | "chapter_split"
+  | "role_analysis"
+  | "dubbing_arrangement"
+  | "voice_generation"
+  | "chapter_dubbing"
+  | "chapter_export"
+  | "tts_deploy"
+  | "memory"
+  | "settings";
+
+type OperationStatus = "queued" | "running" | "succeeded" | "failed";
+type NoticeTone = "info" | "success" | "warning" | "error";
+
+type OperationRecord = {
+  id: string;
+  type: OperationType;
+  label: string;
+  status: OperationStatus;
+  progress: number;
+  message: string;
+  startedAt: number;
+  updatedAt: number;
+  durationMs?: number;
+  error?: string;
+};
+
+type UserNotice = {
+  id: string;
+  tone: NoticeTone;
+  source: string;
+  message: string;
+  detail?: string;
+  createdAt: number;
+};
+
 const DEFAULT_GENERATED_VOICE_TEXT = "这是一段用于试听新音色的语音。";
 const DEFAULT_BASE_MODEL_PATH = "/models/Qwen3-TTS-12Hz-1.7B-Base";
 const DEFAULT_VOICE_DESIGN_MODEL_PATH =
@@ -600,6 +641,7 @@ const PARAGRAPH_STATUS_META: Record<ParagraphDubbingStatus, { label: string }> =
     undubbed: { label: "未配音" },
     dubbed: { label: "已配音" },
     failed: { label: "失败" },
+    ignored: { label: "已忽略" },
   };
 
 const PARAGRAPH_STATUS_FILTERS: ParagraphDubbingStatus[] = [
@@ -607,6 +649,7 @@ const PARAGRAPH_STATUS_FILTERS: ParagraphDubbingStatus[] = [
   "unselected-role",
   "undubbed",
   "failed",
+  "ignored",
 ];
 
 const defaultModelConfig: ModelConfig = {
@@ -680,7 +723,13 @@ const BLOCKER_RECOMMENDATIONS: Record<keyof QualitySummary, string> = {
   needs_human_review: "人工确认低置信度角色或台词",
 };
 
-const PRODUCTION_STEP_LABELS = ["准备", "解析", "复核", "配音", "导出"] as const;
+const PRODUCTION_STEP_LABELS = [
+  "准备",
+  "解析",
+  "复核",
+  "配音",
+  "导出",
+] as const;
 
 const EXPORT_PRESETS: Record<
   ExportPreset,
@@ -730,6 +779,7 @@ const EXPORT_PRESETS: Record<
 function initialPageFromUrl(): Page {
   const page = new URLSearchParams(window.location.search).get("page");
   return page === "voices" ||
+    page === "projects" ||
     page === "memory" ||
     page === "models" ||
     page === "agent-runs"
@@ -739,8 +789,8 @@ function initialPageFromUrl(): Page {
 
 function makeNovelPreview(text: string): string {
   const trimmed = text.trimStart();
-  if (trimmed.length <= MAX_NOVEL_PREVIEW_CHARS) return trimmed;
-  return `${trimmed.slice(0, MAX_NOVEL_PREVIEW_CHARS)}\n\n……仅展示开头预览，完整小说已保留用于小说格式解析。`;
+  if (!trimmed) return "";
+  return `已读取 ${trimmed.length.toLocaleString("zh-CN")} 字，完整小说已保留用于章节解析。`;
 }
 
 function arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -1196,6 +1246,125 @@ function mediaRequestUrl(source: string): string {
 
 type AgentStreamEvent = { id: number; event: string; data: any };
 
+function fallbackWaveform(seed: string): number[] {
+  const source = seed || "audio";
+  return Array.from({ length: 88 }, (_, index) => {
+    const code = source.charCodeAt(index % source.length) || 17;
+    const wave = Math.sin((index + 1) * 0.52 + code) * 0.28;
+    const pulse = Math.sin((index + 1) * 0.15) * 0.22;
+    return Math.min(1, Math.max(0.14, 0.48 + wave + pulse));
+  });
+}
+
+function drawWaveformCanvas(
+  canvas: HTMLCanvasElement | null,
+  peaks: number[],
+  progress = 0,
+  active = false,
+) {
+  if (!canvas) return;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width * ratio));
+  const height = Math.max(1, Math.floor(rect.height * ratio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  context.clearRect(0, 0, width, height);
+  const values = peaks.length ? peaks : fallbackWaveform("");
+  const gap = 2 * ratio;
+  const barWidth = Math.max(2 * ratio, width / values.length - gap);
+  const center = height / 2;
+  const playedUntil = width * Math.min(1, Math.max(0, progress));
+  values.forEach((peak, index) => {
+    const x = index * (barWidth + gap);
+    const barHeight = Math.max(4 * ratio, peak * height * 0.82);
+    context.fillStyle =
+      x <= playedUntil ? (active ? "#2563eb" : "#0f766e") : "#cbd5e1";
+    context.fillRect(x, center - barHeight / 2, barWidth, barHeight);
+  });
+}
+
+function WaveformCanvas({
+  source,
+  active = false,
+  progress = 0,
+  onSeek,
+}: {
+  source: string;
+  active?: boolean;
+  progress?: number;
+  onSeek?: (ratio: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [peaks, setPeaks] = useState<number[]>(() => fallbackWaveform(source));
+
+  useEffect(() => {
+    if (!source) {
+      setPeaks(fallbackWaveform(""));
+      return undefined;
+    }
+    let cancelled = false;
+    fetch(mediaRequestUrl(source))
+      .then((response) => {
+        if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
+        return response.arrayBuffer();
+      })
+      .then(async (arrayBuffer) => {
+        const AudioContextCtor =
+          window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContextCtor) throw new Error("浏览器不支持 AudioContext");
+        const audioContext = new AudioContextCtor();
+        const decoded = await audioContext.decodeAudioData(
+          arrayBuffer.slice(0),
+        );
+        const channel = decoded.getChannelData(0);
+        const bucketCount = 88;
+        const bucketSize = Math.max(
+          1,
+          Math.floor(channel.length / bucketCount),
+        );
+        const nextPeaks = Array.from({ length: bucketCount }, (_, index) => {
+          const start = index * bucketSize;
+          const end = Math.min(channel.length, start + bucketSize);
+          let max = 0;
+          for (let cursor = start; cursor < end; cursor += 1) {
+            max = Math.max(max, Math.abs(channel[cursor] ?? 0));
+          }
+          return Math.min(1, Math.max(0.08, max * 1.8));
+        });
+        await audioContext.close();
+        if (!cancelled) setPeaks(nextPeaks);
+      })
+      .catch(() => {
+        if (!cancelled) setPeaks(fallbackWaveform(source));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [source]);
+
+  useEffect(() => {
+    drawWaveformCanvas(canvasRef.current, peaks, progress, active);
+  }, [active, peaks, progress]);
+
+  return (
+    <canvas
+      aria-label="音频波形"
+      className="waveform-canvas"
+      onClick={(event) => {
+        if (!onSeek) return;
+        const rect = event.currentTarget.getBoundingClientRect();
+        onSeek((event.clientX - rect.left) / Math.max(1, rect.width));
+      }}
+      ref={canvasRef}
+    />
+  );
+}
+
 export function parseAgentSseBuffer(buffer: string): {
   events: AgentStreamEvent[];
   remainder: string;
@@ -1224,36 +1393,146 @@ export function parseAgentSseBuffer(buffer: string): {
 
 function AuthorizedAudio({ source }: { source: string }) {
   const [playableUrl, setPlayableUrl] = useState("");
+  const [loadState, setLoadState] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [loadError, setLoadError] = useState("");
+  const [playing, setPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const objectUrlRef = useRef("");
 
   useEffect(() => {
-    if (!source) return undefined;
-    if (/^(blob:|data:)/.test(source)) {
-      setPlayableUrl(source);
+    setPlaying(false);
+    setCurrentTime(0);
+    setDuration(0);
+    setLoadError("");
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = "";
+    }
+    if (!source) {
+      setPlayableUrl("");
+      setLoadState("idle");
       return undefined;
     }
-    let revokedUrl = "";
-    let cancelled = false;
-    fetch(mediaRequestUrl(source))
-      .then((response) => {
-        if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
-        return response.blob();
-      })
-      .then((blob) => {
-        if (cancelled) return;
-        revokedUrl = URL.createObjectURL(blob);
-        setPlayableUrl(revokedUrl);
-      })
-      .catch(() => setPlayableUrl(""));
+    if (/^(blob:|data:)/.test(source)) {
+      setPlayableUrl(source);
+      setLoadState("ready");
+      return undefined;
+    }
+    setPlayableUrl("");
+    setLoadState("idle");
     return () => {
-      cancelled = true;
-      if (revokedUrl) URL.revokeObjectURL(revokedUrl);
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = "";
+      }
     };
   }, [source]);
 
-  return playableUrl ? (
-    <audio controls src={playableUrl} />
-  ) : (
-    <small>音频暂不可用</small>
+  async function ensurePlayableUrl(): Promise<string> {
+    if (playableUrl) return playableUrl;
+    if (!source) return "";
+    setLoadState("loading");
+    setLoadError("");
+    try {
+      const response = await fetch(mediaRequestUrl(source));
+      if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
+      const blob = await response.blob();
+      const nextUrl = URL.createObjectURL(blob);
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = nextUrl;
+      setPlayableUrl(nextUrl);
+      setLoadState("ready");
+      return nextUrl;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPlayableUrl("");
+      setLoadError(message);
+      setLoadState("error");
+      return "";
+    }
+  }
+
+  async function playPreview(fromStart = false) {
+    const nextUrl = await ensurePlayableUrl();
+    if (!nextUrl) return;
+    const player = audioRef.current;
+    if (!player) return;
+    if (player.src !== nextUrl) player.src = nextUrl;
+    if (fromStart) player.currentTime = 0;
+    player
+      .play()
+      .then(() => setPlaying(true))
+      .catch(() => setPlaying(false));
+  }
+
+  async function togglePreview() {
+    const player = audioRef.current;
+    if (playing) {
+      player?.pause();
+      setPlaying(false);
+      return;
+    }
+    await playPreview(false);
+  }
+
+  if (!source) return <small>音频暂不可用：没有音频地址</small>;
+
+  return (
+    <div className="waveform-player">
+      <WaveformCanvas
+        active={playing}
+        progress={duration > 0 ? currentTime / duration : 0}
+        source={playableUrl}
+        onSeek={(ratio) => {
+          const player = audioRef.current;
+          if (!player || !Number.isFinite(player.duration)) return;
+          player.currentTime =
+            Math.max(0, Math.min(1, ratio)) * player.duration;
+        }}
+      />
+      <div className="waveform-controls">
+        <button
+          type="button"
+          disabled={loadState === "loading"}
+          onClick={() => void togglePreview()}
+        >
+          {playing ? "暂停" : loadState === "loading" ? "加载中" : "试听"}
+        </button>
+        <button
+          type="button"
+          disabled={loadState === "loading"}
+          onClick={() => void playPreview(true)}
+        >
+          从头试听
+        </button>
+        <span>
+          {Math.floor(currentTime)}s / {Math.floor(duration || 0)}s
+        </span>
+      </div>
+      {loadState === "error" && (
+        <small className="audio-load-error">音频读取失败：{loadError}</small>
+      )}
+      <audio
+        aria-label="隐藏音频播放器"
+        className="audio-element-hidden"
+        onDurationChange={(event) =>
+          setDuration(event.currentTarget.duration || 0)
+        }
+        onEnded={() => setPlaying(false)}
+        onPause={() => setPlaying(false)}
+        onPlay={() => setPlaying(true)}
+        onTimeUpdate={(event) =>
+          setCurrentTime(event.currentTarget.currentTime)
+        }
+        preload="none"
+        ref={audioRef}
+        src={playableUrl || undefined}
+      />
+    </div>
   );
 }
 
@@ -1424,7 +1703,7 @@ function splitRetryUtterances(
   paragraphId?: string,
 ): UtteranceDraft[] {
   const candidates = paragraphId
-    ? groups[paragraphId] ?? []
+    ? (groups[paragraphId] ?? [])
     : Object.values(groups).flat();
   const splitPrefix = `${sourceUtteranceId}-s`;
   return candidates.filter(
@@ -1470,6 +1749,12 @@ function normalizeTtsDeployment(
   };
 }
 
+function formatOperationDuration(startedAt: number, updatedAt: number): string {
+  const seconds = Math.max(0, Math.round((updatedAt - startedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
 function ProgressBar({ label, value }: { label: string; value: number }) {
   const normalized = Math.max(0, Math.min(100, Math.round(value)));
   return (
@@ -1489,6 +1774,76 @@ function ProgressBar({ label, value }: { label: string; value: number }) {
         <span style={{ width: `${normalized}%` }} />
       </div>
     </div>
+  );
+}
+
+function OperationCenter({ operations }: { operations: OperationRecord[] }) {
+  const visible = operations.slice(0, 5);
+  const runningCount = operations.filter(
+    (item) => item.status === "running",
+  ).length;
+  if (visible.length === 0) {
+    return <section className="operation-center idle" aria-label="运行中心" />;
+  }
+  return (
+    <section className="operation-center" aria-label="运行中心">
+      <div className="operation-center-heading">
+        <strong>运行中心</strong>
+        <span>
+          {runningCount > 0 ? `${runningCount} 个任务运行中` : "当前空闲"}
+        </span>
+      </div>
+      <div className="operation-list">
+        {visible.map((operation) => (
+          <article
+            className={`operation-card ${operation.status}`}
+            key={operation.id}
+          >
+            <div className="operation-row">
+              <strong>{operation.label}</strong>
+              <span>
+                {formatOperationDuration(
+                  operation.startedAt,
+                  operation.updatedAt,
+                )}
+              </span>
+            </div>
+            <ProgressBar label={operation.message} value={operation.progress} />
+            {operation.error && <small>{operation.error}</small>}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function NoticeCenter({
+  notices,
+  onDismiss,
+}: {
+  notices: UserNotice[];
+  onDismiss: (id: string) => void;
+}) {
+  if (notices.length === 0) return null;
+  return (
+    <aside className="notice-center" aria-label="错误与反馈中心">
+      {notices.slice(0, 4).map((notice) => (
+        <article className={`notice-card ${notice.tone}`} key={notice.id}>
+          <div>
+            <strong>{notice.source}</strong>
+            <span>{notice.message}</span>
+            {notice.detail && <small>{notice.detail}</small>}
+          </div>
+          <button
+            type="button"
+            aria-label="关闭反馈"
+            onClick={() => onDismiss(notice.id)}
+          >
+            ×
+          </button>
+        </article>
+      ))}
+    </aside>
   );
 }
 
@@ -1573,6 +1928,7 @@ function App() {
   const uploadedNovelFileRef = useRef<UploadedNovelFile | null>(null);
   const automaticDubbingStartedRef = useRef(false);
   const automaticRoleMatchingAttemptedRef = useRef(false);
+  const autoPipelineRequestedRef = useRef(false);
   const dubbingInFlightRef = useRef(false);
   const dubbingQueueRef = useRef(Promise.resolve());
   const queuedUtteranceIdsRef = useRef<Set<string>>(new Set());
@@ -1591,6 +1947,9 @@ function App() {
   const [roles, setRoles] = useState<RoleCard[]>([]);
   const [utterancesByParagraph, setUtterancesByParagraph] = useState<
     Record<string, UtteranceDraft[]>
+  >({});
+  const [ignoredParagraphIds, setIgnoredParagraphIds] = useState<
+    Record<string, boolean>
   >({});
   const [chapterBackendSynced, setChapterBackendSynced] = useState(false);
   const [selectedVoiceIds, setSelectedVoiceIds] = useState<
@@ -1623,9 +1982,12 @@ function App() {
     runtimeConfig.apiBase || "/api/v1",
   );
   const [apiStatus, setApiStatus] = useState("等待上传小说");
+  const [operations, setOperations] = useState<OperationRecord[]>([]);
+  const [notices, setNotices] = useState<UserNotice[]>([]);
   const [serviceHealth, setServiceHealth] =
     useState<ServiceHealth>(defaultServiceHealth);
-  const [resourceStatus, setResourceStatus] = useState("项目、角色与音色等待同步。");
+  const [resourceStatus, setResourceStatus] =
+    useState("项目、角色与音色等待同步。");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [chapterSplitProgress, setChapterSplitProgress] = useState(0);
   const [roleMatchingProgress, setRoleMatchingProgress] = useState(0);
@@ -1674,10 +2036,10 @@ function App() {
   const [bulkRolePreviewArmed, setBulkRolePreviewArmed] = useState(false);
   const [plannerGoal, setPlannerGoal] = useState("把当前章节处理到可导出");
   const [plannerRun, setPlannerRun] = useState<PlannerRun | null>(null);
-  const [plannerStatus, setPlannerStatus] =
-    useState("智能下一步助手会根据当前章节状态给出建议。");
-  const [exportPreset, setExportPreset] =
-    useState<ExportPreset>("delivery");
+  const [plannerStatus, setPlannerStatus] = useState(
+    "制作建议会根据当前章节状态生成计划或复盘，不会自动执行。",
+  );
+  const [exportPreset, setExportPreset] = useState<ExportPreset>("delivery");
   const [exportOptions, setExportOptions] = useState<ExportOptions>(
     EXPORT_PRESETS.delivery,
   );
@@ -1685,19 +2047,128 @@ function App() {
   const [memoryContext, setMemoryContext] =
     useState<StoryMemoryContextResponse | null>(null);
   const [memoryQuery, setMemoryQuery] = useState("");
-  const [memoryStatus, setMemoryStatus] =
-    useState("项目记忆会展示角色证据、设定记忆和用户纠错。");
+  const [memoryStatus, setMemoryStatus] = useState(
+    "项目记忆会展示角色证据、设定记忆和用户纠错。",
+  );
   const [memoryCorrection, setMemoryCorrection] = useState({
     subject: "",
     predicate: "alias",
     object: "",
     notes: "",
   });
+
+  function pushNotice(
+    tone: NoticeTone,
+    source: string,
+    message: string,
+    detail?: string,
+  ) {
+    const now = Date.now();
+    setNotices((current) => {
+      const duplicated = current.some(
+        (notice) =>
+          notice.tone === tone &&
+          notice.source === source &&
+          notice.message === message &&
+          notice.detail === detail &&
+          now - notice.createdAt < 5000,
+      );
+      if (duplicated) return current;
+      return [
+        {
+          id: `${now}-${Math.random().toString(16).slice(2)}`,
+          tone,
+          source,
+          message,
+          detail,
+          createdAt: now,
+        },
+        ...current,
+      ].slice(0, 8);
+    });
+  }
+
+  function dismissNotice(id: string) {
+    setNotices((current) => current.filter((notice) => notice.id !== id));
+  }
+
+  function trackOperation(
+    id: string,
+    updates: Omit<Partial<OperationRecord>, "id" | "startedAt"> & {
+      type: OperationType;
+      label: string;
+      message: string;
+    },
+  ) {
+    const now = Date.now();
+    setOperations((current) => {
+      const existing = current.find((item) => item.id === id);
+      const next: OperationRecord = {
+        id,
+        type: updates.type,
+        label: updates.label,
+        status: updates.status ?? "running",
+        progress: Math.max(0, Math.min(100, Math.round(updates.progress ?? 0))),
+        message: updates.message,
+        startedAt: existing?.startedAt ?? now,
+        updatedAt: now,
+        durationMs:
+          updates.status && updates.status !== "running"
+            ? now - (existing?.startedAt ?? now)
+            : existing?.durationMs,
+        error: updates.error,
+      };
+      return [next, ...current.filter((item) => item.id !== id)].slice(0, 12);
+    });
+  }
+
+  function completeOperation(id: string, message: string, source: string) {
+    const now = Date.now();
+    setOperations((current) =>
+      current.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              status: "succeeded",
+              progress: 100,
+              message,
+              updatedAt: now,
+              durationMs: now - item.startedAt,
+              error: undefined,
+            }
+          : item,
+      ),
+    );
+    pushNotice("success", source, message);
+  }
+
+  function failOperation(id: string, source: string, error: unknown) {
+    const detail = apiFailureDetail(error);
+    const now = Date.now();
+    setOperations((current) =>
+      current.map((item) =>
+        item.id === id
+          ? {
+              ...item,
+              status: "failed",
+              progress: 100,
+              message: `${source}失败`,
+              updatedAt: now,
+              durationMs: now - item.startedAt,
+              error: detail,
+            }
+          : item,
+      ),
+    );
+    pushNotice("error", source, "操作失败", detail);
+  }
   const [chapterPlaybackState, setChapterPlaybackState] = useState<
     "idle" | "playing" | "paused"
   >("idle");
   const [chapterPlaybackUtteranceId, setChapterPlaybackUtteranceId] =
     useState("");
+  const [chapterPlaybackTime, setChapterPlaybackTime] = useState(0);
+  const [chapterPlaybackDuration, setChapterPlaybackDuration] = useState(0);
   const [workflowState, setWorkflowState] = useState(() =>
     createWorkflowState("automatic"),
   );
@@ -1709,6 +2180,8 @@ function App() {
     projects.find((project) => project.project_id === activeProjectId) ??
     projects[0] ??
     null;
+  const isAutomaticMode = workflowState.mode === "automatic";
+  const isManualMode = workflowState.mode === "step";
 
   function updateServiceHealthFromError(error: unknown) {
     const detail = apiFailureDetail(error);
@@ -1723,18 +2196,36 @@ function App() {
   const visibleParagraphs = paragraphs.filter(
     (paragraph) => !paragraph.deleted,
   );
+  const qualityParagraphs = useMemo(
+    () =>
+      visibleParagraphs.filter(
+        (paragraph) => !ignoredParagraphIds[paragraph.paragraphId],
+      ),
+    [ignoredParagraphIds, visibleParagraphs],
+  );
+  const activeUtterancesByParagraph = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(utterancesByParagraph).filter(
+          ([paragraphId]) => !ignoredParagraphIds[paragraphId],
+        ),
+      ),
+    [ignoredParagraphIds, utterancesByParagraph],
+  );
   const flattenedUtterances = useMemo(
     () =>
-      visibleParagraphs.flatMap(
+      qualityParagraphs.flatMap(
         (paragraph) => utterancesByParagraph[paragraph.paragraphId] ?? [],
       ),
-    [utterancesByParagraph, visibleParagraphs],
+    [qualityParagraphs, utterancesByParagraph],
   );
   const paragraphStatusItems = useMemo<ParagraphStatusItem[]>(
     () =>
       visibleParagraphs.map((paragraph) => {
         const utterances = utterancesByParagraph[paragraph.paragraphId] ?? [];
-        const status = paragraphDubbingStatus(utterances);
+        const status = ignoredParagraphIds[paragraph.paragraphId]
+          ? "ignored"
+          : paragraphDubbingStatus(utterances);
         return {
           paragraphId: paragraph.paragraphId,
           text: paragraph.text,
@@ -1743,7 +2234,7 @@ function App() {
           firstUtteranceId: utterances[0]?.utteranceId ?? "",
         };
       }),
-    [utterancesByParagraph, visibleParagraphs],
+    [ignoredParagraphIds, utterancesByParagraph, visibleParagraphs],
   );
   const paragraphStatusCounts = useMemo<Record<ParagraphDubbingStatus, number>>(
     () =>
@@ -1758,6 +2249,7 @@ function App() {
           undubbed: 0,
           dubbed: 0,
           failed: 0,
+          ignored: 0,
         },
       ),
     [paragraphStatusItems],
@@ -1773,10 +2265,20 @@ function App() {
     Boolean(utteranceAudioSource(utterance)),
   );
   const playableChapterQueue = useMemo(
-    () => flattenedUtterances.filter((utterance) => utteranceAudioSource(utterance)),
+    () =>
+      flattenedUtterances.filter((utterance) =>
+        utteranceAudioSource(utterance),
+      ),
     [flattenedUtterances],
   );
-  const primaryStatementParagraphId = visibleParagraphs[0]?.paragraphId ?? "";
+  const currentChapterPlaybackUtterance = useMemo(
+    () =>
+      playableChapterQueue.find(
+        (utterance) => utterance.utteranceId === chapterPlaybackUtteranceId,
+      ) ?? null,
+    [chapterPlaybackUtteranceId, playableChapterQueue],
+  );
+  const primaryStatementParagraphId = qualityParagraphs[0]?.paragraphId ?? "";
   const roleOptions = useMemo(
     () => roles.map((role) => ({ value: role.roleId, label: role.name })),
     [roles],
@@ -1796,17 +2298,26 @@ function App() {
     [reviewQueue.items],
   );
   const blockerItems = useMemo(() => {
-    const source = reviewQueue.items.length > 0 ? reviewQueue.items : qualityReport.issues;
+    const source =
+      reviewQueue.items.length > 0 ? reviewQueue.items : qualityReport.issues;
     const seen = new Set<string>();
     return source.filter((item) => {
-      const id = item.issue_id || `${item.issue_type}:${item.utterance_id ?? item.paragraph_id ?? item.role_id ?? item.message}`;
+      if (item.paragraph_id && ignoredParagraphIds[item.paragraph_id]) {
+        return false;
+      }
+      const id =
+        item.issue_id ||
+        `${item.issue_type}:${item.utterance_id ?? item.paragraph_id ?? item.role_id ?? item.message}`;
       if (seen.has(id)) return false;
       seen.add(id);
       return true;
     });
-  }, [qualityReport.issues, reviewQueue.items]);
+  }, [ignoredParagraphIds, qualityReport.issues, reviewQueue.items]);
   const visibleBlockerItems = blockerItems.slice(0, 3);
-  const hiddenBlockerCount = Math.max(0, blockerItems.length - visibleBlockerItems.length);
+  const hiddenBlockerCount = Math.max(
+    0,
+    blockerItems.length - visibleBlockerItems.length,
+  );
   const productionStepIndex = useMemo(() => {
     if (!hasSplitChapters) return novelPreview ? 1 : 0;
     if (!activeChapter) return 1;
@@ -1838,10 +2349,10 @@ function App() {
   const productionPrimaryAction = useMemo(() => {
     if (!hasSplitChapters) {
       return {
-        label: novelPreview ? "解析章节" : "上传小说",
+        label: novelPreview ? "继续解析章节" : "开始制作",
         detail: novelPreview
           ? "已读取小说预览，下一步解析章节目录并进入制作。"
-          : "先上传小说文件，系统会保留预览并准备章节解析。",
+          : "未选择文件时会打开文件选择器；上传后再解析章节。",
         disabled: false,
       };
     }
@@ -1852,52 +2363,67 @@ function App() {
         disabled: chapters.length === 0,
       };
     }
-    if (blockerItems.length > 0 || hasPendingHumanReview) {
-      return {
-        label: "处理阻塞项",
-        detail: `当前有 ${Math.max(blockerItems.length, 1)} 个制作阻塞项需要处理。`,
-        disabled: false,
-      };
-    }
-    if (roles.length === 0 || flattenedUtterances.length === 0) {
-      return {
-        label: "生成角色与台词",
-        detail: "运行 Agent 生成角色、台词和初始配音编排。",
-        disabled: agentRunRunning || visibleParagraphs.length === 0,
-      };
-    }
-    if (agentRunWaitingForRoles && agentRunThreadId) {
-      return {
-        label: "生成台词编排",
-        detail: "角色已分析，继续执行配音编排。",
-        disabled: agentRunRunning,
-      };
-    }
-    if (!confirmed) {
-      return {
-        label: "确认台词与角色",
-        detail: "确认已选台词与角色后进入配音生成。",
-        disabled: flattenedUtterances.length === 0,
-      };
-    }
-    if (hasUngeneratedAudioUtterance) {
-      return {
-        label: "生成缺失配音",
-        detail: "批量生成当前章节缺失的配音。",
-        disabled: false,
-      };
-    }
-    if (hasGeneratedAudioUtterance) {
-      return {
-        label: "导出制作包",
-        detail: "导出制作包；需要听审时可在高级操作中播放整章。",
-        disabled: false,
-      };
+    if (isManualMode) {
+      if (roles.length === 0) {
+        return {
+          label: "新增角色",
+          detail: "分步配音为纯手动模式：先手动创建角色并绑定音色。",
+          disabled: false,
+        };
+      }
+      if (flattenedUtterances.length === 0) {
+        return {
+          label: "添加第一条台词",
+          detail: "从正文段落旁添加台词；非台词原文可直接忽略。",
+          disabled: qualityParagraphs.length === 0,
+        };
+      }
+      if (hasPendingHumanReview) {
+        return {
+          label: "确认台词与角色",
+          detail: "检查文本和角色选择，确认后进入配音生成。",
+          disabled: flattenedUtterances.length === 0,
+        };
+      }
+      if (!confirmed) {
+        return {
+          label: "确认台词与角色",
+          detail: "确认已选台词与角色后进入配音生成。",
+          disabled: flattenedUtterances.length === 0,
+        };
+      }
+      if (hasUngeneratedAudioUtterance) {
+        return {
+          label: "生成缺失配音",
+          detail: "批量生成当前章节缺失的配音。",
+          disabled: false,
+        };
+      }
+      if (hasGeneratedAudioUtterance) {
+        return {
+          label: "导出制作包",
+          detail: "导出制作包；听审时可用整章播放器。",
+          disabled: false,
+        };
+      }
     }
     return {
-      label: "处理阻塞项",
-      detail: "先刷新阻塞项，确认当前章节是否可继续。",
-      disabled: false,
+      label: "自动完成到导出",
+      detail:
+        blockerItems.length > 0 || hasPendingHumanReview
+          ? `先定位 ${Math.max(blockerItems.length, 1)} 个需要人工处理的问题。`
+          : roles.length === 0 || flattenedUtterances.length === 0
+            ? "将依次执行角色分析、配音编排、配音生成与导出。"
+            : agentRunWaitingForRoles && agentRunThreadId
+              ? "将从配音编排 Agent 继续，完成后自动生成配音。"
+              : !confirmed
+                ? "将先确认已完整的台词与角色，再继续生成配音。"
+                : hasUngeneratedAudioUtterance
+                  ? "将批量生成缺失配音，完成后自动导出制作包。"
+                  : hasGeneratedAudioUtterance
+                    ? "当前已有音频，将直接导出制作包。"
+                    : "将刷新制作状态并选择下一步。",
+      disabled: agentRunRunning || dubbingInFlightRef.current,
     };
   }, [
     activeChapter,
@@ -1912,7 +2438,9 @@ function App() {
     hasPendingHumanReview,
     hasSplitChapters,
     hasUngeneratedAudioUtterance,
+    isManualMode,
     novelPreview,
+    qualityParagraphs.length,
     roles.length,
     visibleParagraphs.length,
   ]);
@@ -1932,7 +2460,7 @@ function App() {
           {
             chapter_id: activeChapter.chapterId,
             title: activeChapter.title,
-            paragraphs: visibleParagraphs.map((paragraph) => ({
+            paragraphs: qualityParagraphs.map((paragraph) => ({
               paragraph_id: paragraph.paragraphId,
               text: paragraph.text,
             })),
@@ -1946,7 +2474,9 @@ function App() {
     return {
       chapters: scopedChapters,
       roles: roles.map(toApiRole),
-      utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+      utterances_by_paragraph: utteranceGroupsToApi(
+        activeUtterancesByParagraph,
+      ),
       max_utterance_chars: 120,
       ...(filters ? { filters } : {}),
     };
@@ -2077,7 +2607,9 @@ function App() {
     setQualityStatus(`已切换到最近项目：${project.name}`);
   }
 
-  async function runQualityCheck(purpose: "generate" | "export" = "generate") {
+  async function runQualityCheck(
+    purpose: "generate" | "export" = "generate",
+  ): Promise<QualityCheckResponse | null> {
     const projectId = activeProject?.project_id ?? activeProjectId;
     setQualityStatus(
       purpose === "export" ? "正在刷新导出阻塞项" : "正在刷新制作阻塞项",
@@ -2101,8 +2633,10 @@ function App() {
             : `制作仍有 ${data.issues.length} 个阻塞项`,
       );
       void loadReviewQueue();
+      return data;
     } catch (error) {
       setQualityStatus(apiFailureMessage("制作阻塞项刷新失败", error));
+      return null;
     }
   }
 
@@ -2206,7 +2740,7 @@ function App() {
 
   async function refreshProductionAssistant() {
     if (!hasSplitChapters || !activeChapter) {
-      setPlannerStatus("智能下一步助手：先上传小说、解析章节并选择当前章节。");
+      setPlannerStatus("制作建议：先上传小说、解析章节并选择当前章节。");
       return;
     }
     if (!plannerRun || plannerRun.chapter_id !== activeChapterId) {
@@ -2219,7 +2753,11 @@ function App() {
   async function handleProductionPrimaryAction() {
     if (!hasSplitChapters) {
       if (uploadedNovelFileRef.current || fullNovelTextRef.current.trim()) {
-        await runAiChapterSplit();
+        if (isManualMode && fullNovelTextRef.current.trim()) {
+          await importNovelText(fullNovelTextRef.current);
+        } else {
+          await runAiChapterSplit();
+        }
       } else {
         fileInputRef.current?.click();
         setApiStatus("请选择小说文件，随后点击开始制作继续解析章节");
@@ -2230,32 +2768,98 @@ function App() {
       setApiStatus("请先选择一个章节，再继续制作");
       return;
     }
-    if (blockerItems.length > 0 || hasPendingHumanReview) {
+    if (isManualMode) {
+      if (roles.length === 0) {
+        await addRole();
+        return;
+      }
+      if (flattenedUtterances.length === 0) {
+        const targetParagraph = qualityParagraphs[0];
+        if (!targetParagraph) {
+          setApiStatus("当前章节正文都已忽略，没有可添加台词的段落");
+          return;
+        }
+        addUtteranceAfter(targetParagraph.paragraphId);
+        setApiStatus(`已为 ${targetParagraph.paragraphId} 添加第一条手动台词`);
+        return;
+      }
+      if (hasPendingHumanReview || !confirmed) {
+        confirmAllReadyUtterances();
+        return;
+      }
+      if (hasUngeneratedAudioUtterance) {
+        await generateChapterDubbing();
+        return;
+      }
+      if (hasGeneratedAudioUtterance) {
+        await exportChapterAudio();
+        return;
+      }
       await runQualityCheck("generate");
-      if (blockerItems[0]) focusQualityIssue(blockerItems[0]);
+      return;
+    }
+    autoPipelineRequestedRef.current = true;
+    if (agentRunRunning || dubbingInFlightRef.current) {
+      setApiStatus("自动完成已在运行，请稍等当前任务结束");
+      return;
+    }
+    if (blockerItems.length > 0) {
+      const latestQuality = await runQualityCheck("generate");
+      const latestIssue =
+        latestQuality?.issues.find(
+          (issue) =>
+            !issue.paragraph_id || !ignoredParagraphIds[issue.paragraph_id],
+        ) ?? blockerItems[0];
+      if (latestIssue) focusQualityIssue(latestIssue);
+      else setApiStatus("制作阻塞项已刷新，请再次点击自动完成到导出");
+      return;
+    }
+    if (hasPendingHumanReview) {
+      const pending = firstPendingUtterance();
+      if (pending) {
+        focusUtterance(
+          pending,
+          `请先人工确认台词与角色：${pending.utteranceId}`,
+        );
+      } else {
+        confirmAllReadyUtterances();
+      }
       return;
     }
     if (roles.length === 0 || flattenedUtterances.length === 0) {
-      await runAiRoleAnalysis();
+      await runAiRoleAnalysis({ autoContinue: true });
       return;
     }
     if (agentRunWaitingForRoles && agentRunThreadId) {
-      await runAiRoleMatching();
+      await runAiRoleMatching({ autoContinue: true });
       return;
     }
     if (!confirmed) {
-      confirmAllReadyUtterances();
+      const pending = firstPendingUtterance();
+      if (pending) {
+        focusUtterance(
+          pending,
+          `请先人工确认台词与角色：${pending.utteranceId}`,
+        );
+      } else {
+        confirmAllReadyUtterances();
+        if (hasUngeneratedAudioUtterance) {
+          await generateChapterDubbing(true, { autoContinue: true });
+        }
+      }
       return;
     }
     if (hasUngeneratedAudioUtterance) {
-      await generateChapterDubbing();
+      await generateChapterDubbing(false, { autoContinue: true });
       return;
     }
     if (hasGeneratedAudioUtterance) {
       await exportChapterAudio();
+      autoPipelineRequestedRef.current = false;
       return;
     }
-    await runQualityCheck("generate");
+    const latestQuality = await runQualityCheck("generate");
+    if (latestQuality?.issues[0]) focusQualityIssue(latestQuality.issues[0]);
   }
 
   function focusQualityIssue(issue: QualityIssue) {
@@ -2342,7 +2946,11 @@ function App() {
         },
       );
       setUtterancesByParagraph(
-        fromApiUtteranceEditGroups(data.utterances_by_paragraph, paragraphs, roles),
+        fromApiUtteranceEditGroups(
+          data.utterances_by_paragraph,
+          paragraphs,
+          roles,
+        ),
       );
       setConfirmed(false);
       setBulkRolePreviewArmed(false);
@@ -2405,7 +3013,9 @@ function App() {
     }
   }
 
-  async function prepareRetryQueue(utteranceIds: string[]): Promise<UtteranceDraft[]> {
+  async function prepareRetryQueue(
+    utteranceIds: string[],
+  ): Promise<UtteranceDraft[]> {
     const projectId = activeProject?.project_id ?? activeProjectId;
     const data = await requestJson<UtteranceEditResponse>(
       `/projects/${encodeURIComponent(projectId)}/utterances/retry-queue`,
@@ -2451,9 +3061,7 @@ function App() {
         retryUtterances.map((utterance) => utterance.utteranceId),
       );
       prepared.forEach((utterance) => void generateAudio(utterance));
-      setQualityStatus(
-        `批量重试已加入队列：${prepared.length} 条配音失败台词`,
-      );
+      setQualityStatus(`批量重试已加入队列：${prepared.length} 条配音失败台词`);
     } catch (error) {
       setQualityStatus(apiFailureMessage("批量重试准备失败", error));
     }
@@ -2483,7 +3091,9 @@ function App() {
         data.split_report?.source_utterance_id ?? utterance.utteranceId,
         data.split_report?.paragraph_id ?? utterance.paragraphId,
       );
-      retryUtterances.forEach((retryUtterance) => void generateAudio(retryUtterance));
+      retryUtterances.forEach(
+        (retryUtterance) => void generateAudio(retryUtterance),
+      );
       setQualityStatus(
         `长台词已拆分：${data.split_report?.segment_count ?? 0} 段，已加入 ${retryUtterances.length} 条配音重试队列`,
       );
@@ -2494,7 +3104,9 @@ function App() {
 
   async function mergeWithNextUtterance(utterance: UtteranceDraft) {
     const list = utterancesByParagraph[utterance.paragraphId] ?? [];
-    const index = list.findIndex((item) => item.utteranceId === utterance.utteranceId);
+    const index = list.findIndex(
+      (item) => item.utteranceId === utterance.utteranceId,
+    );
     const next = index >= 0 ? list[index + 1] : undefined;
     if (!next) {
       setQualityStatus("合并相邻台词失败：当前台词后面没有相邻台词");
@@ -2514,7 +3126,11 @@ function App() {
         },
       );
       setUtterancesByParagraph(
-        fromApiUtteranceEditGroups(data.utterances_by_paragraph, paragraphs, roles),
+        fromApiUtteranceEditGroups(
+          data.utterances_by_paragraph,
+          paragraphs,
+          roles,
+        ),
       );
       setConfirmed(false);
       setQualityStatus(
@@ -2574,17 +3190,42 @@ function App() {
   async function searchStoryMemoryContext() {
     const projectId = activeProject?.project_id ?? activeProjectId;
     const query = memoryQuery.trim() || activeChapter?.title || "角色";
+    const operationId = "memory-search";
+    trackOperation(operationId, {
+      type: "memory",
+      label: "项目记忆检索",
+      progress: 25,
+      message: `正在检索：${query}`,
+    });
     setMemoryStatus(`正在检索项目记忆：${query}`);
     try {
       const data = await requestJson<StoryMemoryContextResponse>(
         `/projects/${encodeURIComponent(projectId)}/story-bible/memory-context?query=${encodeURIComponent(query)}`,
       );
       setMemoryContext(data);
+      const total =
+        data.facts_for_prompt.length +
+        data.candidate_facts.length +
+        data.rejected_facts.length;
       setMemoryStatus(
         `记忆上下文已更新：可信 ${data.facts_for_prompt.length} 条，候选 ${data.candidate_facts.length} 条，已拒绝 ${data.rejected_facts.length} 条`,
       );
+      completeOperation(
+        operationId,
+        `检索完成：${total} 条相关事实`,
+        "项目记忆检索",
+      );
+      if (total === 0) {
+        pushNotice(
+          "warning",
+          "项目记忆检索",
+          "没有匹配事实",
+          "可以减少关键词或先索引正文。",
+        );
+      }
     } catch (error) {
       setMemoryStatus(apiFailureMessage("项目记忆检索失败", error));
+      failOperation(operationId, "项目记忆检索", error);
     }
   }
 
@@ -2617,8 +3258,15 @@ function App() {
         data.fact,
         ...current.filter((fact) => fact.fact_id !== data.fact.fact_id),
       ]);
-      setMemoryCorrection({ subject: "", predicate: "alias", object: "", notes: "" });
-      setMemoryStatus(`用户纠错已写入：${data.fact.subject} ${data.fact.predicate}`);
+      setMemoryCorrection({
+        subject: "",
+        predicate: "alias",
+        object: "",
+        notes: "",
+      });
+      setMemoryStatus(
+        `用户纠错已写入：${data.fact.subject} ${data.fact.predicate}`,
+      );
     } catch (error) {
       setMemoryStatus(apiFailureMessage("用户纠错写入失败", error));
     }
@@ -2709,7 +3357,25 @@ function App() {
         .then((data) => {
           if (cancelled) return;
           const status = applyTtsDeployment(data.deployment);
-          if (status.status !== "running") setApiStatus(status.message);
+          if (status.status === "running") {
+            trackOperation("tts-deploy", {
+              type: "tts_deploy",
+              label: "TTS 部署",
+              progress: status.progress,
+              message: status.message,
+            });
+            return;
+          }
+          setApiStatus(status.message);
+          if (status.status === "succeeded") {
+            completeOperation("tts-deploy", status.message, "TTS 部署");
+          } else if (status.status === "failed") {
+            failOperation(
+              "tts-deploy",
+              "TTS 部署",
+              new Error(status.error || status.message),
+            );
+          }
         })
         .catch((error) => {
           if (!cancelled)
@@ -2726,6 +3392,7 @@ function App() {
 
   useEffect(() => {
     if (
+      !autoPipelineRequestedRef.current ||
       workflowState.mode !== "automatic" ||
       workflowState.status !== "running"
     )
@@ -2737,7 +3404,7 @@ function App() {
       !automaticRoleMatchingAttemptedRef.current
     ) {
       automaticRoleMatchingAttemptedRef.current = true;
-      void runAiRoleMatching();
+      void runAiRoleMatching({ autoContinue: true });
       return;
     }
     if (
@@ -2746,7 +3413,7 @@ function App() {
       !automaticDubbingStartedRef.current
     ) {
       automaticDubbingStartedRef.current = true;
-      void generateChapterDubbing();
+      void generateChapterDubbing(true, { autoContinue: true });
     }
   }, [
     agentRunRunning,
@@ -2786,6 +3453,7 @@ function App() {
     setConfirmed(false);
     setChapterBackendSynced(false);
     setUtterancesByParagraph({});
+    setIgnoredParagraphIds({});
     setGeneratingUtteranceIds({});
     resetAgentRunState();
     setApiStatus(status);
@@ -2794,6 +3462,13 @@ function App() {
   async function handleTxtFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
+    const operationId = "upload-novel";
+    trackOperation(operationId, {
+      type: "upload",
+      label: "上传小说",
+      progress: 8,
+      message: `正在读取 ${file.name}`,
+    });
     setUploadProgress(8);
     setApiStatus(`正在读取小说：${file.name}`);
     const upload = await readNovelFileUpload(file);
@@ -2809,13 +3484,22 @@ function App() {
     setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
+    setIgnoredParagraphIds({});
     resetAgentRunState();
     setUploadProgress(62);
-    setApiStatus("小说已上传，仅展示开头预览；点击“文档解析”生成章节目录");
+    setApiStatus("小说已上传，完整文本已保留；点击“文档解析”生成章节目录");
     setUploadProgress(100);
+    completeOperation(operationId, "小说上传完成，等待文档解析", "上传小说");
   }
 
   async function runAiChapterSplit() {
+    const operationId = "chapter-split";
+    trackOperation(operationId, {
+      type: "chapter_split",
+      label: "文档解析",
+      progress: 12,
+      message: "正在检查可复用规则",
+    });
     setChapterSplitProgress(12);
     setApiStatus("文档解析正在检查可复用规则");
     try {
@@ -2824,7 +3508,7 @@ function App() {
       setServiceHealth({
         state: "connected",
         label: "后端已连接",
-        detail: connection.message || "Agent API 可用",
+        detail: connection.message || "后端 API 可用",
       });
       const uploadedFile = uploadedNovelFileRef.current;
       const data = uploadedFile
@@ -2856,6 +3540,12 @@ function App() {
             },
           );
       setChapterSplitProgress(84);
+      trackOperation(operationId, {
+        type: "chapter_split",
+        label: "文档解析",
+        progress: 84,
+        message: `已识别 ${data.chapters.length} 个章节`,
+      });
       const parsed = data.chapters.map(fromApiChapter);
       const ruleName =
         data.agent.rule_path?.split(/[\\/]/).pop() ?? "未记录规则";
@@ -2864,11 +3554,13 @@ function App() {
           ? `文档解析完成：已复用 ${ruleName}`
           : `文档解析完成：已生成并保存 ${ruleName}`;
       applyChapters(parsed, `${agentStatus}；选择左侧章节后才加载该章正文`);
+      completeOperation(operationId, agentStatus, "文档解析");
     } catch (error) {
       setChapterSplitProgress(76);
       updateServiceHealthFromError(error);
       const parsed = parseChapterIndex(fullNovelTextRef.current);
       applyChapters(parsed, documentParseFallbackMessage(error));
+      failOperation(operationId, "文档解析", error);
     } finally {
       setChapterSplitProgress(100);
     }
@@ -2883,7 +3575,10 @@ function App() {
     setParagraphs(nextParagraphs);
     setConfirmed(false);
     setChapterBackendSynced(false);
-    setUtterancesByParagraph(makeWholeParagraphUtteranceGroups(nextParagraphs));
+    setUtterancesByParagraph(
+      isAutomaticMode ? makeWholeParagraphUtteranceGroups(nextParagraphs) : {},
+    );
+    setIgnoredParagraphIds({});
     setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
@@ -2903,7 +3598,7 @@ function App() {
         method: "PUT",
         body: JSON.stringify({
           title: activeChapter.title,
-          paragraphs: visibleParagraphs.map((paragraph) => ({
+          paragraphs: qualityParagraphs.map((paragraph) => ({
             paragraph_id: paragraph.paragraphId,
             text: paragraph.text,
             collapsed: paragraph.collapsed,
@@ -2940,6 +3635,10 @@ function App() {
       setChapterBackendSynced(false);
       setUtterancesByParagraph({});
       setGeneratingUtteranceIds({});
+      setIgnoredParagraphIds((current) => ({
+        ...current,
+        [paragraphId]: false,
+      }));
       resetAgentRunState();
     }
   }
@@ -2964,8 +3663,41 @@ function App() {
       }
       return remainingGeneratingIds;
     });
+    setIgnoredParagraphIds((current) => ({
+      ...current,
+      [paragraphId]: false,
+    }));
     setChapterBackendSynced(false);
-    setApiStatus(`已删除段落 ${paragraphId}；其余配音编排 Agent 结果已保留`);
+    setApiStatus(`已删除段落 ${paragraphId}；其余台词结果已保留`);
+  }
+
+  function toggleIgnoreParagraph(paragraphId: string) {
+    const isIgnored = Boolean(ignoredParagraphIds[paragraphId]);
+    setIgnoredParagraphIds((current) => ({
+      ...current,
+      [paragraphId]: !isIgnored,
+    }));
+    if (!isIgnored) {
+      setUtterancesByParagraph((current) => {
+        const nextGroups = { ...current };
+        delete nextGroups[paragraphId];
+        return nextGroups;
+      });
+      setGeneratingUtteranceIds((current) => {
+        const nextIds = { ...current };
+        for (const utterance of utterancesByParagraph[paragraphId] ?? []) {
+          delete nextIds[utterance.utteranceId];
+        }
+        return nextIds;
+      });
+      setConfirmed(false);
+      setApiStatus(
+        `已忽略 ${paragraphId}：该段不会进入质量检查、整章播放或导出`,
+      );
+      return;
+    }
+    setConfirmed(false);
+    setApiStatus(`已取消忽略 ${paragraphId}，可继续手动添加台词`);
   }
 
   async function ensureChapterStatementsReady(): Promise<
@@ -2973,6 +3705,7 @@ function App() {
   > {
     const hasStatementDrafts = visibleParagraphs.some(
       (paragraph) =>
+        !ignoredParagraphIds[paragraph.paragraphId] &&
         (utterancesByParagraph[paragraph.paragraphId] ?? []).length > 0,
     );
     if (confirmed && hasStatementDrafts) return utterancesByParagraph;
@@ -2993,7 +3726,9 @@ function App() {
     );
     setUtterancesByParagraph(nextUtterances);
     setApiStatus(
-      "当前章节已准备为可编辑台词草稿；配音编排 Agent 将自动完成台词划分和角色选择",
+      isAutomaticMode
+        ? "当前章节已准备为可编辑台词草稿；配音编排 Agent 将自动完成台词划分和角色选择"
+        : "当前章节已准备为可编辑台词草稿，可继续手动选择角色",
     );
     return nextUtterances;
   }
@@ -3015,7 +3750,9 @@ function App() {
         apiUtterancesToGroups(draftsByParagraph, synced.paragraphs, roles),
       );
       setApiStatus(
-        "段落已确认，已默认按整段落生成台词文本；配音编排 Agent 将自动完成台词划分和角色选择",
+        isAutomaticMode
+          ? "段落已确认，已默认按整段落生成台词文本；配音编排 Agent 将自动完成台词划分和角色选择"
+          : "段落已确认，已默认按整段落生成台词文本，可继续手动选择角色",
       );
     } catch (error) {
       setConfirmed(false);
@@ -3117,7 +3854,9 @@ function App() {
   async function deleteRole(roleId: string) {
     const payload = {
       roles: roles.map(toApiRole),
-      utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+      utterances_by_paragraph: utteranceGroupsToApi(
+        activeUtterancesByParagraph,
+      ),
     };
     try {
       const data = await requestJson<{
@@ -3176,8 +3915,16 @@ function App() {
     }
   }
 
-  async function runAiRoleAnalysis() {
-    if (!activeChapter || visibleParagraphs.length === 0) return;
+  async function runAiRoleAnalysis(options: { autoContinue?: boolean } = {}) {
+    if (!activeChapter || qualityParagraphs.length === 0) return;
+    autoPipelineRequestedRef.current = Boolean(options.autoContinue);
+    const operationId = "role-analysis";
+    trackOperation(operationId, {
+      type: "role_analysis",
+      label: "角色分析 Agent",
+      progress: 8,
+      message: "正在同步当前章节",
+    });
     setAgentRunRunning(true);
     automaticDubbingStartedRef.current = false;
     automaticRoleMatchingAttemptedRef.current = false;
@@ -3188,6 +3935,12 @@ function App() {
     setApiStatus("角色分析 Agent 正在同步当前章节、创建角色并匹配音色");
     try {
       await syncCurrentChapterParagraphs(false);
+      trackOperation(operationId, {
+        type: "role_analysis",
+        label: "角色分析 Agent",
+        progress: 18,
+        message: "正在调用文本模型分析角色",
+      });
       const data = await requestJson<RoleAnalysisRunResponse>(
         `/chapters/${activeChapter.chapterId}/agent-runs`,
         { method: "POST", body: JSON.stringify({}) },
@@ -3205,20 +3958,38 @@ function App() {
         ? `自动新增 ${data.auto_role_report.added_count} 个角色，生成 ${data.auto_role_report.generated_voice_count} 个音色。`
         : "";
       setApiStatus(
-        `${data.message} ${autoSummary} 请检查角色列表后点击“配音编排 Agent”。`,
+        autoPipelineRequestedRef.current
+          ? `${data.message} ${autoSummary} 将继续执行配音编排 Agent。`
+          : `${data.message} ${autoSummary} 请检查角色列表后点击“配音编排 Agent”。`,
+      );
+      completeOperation(
+        operationId,
+        `识别 ${data.role_candidates.length} 个候选角色`,
+        "角色分析 Agent",
       );
       void loadAgentRunHistory();
     } catch (error) {
       resetAgentRunState();
       setRoleMatchingProgress(100);
       setApiStatus(apiFailureMessage("角色分析 Agent 失败", error));
+      failOperation(operationId, "角色分析 Agent", error);
     } finally {
       setAgentRunRunning(false);
     }
   }
 
-  async function runAiRoleMatching() {
+  async function runAiRoleMatching(options: { autoContinue?: boolean } = {}) {
     if (!agentRunThreadId) return;
+    if (options.autoContinue !== undefined) {
+      autoPipelineRequestedRef.current = Boolean(options.autoContinue);
+    }
+    const operationId = "dubbing-arrangement";
+    trackOperation(operationId, {
+      type: "dubbing_arrangement",
+      label: "配音编排 Agent",
+      progress: 45,
+      message: "正在准备台词和角色上下文",
+    });
     setAgentRunRunning(true);
     setWorkflowState((current) =>
       transitionWorkflow(current, { type: "CONTINUE" }),
@@ -3228,6 +3999,12 @@ function App() {
     setApiStatus("配音编排 Agent 正在划分台词并为未绑定台词选择角色");
     try {
       const readyUtterances = await ensureChapterStatementsReady();
+      trackOperation(operationId, {
+        type: "dubbing_arrangement",
+        label: "配音编排 Agent",
+        progress: 55,
+        message: "正在调用文本模型划分台词",
+      });
       const requestBody = JSON.stringify({
         roles: roles.map(toApiRole),
         utterances_by_paragraph: utteranceGroupsToApi(readyUtterances),
@@ -3286,6 +4063,7 @@ function App() {
       setAgentRunWaitingForRoles(true);
       setRoleMatchingProgress(100);
       setApiStatus(apiFailureMessage("配音编排 Agent 失败", error));
+      failOperation(operationId, "配音编排 Agent", error);
     } finally {
       setAgentRunRunning(false);
     }
@@ -3297,6 +4075,12 @@ function App() {
       setRoleMatchingProgress((current) =>
         Math.min(95, Math.max(current + 5, 55)),
       );
+      trackOperation("dubbing-arrangement", {
+        type: "dubbing_arrangement",
+        label: "配音编排 Agent",
+        progress: 75,
+        message: "正在接收角色选择事件",
+      });
       return;
     }
     if (event.event === "completed") {
@@ -3318,6 +4102,7 @@ function App() {
             data.status === "needs_human_review" ? "PAUSE" : "AGENT_COMPLETED",
         }),
       );
+      completeOperation("dubbing-arrangement", data.message, "配音编排 Agent");
       void loadAgentRunHistory();
       return;
     }
@@ -3329,6 +4114,11 @@ function App() {
       setAgentRunWaitingForRoles(true);
       setRoleMatchingProgress(100);
       setApiStatus(`配音编排 Agent 失败：${message}`);
+      failOperation(
+        "dubbing-arrangement",
+        "配音编排 Agent",
+        new Error(message),
+      );
     }
   }
 
@@ -3481,7 +4271,7 @@ function App() {
     let remaining = 0;
     const nextGroups: Record<string, UtteranceDraft[]> = {};
     for (const [paragraphId, utterances] of Object.entries(
-      utterancesByParagraph,
+      activeUtterancesByParagraph,
     )) {
       nextGroups[paragraphId] = utterances.map((utterance) => {
         const ready = Boolean(utterance.roleId && utterance.text.trim());
@@ -3511,6 +4301,7 @@ function App() {
     }
     setApiStatus("所有台词与角色已确认，可以继续生成配音");
     if (
+      autoPipelineRequestedRef.current &&
       workflowState.mode === "automatic" &&
       workflowState.activeAgent === "dubbing_director"
     ) {
@@ -3519,7 +4310,7 @@ function App() {
       );
       if (!automaticDubbingStartedRef.current) {
         automaticDubbingStartedRef.current = true;
-        void generateChapterDubbing(true);
+        void generateChapterDubbing(true, { autoContinue: true });
       }
     }
   }
@@ -3529,6 +4320,10 @@ function App() {
       (item) => item.paragraphId === paragraphId,
     );
     if (!paragraph) return;
+    setIgnoredParagraphIds((current) => ({
+      ...current,
+      [paragraphId]: false,
+    }));
     setUtterancesByParagraph((current) => {
       const list = current[paragraphId] ?? [];
       const nextNumber =
@@ -3579,6 +4374,8 @@ function App() {
     chapterPlaybackIndexRef.current = 0;
     setChapterPlaybackState("idle");
     setChapterPlaybackUtteranceId("");
+    setChapterPlaybackTime(0);
+    setChapterPlaybackDuration(0);
     setApiStatus(message);
   }
 
@@ -3607,6 +4404,8 @@ function App() {
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
     player.src = mediaRequestUrl(source);
     player.currentTime = 0;
+    setChapterPlaybackTime(0);
+    setChapterPlaybackDuration(0);
     player
       .play()
       .then(() => setApiStatus(`正在播放配音：${utterance.utteranceId}`))
@@ -3617,7 +4416,8 @@ function App() {
   }
 
   function ensureChapterPlaybackQueue(): UtteranceDraft[] {
-    if (chapterPlaybackQueueRef.current.length > 0) return chapterPlaybackQueueRef.current;
+    if (chapterPlaybackQueueRef.current.length > 0)
+      return chapterPlaybackQueueRef.current;
     chapterPlaybackQueueRef.current = playableChapterQueue;
     return chapterPlaybackQueueRef.current;
   }
@@ -3638,6 +4438,17 @@ function App() {
       return;
     }
     playQueuedChapterAudioAt(chapterPlaybackIndexRef.current + 1);
+  }
+
+  function playChapterFromStart() {
+    const queue = playableChapterQueue;
+    if (queue.length === 0) {
+      setApiStatus("整章播放列表为空：当前章节没有已生成配音的台词");
+      return;
+    }
+    chapterPlaybackQueueRef.current = queue;
+    chapterPlaybackIndexRef.current = 0;
+    playQueuedChapterAudioAt(0);
   }
 
   function toggleChapterPlayback() {
@@ -3664,14 +4475,7 @@ function App() {
         );
       return;
     }
-    const queue = playableChapterQueue;
-    if (queue.length === 0) {
-      setApiStatus("当前章节没有已生成配音的台词");
-      return;
-    }
-    chapterPlaybackQueueRef.current = queue;
-    chapterPlaybackIndexRef.current = 0;
-    playQueuedChapterAudioAt(0);
+    playChapterFromStart();
   }
 
   async function generateAudio(utterance: UtteranceDraft) {
@@ -3787,23 +4591,51 @@ function App() {
     }
   }
 
-  async function generateChapterDubbing(forceConfirmed = false) {
+  async function generateChapterDubbing(
+    forceConfirmed = false,
+    options: { autoContinue?: boolean } = {},
+  ) {
     if (dubbingInFlightRef.current) return;
+    const shouldAutoExport = Boolean(
+      options.autoContinue ?? autoPipelineRequestedRef.current,
+    );
+    if (options.autoContinue !== undefined) {
+      autoPipelineRequestedRef.current = Boolean(options.autoContinue);
+    }
     if (!activeChapter) {
       setApiStatus("批量生成配音失败：请先选择章节");
+      pushNotice("warning", "批量生成配音", "请先选择章节");
       return;
     }
     if (!forceConfirmed && (!confirmed || hasPendingHumanReview)) {
       setApiStatus("批量生成配音失败：请先确认所有配音片段的台词与角色");
+      pushNotice("warning", "批量生成配音", "请先确认所有配音片段的台词与角色");
       return;
     }
+    const operationId = "chapter-dubbing";
+    trackOperation(operationId, {
+      type: "chapter_dubbing",
+      label: "批量生成配音",
+      progress: 10,
+      message: "正在按角色和音色分组",
+    });
     dubbingInFlightRef.current = true;
     setVoiceGenerationProgress(10);
-    setWorkflowState((current) =>
-      transitionWorkflow(current, { type: "CONTINUE" }),
-    );
+    if (isAutomaticMode) {
+      setWorkflowState((current) =>
+        transitionWorkflow(current, { type: "CONTINUE" }),
+      );
+    }
     setApiStatus("正在按角色/音色分组批量生成当前章节配音");
     try {
+      const queuedCount = Object.values(activeUtterancesByParagraph).flat()
+        .length;
+      trackOperation(operationId, {
+        type: "chapter_dubbing",
+        label: "批量生成配音",
+        progress: 25,
+        message: `正在提交 ${queuedCount} 条台词`,
+      });
       const data = await requestJson<{
         status: string;
         success_count: number;
@@ -3816,9 +4648,17 @@ function App() {
         method: "POST",
         body: JSON.stringify({
           roles: roles.map(toApiRole),
-          utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
+          utterances_by_paragraph: utteranceGroupsToApi(
+            activeUtterancesByParagraph,
+          ),
         }),
       });
+      const nextGroupsForExport = mergeApiAudioByUtteranceId(
+        activeUtterancesByParagraph,
+        data.utterances_by_paragraph,
+        paragraphs,
+        roles,
+      );
       setUtterancesByParagraph((current) =>
         mergeApiAudioByUtteranceId(
           current,
@@ -3829,22 +4669,49 @@ function App() {
       );
       setVoiceGenerationProgress(100);
       setApiStatus(formatBatchDubbingStatus(data));
-      setWorkflowState((current) =>
-        transitionWorkflow(current, { type: "AGENT_COMPLETED" }),
+      completeOperation(
+        operationId,
+        `成功 ${data.success_count} 条，失败 ${data.failed_count} 条`,
+        "批量生成配音",
       );
+      if (isAutomaticMode) {
+        setWorkflowState((current) =>
+          transitionWorkflow(current, { type: "AGENT_COMPLETED" }),
+        );
+      }
+      if (shouldAutoExport) {
+        if (data.failed_count > 0) {
+          autoPipelineRequestedRef.current = false;
+          void runQualityCheck("export");
+        } else {
+          await exportChapterAudio(nextGroupsForExport);
+          autoPipelineRequestedRef.current = false;
+        }
+      }
     } catch (error) {
       setVoiceGenerationProgress(100);
       setApiStatus(apiFailureMessage("批量生成配音失败", error));
+      failOperation(operationId, "批量生成配音", error);
     } finally {
       dubbingInFlightRef.current = false;
     }
   }
 
-  async function exportChapterAudio() {
+  async function exportChapterAudio(
+    utteranceGroupsOverride?: Record<string, UtteranceDraft[]>,
+  ) {
     if (!activeChapter) {
       setApiStatus("导出制作包失败：请先选择章节");
+      pushNotice("warning", "导出制作包", "请先选择章节");
       return;
     }
+    const operationId = "chapter-export";
+    trackOperation(operationId, {
+      type: "chapter_export",
+      label: "导出制作包",
+      progress: 15,
+      message: "正在整理逐句音频和台本",
+    });
     setApiStatus("正在导出当前章节完整 WAV/MP3、逐句音频和 manifest");
     try {
       const projectId = activeProject?.project_id ?? activeProjectId;
@@ -3857,33 +4724,54 @@ function App() {
         full_audio_path?: string | null;
         full_mp3_path?: string | null;
         package_files?: Record<string, string | null>;
-      }>(`/projects/${encodeURIComponent(projectId)}/exports/${activeChapter.chapterId}`, {
-        method: "POST",
-        body: JSON.stringify({
-          chapter_title: activeChapter.title,
-          roles: roles.map(toApiRole),
-          utterances_by_paragraph: utteranceGroupsToApi(utterancesByParagraph),
-          pause_ms: exportOptions.pauseMs,
-          speed: exportOptions.speed,
-          trim_silence: exportOptions.trimSilence,
-          normalize_audio: exportOptions.normalizeAudio,
-          target_peak: exportOptions.targetPeak,
-          export_formats: exportOptions.exportFormats,
-        }),
+      }>(
+        `/projects/${encodeURIComponent(projectId)}/exports/${activeChapter.chapterId}`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            chapter_title: activeChapter.title,
+            roles: roles.map(toApiRole),
+            utterances_by_paragraph: utteranceGroupsToApi(
+              utteranceGroupsOverride ?? activeUtterancesByParagraph,
+            ),
+            pause_ms: exportOptions.pauseMs,
+            speed: exportOptions.speed,
+            trim_silence: exportOptions.trimSilence,
+            normalize_audio: exportOptions.normalizeAudio,
+            target_peak: exportOptions.targetPeak,
+            export_formats: exportOptions.exportFormats,
+          }),
+        },
+      );
+      trackOperation(operationId, {
+        type: "chapter_export",
+        label: "导出制作包",
+        progress: 78,
+        message: "制作包已生成，正在交给浏览器下载",
       });
-      const response = await fetch(mediaRequestUrl(data.download_url));
-      if (!response.ok) throw new Error(`制作包下载失败：${response.status}`);
-      const objectUrl = URL.createObjectURL(await response.blob());
       const anchor = document.createElement("a");
-      anchor.href = objectUrl;
+      anchor.href = mediaRequestUrl(data.download_url);
       anchor.download = `${activeChapter.title || activeChapter.chapterId}-制作包.zip`;
+      document.body.appendChild(anchor);
       anchor.click();
-      URL.revokeObjectURL(objectUrl);
+      anchor.remove();
+      trackOperation(operationId, {
+        type: "chapter_export",
+        label: "导出制作包",
+        progress: 92,
+        message: "浏览器下载已触发",
+      });
       setApiStatus(
         `${EXPORT_PRESETS[exportPreset].label}制作包导出完成：${data.item_count} 条；完整 WAV/MP3、CSV 台本、SRT/LRC 字幕、角色表、音色表和失败清单已写入压缩包。${data.message}`,
       );
+      completeOperation(
+        operationId,
+        `导出完成：${data.item_count} 条，缺失 ${data.missing_count} 条`,
+        "导出制作包",
+      );
     } catch (error) {
       setApiStatus(apiFailureMessage("导出制作包失败", error));
+      failOperation(operationId, "导出制作包", error);
     }
   }
 
@@ -3959,6 +4847,13 @@ function App() {
   }
 
   async function generateVoiceResource() {
+    const operationId = "voice-generation";
+    trackOperation(operationId, {
+      type: "voice_generation",
+      label: "生成音色",
+      progress: 12,
+      message: "正在根据描述生成试听音色",
+    });
     setGeneratedVoiceProgress(12);
     setApiStatus("正在根据音色描述生成试听音色");
     try {
@@ -3990,9 +4885,15 @@ function App() {
           ? "生成音色使用占位预览"
           : "生成音色成功";
       setApiStatus(`${prefix}：${data.generation_note}`);
+      completeOperation(
+        operationId,
+        `${prefix}：${data.generation_note}`,
+        "生成音色",
+      );
     } catch (error) {
       setGeneratedVoiceProgress(100);
       setApiStatus(apiFailureMessage("生成音色失败", error));
+      failOperation(operationId, "生成音色", error);
     }
   }
 
@@ -4127,8 +5028,15 @@ function App() {
 
   async function testModelApis() {
     if (localTtsStarting) return;
+    const operationId = "model-api-test";
     applyBackendApiBaseInput();
     setLocalTtsStarting(true);
+    trackOperation(operationId, {
+      type: "settings",
+      label: "测试模型",
+      progress: 20,
+      message: "正在测试文本模型和 TTS",
+    });
     setApiStatus("正在测试文本模型与 TTS 模型 API");
     try {
       const secretPayload = await createSecretExchangePayload(textModelApiKey);
@@ -4145,8 +5053,14 @@ function App() {
       );
       setTextModelApiKey("");
       setApiStatus(data.message || "模型 API 测试成功");
+      completeOperation(
+        operationId,
+        data.message || "模型 API 测试成功",
+        "测试模型",
+      );
     } catch (error) {
       setApiStatus(apiFailureMessage("测试模型失败", error));
+      failOperation(operationId, "测试模型", error);
     } finally {
       setLocalTtsStarting(false);
     }
@@ -4154,7 +5068,14 @@ function App() {
 
   async function deployTtsModels() {
     if (ttsDeployment.status === "running") return;
+    const operationId = "tts-deploy";
     applyBackendApiBaseInput();
+    trackOperation(operationId, {
+      type: "tts_deploy",
+      label: "TTS 部署",
+      progress: 1,
+      message: "正在启动后台部署任务",
+    });
     setApiStatus(
       "已开始后台下载并部署 TTS 模型；其他不依赖 TTS 的功能可继续使用",
     );
@@ -4168,8 +5089,15 @@ function App() {
       );
       const status = applyTtsDeployment(data.deployment);
       setApiStatus(status.message);
+      trackOperation(operationId, {
+        type: "tts_deploy",
+        label: "TTS 部署",
+        progress: status.progress,
+        message: status.message,
+      });
     } catch (error) {
       setApiStatus(apiFailureMessage("TTS模型下载并部署启动失败", error));
+      failOperation(operationId, "TTS 部署", error);
     }
   }
 
@@ -4218,7 +5146,7 @@ function App() {
                   <button
                     className="tool-button amber"
                     type="button"
-                    onClick={() => void runAiChapterSplit()}
+                    onClick={() => void handleProductionPrimaryAction()}
                   >
                     文档解析
                   </button>
@@ -4236,17 +5164,16 @@ function App() {
                   label="小说格式解析进度"
                   value={chapterSplitProgress}
                 />
-                <ProgressBar
-                  label="配音编排 Agent 进度"
-                  value={roleMatchingProgress}
-                />
+                {isAutomaticMode && (
+                  <ProgressBar
+                    label="配音编排 Agent 进度"
+                    value={roleMatchingProgress}
+                  />
+                )}
                 <ProgressBar
                   label="语音生成进度"
                   value={voiceGenerationProgress}
                 />
-                <div className="novel-preview" aria-label="小说开头预览">
-                  {novelPreview}
-                </div>
                 <small>{apiStatus}</small>
                 <div className="chapter-list" aria-label="章节列表">
                   {chapters.map((chapter) => (
@@ -4267,11 +5194,17 @@ function App() {
               <section className="panel production-primary-panel">
                 <div className="section-heading">
                   <div>
-                    <div className="section-title">一键继续制作</div>
-                    <small>主流程只需要跟随这个按钮；高级操作仍保留在当前章节区。</small>
+                    <div className="section-title">
+                      {isAutomaticMode ? "自动完成流程" : "手动制作步骤"}
+                    </div>
+                    <small>
+                      {isAutomaticMode
+                        ? "只在点击“自动完成到导出”时串联执行；高级操作按钮彼此独立。"
+                        : "分步配音只保留手动创建角色、添加台词、配音和导出。"}
+                    </small>
                   </div>
                   <span className="production-step-badge">
-                    {workflowState.mode === "automatic" ? "自动" : "分步"}
+                    {isAutomaticMode ? "自动" : "分步"}
                   </span>
                 </div>
                 <div className="production-stepper" aria-label="制作步骤">
@@ -4304,84 +5237,6 @@ function App() {
                 </small>
               </section>
 
-              <details className="panel project-workspace-panel sidebar-muted-panel">
-                <summary>
-                  <span>
-                    <span className="section-title">项目工作区</span>
-                    <small>当前项目：{activeProject?.name ?? "default"}</small>
-                  </span>
-                </summary>
-                <div className="toolbar-row">
-                  <button
-                    className="tool-button sky"
-                    type="button"
-                    onClick={() => void loadProjects()}
-                  >
-                    刷新
-                  </button>
-                </div>
-                <div className="toolbar-row">
-                  <input
-                    aria-label="新建项目名称"
-                    placeholder="新建项目名称"
-                    value={newProjectName}
-                    onChange={(event) => setNewProjectName(event.target.value)}
-                  />
-                  <button
-                    className="tool-button teal"
-                    type="button"
-                    onClick={() => void createProject()}
-                  >
-                    新建项目
-                  </button>
-                </div>
-                <div className="project-roots">
-                  <span>
-                    音频：
-                    {activeProject?.output_roots?.audio ??
-                      "outputs/default/audio"}
-                  </span>
-                  <span>
-                    导出：
-                    {activeProject?.output_roots?.exports ??
-                      "outputs/default/exports"}
-                  </span>
-                </div>
-                <div className="section-title">最近项目</div>
-                <div className="recent-project-list" aria-label="最近项目">
-                  {projects.length === 0 ? (
-                    <small>还没有项目记录，默认项目会兼容旧数据。</small>
-                  ) : (
-                    projects.map((project) => (
-                      <article
-                        className={
-                          project.project_id === activeProjectId
-                            ? "project-card active"
-                            : "project-card"
-                        }
-                        key={project.project_id}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => selectProject(project.project_id)}
-                        >
-                          <strong>{project.name}</strong>
-                          <span>{project.project_id}</span>
-                        </button>
-                        <button
-                          className="tool-button amber"
-                          type="button"
-                          disabled={project.project_id === "default"}
-                          onClick={() => void deleteProject(project.project_id)}
-                        >
-                          删除项目
-                        </button>
-                      </article>
-                    ))
-                  )}
-                </div>
-              </details>
-
               <section className="panel blocker-panel">
                 <div className="section-heading">
                   <div>
@@ -4390,7 +5245,9 @@ function App() {
                       汇总生成、导出和人工复核问题；每条都给出影响和推荐操作。
                     </small>
                   </div>
-                  <strong className="blocker-count">{blockerItems.length}</strong>
+                  <strong className="blocker-count">
+                    {blockerItems.length}
+                  </strong>
                 </div>
                 <div className="toolbar-row">
                   <button
@@ -4408,7 +5265,10 @@ function App() {
                     导出阻塞项
                   </button>
                 </div>
-                <div className="quality-summary-grid" aria-label="制作阻塞项统计">
+                <div
+                  className="quality-summary-grid"
+                  aria-label="制作阻塞项统计"
+                >
                   {QUALITY_SUMMARY_KEYS.map((key) => (
                     <button
                       className={
@@ -4478,10 +5338,13 @@ function App() {
                       disabled={bulkRoleChangeIds.length === 0}
                       onClick={() => void bulkChangeReviewRole()}
                     >
-                      {bulkRolePreviewArmed ? "确认批量改角色" : "预览批量改角色"}
+                      {bulkRolePreviewArmed
+                        ? "确认批量改角色"
+                        : "预览批量改角色"}
                     </button>
                     <small>
-                      预览影响 {bulkRoleChangeIds.length} 条台词；选择目标角色后需再次确认。
+                      预览影响 {bulkRoleChangeIds.length}{" "}
+                      条台词；选择目标角色后需再次确认。
                     </small>
                   </div>
                   <div className="review-filter-row" aria-label="阻塞项筛选">
@@ -4505,14 +5368,17 @@ function App() {
                 </details>
                 <div className="blocker-list" aria-label="制作阻塞项列表">
                   {blockerItems.length === 0 ? (
-                    <small>暂无制作阻塞项；刷新后会显示需要人工处理的事项。</small>
+                    <small>
+                      暂无制作阻塞项；刷新后会显示需要人工处理的事项。
+                    </small>
                   ) : (
                     visibleBlockerItems.map((item) => (
-                      <button
+                      <article
                         className="blocker-card"
-                        key={item.issue_id}
-                        type="button"
-                        onClick={() => focusQualityIssue(item)}
+                        key={
+                          item.issue_id ||
+                          `${item.issue_type}:${item.utterance_id ?? item.paragraph_id ?? item.message}`
+                        }
                       >
                         <strong>{QUALITY_LABELS[item.issue_type]}</strong>
                         <span>严重级别：{item.severity || "warning"}</span>
@@ -4523,73 +5389,109 @@ function App() {
                         <small>
                           处理状态：{(item.actions ?? []).join(" / ") || "jump"}
                         </small>
-                      </button>
+                        <div className="blocker-card-actions">
+                          <button
+                            className="tool-button sky"
+                            type="button"
+                            onClick={() => focusQualityIssue(item)}
+                          >
+                            定位
+                          </button>
+                          {item.issue_type === "unsegmented" &&
+                            item.paragraph_id && (
+                              <button
+                                className="tool-button amber"
+                                type="button"
+                                onClick={() =>
+                                  toggleIgnoreParagraph(item.paragraph_id ?? "")
+                                }
+                              >
+                                忽略此段
+                              </button>
+                            )}
+                        </div>
+                      </article>
                     ))
                   )}
                   {hiddenBlockerCount > 0 && (
                     <small>
-                      还有 {hiddenBlockerCount} 个阻塞项；可按类型筛选或进入批量处理。
+                      还有 {hiddenBlockerCount}{" "}
+                      个阻塞项；可按类型筛选或进入批量处理。
                     </small>
                   )}
                 </div>
 
-                <div className="planner-panel" aria-label="智能下一步助手">
-                  <div className="section-heading">
-                    <div>
-                      <div className="section-title">智能下一步助手</div>
-                      <small>
-                        目标：{plannerGoal}。助手会把当前章节状态翻译成下一步建议。
-                      </small>
+                {isAutomaticMode && (
+                  <div className="planner-panel" aria-label="制作建议">
+                    <div className="section-heading">
+                      <div>
+                        <div className="section-title">制作建议</div>
+                        <small>
+                          目标：{plannerGoal}
+                          。这里只生成或复盘建议，不会自动执行。
+                        </small>
+                      </div>
+                      <span
+                        className={`planner-status ${plannerRun?.status ?? "idle"}`}
+                      >
+                        {plannerRun?.status ?? "idle"}
+                      </span>
                     </div>
-                    <span className={`planner-status ${plannerRun?.status ?? "idle"}`}>
-                      {plannerRun?.status ?? "idle"}
-                    </span>
-                  </div>
-                  <button
-                    className="tool-button purple"
-                    type="button"
-                    onClick={() => void refreshProductionAssistant()}
-                  >
-                    刷新建议
-                  </button>
-                  <small className="status-message" aria-label="智能下一步助手反馈">
-                    {plannerStatus}
-                  </small>
-                  <div className="planner-step-list" aria-label="智能下一步建议">
-                    {!plannerRun ? (
-                      <small>尚未生成建议；点击刷新建议或使用主按钮继续制作。</small>
-                    ) : (
-                      plannerRun.steps.slice(0, 4).map((step, index) => (
-                        <article
-                          className={`planner-step-card ${step.status}`}
-                          key={step.step_id}
-                        >
-                          <strong>
-                            {index + 1}. {step.title}
-                          </strong>
-                          <span>{step.status}</span>
-                          <small>
-                            {step.tool_call?.tool_name ??
-                              step.rationale ??
-                              "reviewer checkpoint"}
-                          </small>
-                          {step.tool_result?.failure && (
-                            <small>失败原因：{step.tool_result.failure}</small>
-                          )}
-                        </article>
-                      ))
+                    <button
+                      className="tool-button purple"
+                      type="button"
+                      onClick={() => void refreshProductionAssistant()}
+                    >
+                      生成 / 复盘建议
+                    </button>
+                    <small className="status-message" aria-label="制作建议反馈">
+                      {plannerStatus}
+                    </small>
+                    <div
+                      className="planner-step-list"
+                      aria-label="制作建议列表"
+                    >
+                      {!plannerRun ? (
+                        <small>
+                          尚未生成建议；点击“生成 / 复盘建议”查看下一步。
+                        </small>
+                      ) : (
+                        plannerRun.steps.slice(0, 4).map((step, index) => (
+                          <article
+                            className={`planner-step-card ${step.status}`}
+                            key={step.step_id}
+                          >
+                            <strong>
+                              {index + 1}. {step.title}
+                            </strong>
+                            <span>{step.status}</span>
+                            <small>
+                              {step.tool_call?.tool_name ??
+                                step.rationale ??
+                                "reviewer checkpoint"}
+                            </small>
+                            {step.tool_result?.failure && (
+                              <small>
+                                失败原因：{step.tool_result.failure}
+                              </small>
+                            )}
+                          </article>
+                        ))
+                      )}
+                    </div>
+                    {(plannerRun?.recovery_suggestions ?? []).length > 0 && (
+                      <div className="planner-recovery-list">
+                        {(plannerRun?.recovery_suggestions ?? []).map(
+                          (item) => (
+                            <small key={item.step_id}>
+                              {item.title}：{item.message}
+                            </small>
+                          ),
+                        )}
+                      </div>
                     )}
                   </div>
-                  {(plannerRun?.recovery_suggestions ?? []).length > 0 && (
-                    <div className="planner-recovery-list">
-                      {(plannerRun?.recovery_suggestions ?? []).map((item) => (
-                        <small key={item.step_id}>
-                          {item.title}：{item.message}
-                        </small>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                )}
               </section>
 
               <details className="panel sidebar-muted-panel role-list-panel">
@@ -4724,7 +5626,7 @@ function App() {
                     );
                   })}
                 </div>
-                {aiRoleCandidates.length > 0 && (
+                {isAutomaticMode && aiRoleCandidates.length > 0 && (
                   <div
                     className="role-analysis-panel"
                     aria-label="角色分析建议"
@@ -4781,8 +5683,9 @@ function App() {
               <div className="section-title">当前章节</div>
               <h2>请选择小说章节</h2>
               <p>
-                选择某个章节后，左侧显示完整正文，右侧显示配音编排 Agent
-                生成后的台词。
+                {isAutomaticMode
+                  ? "选择某个章节后，左侧显示完整正文，右侧显示配音编排后的台词。"
+                  : "选择某个章节后，左侧显示完整正文，右侧手动添加台词并匹配角色。"}
               </p>
             </div>
           ) : (
@@ -4806,30 +5709,57 @@ function App() {
                 <details className="advanced-action-panel">
                   <summary>高级操作</summary>
                   <div className="gate">
-                    <button
-                      className="tool-button purple"
-                      type="button"
-                      onClick={() => void runAiRoleAnalysis()}
-                      disabled={agentRunRunning || visibleParagraphs.length === 0}
-                    >
-                      角色分析 Agent
-                    </button>
-                    <button
-                      className="tool-button purple"
-                      type="button"
-                      onClick={() => void runAiRoleMatching()}
-                      disabled={
-                        agentRunRunning ||
-                        !agentRunWaitingForRoles ||
-                        !agentRunThreadId
-                      }
-                    >
-                      配音编排 Agent
-                    </button>
+                    {isAutomaticMode && (
+                      <button
+                        className="tool-button teal"
+                        type="button"
+                        disabled={productionPrimaryAction.disabled}
+                        onClick={() => void handleProductionPrimaryAction()}
+                      >
+                        自动完成到导出
+                      </button>
+                    )}
+                    {isAutomaticMode && (
+                      <>
+                        <button
+                          className="tool-button purple"
+                          type="button"
+                          onClick={() => {
+                            autoPipelineRequestedRef.current = false;
+                            void runAiRoleAnalysis({ autoContinue: false });
+                          }}
+                          disabled={
+                            agentRunRunning || qualityParagraphs.length === 0
+                          }
+                        >
+                          角色分析 Agent
+                        </button>
+                        <button
+                          className="tool-button purple"
+                          type="button"
+                          onClick={() => {
+                            autoPipelineRequestedRef.current = false;
+                            void runAiRoleMatching({ autoContinue: false });
+                          }}
+                          disabled={
+                            agentRunRunning ||
+                            !agentRunWaitingForRoles ||
+                            !agentRunThreadId
+                          }
+                        >
+                          配音编排 Agent
+                        </button>
+                      </>
+                    )}
                     <button
                       className="tool-button sky"
                       type="button"
-                      onClick={() => void generateChapterDubbing()}
+                      onClick={() => {
+                        autoPipelineRequestedRef.current = false;
+                        void generateChapterDubbing(false, {
+                          autoContinue: false,
+                        });
+                      }}
                       disabled={!confirmed || hasPendingHumanReview}
                     >
                       批量生成配音
@@ -4837,77 +5767,57 @@ function App() {
                     <button
                       className="tool-button amber"
                       type="button"
-                      onClick={() => void exportChapterAudio()}
+                      onClick={() => {
+                        autoPipelineRequestedRef.current = false;
+                        void exportChapterAudio();
+                      }}
                       disabled={!confirmed || hasPendingHumanReview}
                     >
                       导出制作包
                     </button>
-                    <button
-                      className="tool-button sky"
-                      type="button"
-                      onClick={() => toggleChapterPlayback()}
-                      disabled={!hasGeneratedAudioUtterance}
-                    >
-                      {chapterPlaybackState === "playing"
-                        ? "暂停播放"
-                        : chapterPlaybackState === "paused"
-                          ? "继续播放"
-                          : "一键播放"}
-                    </button>
-                    <button
-                      className="tool-button sky"
-                      type="button"
-                      onClick={() => playPreviousQueuedChapterAudio()}
-                      disabled={!hasGeneratedAudioUtterance}
-                    >
-                      上一句
-                    </button>
-                    <button
-                      className="tool-button sky"
-                      type="button"
-                      onClick={() => playNextQueuedChapterAudio()}
-                      disabled={!hasGeneratedAudioUtterance}
-                    >
-                      下一句
-                    </button>
                     <span>
                       {confirmed && !hasPendingHumanReview
                         ? "台词已确认，可以批量配音或导出"
-                        : "请完成角色分析、配音编排并确认所有配音片段"}
+                        : isAutomaticMode
+                          ? "请完成角色分析、配音编排并确认所有配音片段"
+                          : "请手动补齐台词、角色并确认所有配音片段"}
                     </span>
                   </div>
                 </details>
                 <div className="delivery-hint" aria-label="整章播放列表控制">
-                  整章播放列表支持播放、暂停、上一句、下一句；当前播放台词高亮。
+                  整章播放器支持从头播放、继续、暂停、上一句、下一句；当前播放台词高亮。
                   导出包包含完整音频、逐句音频、台本、字幕、角色表、音色表和失败清单。
                 </div>
-                <div
+                <details
                   className="export-settings-panel"
                   aria-label="导出制作包参数"
                 >
-                  <div className="export-settings-heading">
+                  <summary className="export-settings-heading">
                     <span>导出参数</span>
                     <small>
                       当前预设：{exportOptions.label}；高级参数可按需展开。
                     </small>
-                  </div>
+                  </summary>
                   <div className="export-preset-row">
-                    {(Object.entries(EXPORT_PRESETS) as [ExportPreset, ExportOptions][]).map(
-                      ([preset, options]) => (
-                        <button
-                          className={exportPreset === preset ? "active" : ""}
-                          key={preset}
-                          type="button"
-                          onClick={() => {
-                            setExportPreset(preset);
-                            setExportOptions(options);
-                          }}
-                        >
-                          <strong>{options.label}</strong>
-                          <small>{options.description}</small>
-                        </button>
-                      ),
-                    )}
+                    {(
+                      Object.entries(EXPORT_PRESETS) as [
+                        ExportPreset,
+                        ExportOptions,
+                      ][]
+                    ).map(([preset, options]) => (
+                      <button
+                        className={exportPreset === preset ? "active" : ""}
+                        key={preset}
+                        type="button"
+                        onClick={() => {
+                          setExportPreset(preset);
+                          setExportOptions(options);
+                        }}
+                      >
+                        <strong>{options.label}</strong>
+                        <small>{options.description}</small>
+                      </button>
+                    ))}
                   </div>
                   <details className="export-advanced-panel">
                     <summary>高级导出参数</summary>
@@ -4997,7 +5907,7 @@ function App() {
                       </label>
                     </div>
                   </details>
-                </div>
+                </details>
                 <div className="status-filter-bar" aria-label="状态筛选">
                   <span>状态筛选</span>
                   {PARAGRAPH_STATUS_FILTERS.map((status) => (
@@ -5022,10 +5932,74 @@ function App() {
               </header>
               <audio
                 className="chapter-playback-audio"
+                onDurationChange={(event) =>
+                  setChapterPlaybackDuration(event.currentTarget.duration || 0)
+                }
                 onEnded={() => playNextQueuedChapterAudio()}
                 onError={() => playNextQueuedChapterAudio()}
+                onPause={() => {
+                  if (chapterPlaybackState === "playing")
+                    setChapterPlaybackState("paused");
+                }}
+                onPlay={() => setChapterPlaybackState("playing")}
+                onTimeUpdate={(event) =>
+                  setChapterPlaybackTime(event.currentTarget.currentTime)
+                }
                 ref={chapterPlayerRef}
               />
+              {hasGeneratedAudioUtterance && (
+                <section
+                  className="chapter-transport-panel"
+                  aria-label="整章播放器"
+                >
+                  <div>
+                    <strong>整章播放器</strong>
+                    <small>
+                      {currentChapterPlaybackUtterance
+                        ? `当前：${currentChapterPlaybackUtterance.utteranceId}`
+                        : `可播放 ${playableChapterQueue.length} 条台词`}
+                    </small>
+                  </div>
+                  <div className="chapter-transport-controls">
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => playChapterFromStart()}
+                    >
+                      从头播放
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => toggleChapterPlayback()}
+                    >
+                      {chapterPlaybackState === "playing"
+                        ? "暂停播放"
+                        : chapterPlaybackState === "paused"
+                          ? "继续播放"
+                          : "播放当前"}
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => playPreviousQueuedChapterAudio()}
+                    >
+                      上一句
+                    </button>
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      onClick={() => playNextQueuedChapterAudio()}
+                    >
+                      下一句
+                    </button>
+                    <span>
+                      {Math.floor(chapterPlaybackTime)}s /{" "}
+                      {Math.floor(chapterPlaybackDuration || 0)}s
+                    </span>
+                  </div>
+                </section>
+              )}
 
               <section className="chapter-workspace-grid">
                 <article
@@ -5073,6 +6047,28 @@ function App() {
                               <span className={`status-dot ${item.status}`} />
                               <strong>{item.label}</strong>
                               <span>{item.paragraphId}</span>
+                              <div className="reader-paragraph-actions">
+                                <button
+                                  className="tool-button sky"
+                                  type="button"
+                                  onClick={() =>
+                                    addUtteranceAfter(item.paragraphId)
+                                  }
+                                >
+                                  添加台词
+                                </button>
+                                <button
+                                  className="tool-button amber"
+                                  type="button"
+                                  onClick={() =>
+                                    toggleIgnoreParagraph(item.paragraphId)
+                                  }
+                                >
+                                  {item.status === "ignored"
+                                    ? "取消忽略"
+                                    : "忽略此段"}
+                                </button>
+                              </div>
                             </div>
                             <p>{item.text}</p>
                           </section>
@@ -5113,47 +6109,12 @@ function App() {
                       </button>
                     </div>
                   </div>
-                  {paragraphStatusItems.length > 0 && (
-                    <div
-                      className="chapter-status-map"
-                      aria-label="章节状态小地图"
-                    >
-                      {paragraphStatusItems.map((item, index) => (
-                        <button
-                          className={[
-                            "status-map-cell",
-                            item.status,
-                            highlightParagraphId === item.paragraphId
-                              ? "attention"
-                              : "",
-                            activeParagraphStatusFilter &&
-                            activeParagraphStatusFilter !== item.status
-                              ? "dimmed"
-                              : "",
-                          ]
-                            .filter(Boolean)
-                            .join(" ")}
-                          key={item.paragraphId}
-                          title={`${item.paragraphId} ${item.label}`}
-                          type="button"
-                          aria-label={`跳转到${item.paragraphId}：${item.label}`}
-                          onClick={() =>
-                            focusParagraphStatusItem(
-                              item,
-                              `已跳转到${item.label}段落：${item.paragraphId}`,
-                            )
-                          }
-                        >
-                          {index + 1}
-                        </button>
-                      ))}
-                    </div>
-                  )}
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
                       <span>
-                        当前章节可手动添加台词、选择角色并生成配音；也可以稍后使用配音编排
-                        Agent 自动辅助。
+                        {isAutomaticMode
+                          ? "当前章节可手动添加台词、选择角色并生成配音；也可以使用自动编排辅助。"
+                          : "当前章节处于纯手动分步配音：请从左侧正文添加台词，非台词原文可忽略。"}
                       </span>
                       {primaryStatementParagraphId && (
                         <button
@@ -5206,7 +6167,9 @@ function App() {
                             <button
                               className="tool-button teal"
                               type="button"
-                              onClick={() => void mergeWithNextUtterance(utterance)}
+                              onClick={() =>
+                                void mergeWithNextUtterance(utterance)
+                              }
                             >
                               合并相邻台词
                             </button>
@@ -5329,6 +6292,113 @@ function App() {
               </section>
             </>
           )}
+        </section>
+      </main>
+    );
+  }
+
+  function renderProjectWorkspacePage() {
+    return (
+      <main className="project-page">
+        <section className="panel project-workspace-panel">
+          <div className="section-heading">
+            <div>
+              <div className="section-title">项目工作区</div>
+              <h2>{activeProject?.name ?? "default"}</h2>
+              <small>
+                选择工作环境会切换当前项目的质量检查、记忆检索和导出根目录。
+              </small>
+            </div>
+            <button
+              className="tool-button sky"
+              type="button"
+              onClick={() => void loadProjects()}
+            >
+              刷新项目
+            </button>
+          </div>
+          <small className="status-message" aria-label="项目工作区反馈">
+            {qualityStatus}
+          </small>
+          <div className="project-roots">
+            <span>
+              当前项目：
+              <strong>{activeProject?.project_id ?? activeProjectId}</strong>
+            </span>
+            <span>
+              音频目录：
+              {activeProject?.output_roots?.audio ?? "outputs/default/audio"}
+            </span>
+            <span>
+              导出目录：
+              {activeProject?.output_roots?.exports ??
+                "outputs/default/exports"}
+            </span>
+          </div>
+          <div className="project-create-row">
+            <input
+              aria-label="新建项目名称"
+              placeholder="新建工作环境名称"
+              value={newProjectName}
+              onChange={(event) => setNewProjectName(event.target.value)}
+            />
+            <button
+              className="tool-button teal"
+              type="button"
+              onClick={() => void createProject()}
+            >
+              创建新环境
+            </button>
+          </div>
+        </section>
+
+        <section className="panel project-list-panel">
+          <div className="section-heading">
+            <div className="section-title">工作环境列表</div>
+            <small>{projects.length} 个环境；default 用于兼容旧项目。</small>
+          </div>
+          <div className="recent-project-list" aria-label="工作环境列表">
+            {projects.length === 0 ? (
+              <small>还没有项目记录，点击“刷新项目”或创建新环境。</small>
+            ) : (
+              projects.map((project) => (
+                <article
+                  className={
+                    project.project_id === activeProjectId
+                      ? "project-card active"
+                      : "project-card"
+                  }
+                  key={project.project_id}
+                >
+                  <button
+                    type="button"
+                    onClick={() => selectProject(project.project_id)}
+                  >
+                    <strong>{project.name}</strong>
+                    <span>{project.project_id}</span>
+                  </button>
+                  <div className="project-card-actions">
+                    <button
+                      className="tool-button sky"
+                      type="button"
+                      disabled={project.project_id === activeProjectId}
+                      onClick={() => selectProject(project.project_id)}
+                    >
+                      切换环境
+                    </button>
+                    <button
+                      className="tool-button amber"
+                      type="button"
+                      disabled={project.project_id === "default"}
+                      onClick={() => void deleteProject(project.project_id)}
+                    >
+                      删除环境
+                    </button>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
         </section>
       </main>
     );
@@ -5472,7 +6542,7 @@ function App() {
                   type="button"
                   onClick={() => void updateVoiceResource(voice)}
                 >
-                  保存音色
+                  保存当前音色
                 </button>
               </article>
             ))}
@@ -5565,7 +6635,7 @@ function App() {
               type="button"
               onClick={() => void saveVoiceResource(newVoice)}
             >
-              保存音色
+              保存新增音色
             </button>
           </div>
 
@@ -5640,7 +6710,7 @@ function App() {
               type="button"
               onClick={() => void saveGeneratedVoiceResource()}
             >
-              保存音色
+              保存生成音色
             </button>
           </div>
         </section>
@@ -5649,15 +6719,17 @@ function App() {
   }
 
   function renderMemoryPage() {
-    const trustedFacts = memoryContext?.facts_for_prompt ?? storyBibleFacts.filter(
-      (fact) => ["user_confirmed", "system_verified"].includes(fact.confidence),
-    );
-    const candidateFacts = memoryContext?.candidate_facts ?? storyBibleFacts.filter(
-      (fact) => fact.confidence === "model_suggested",
-    );
-    const rejectedFacts = memoryContext?.rejected_facts ?? storyBibleFacts.filter(
-      (fact) => fact.confidence === "rejected",
-    );
+    const trustedFacts =
+      memoryContext?.facts_for_prompt ??
+      storyBibleFacts.filter((fact) =>
+        ["user_confirmed", "system_verified"].includes(fact.confidence),
+      );
+    const candidateFacts =
+      memoryContext?.candidate_facts ??
+      storyBibleFacts.filter((fact) => fact.confidence === "model_suggested");
+    const rejectedFacts =
+      memoryContext?.rejected_facts ??
+      storyBibleFacts.filter((fact) => fact.confidence === "rejected");
     const factCard = (fact: StoryBibleFact) => (
       <article className="memory-fact-card" key={fact.fact_id}>
         <strong>{fact.subject}</strong>
@@ -5665,7 +6737,8 @@ function App() {
           {fact.predicate}：{fact.object}
         </span>
         <small>
-          {fact.confidence} · {fact.source_type ?? "manual"} · {fact.source_id ?? fact.fact_id}
+          {fact.confidence} · {fact.source_type ?? "manual"} ·{" "}
+          {fact.source_id ?? fact.fact_id}
         </small>
         {fact.notes && <small>备注：{fact.notes}</small>}
       </article>
@@ -5709,26 +6782,42 @@ function App() {
 
         <section className="panel memory-evidence-panel">
           <div className="section-title">角色证据</div>
-          <small>可信事实会进入 Agent prompt；候选事实只作为人工判断参考。</small>
+          <small>
+            可信事实会进入 Agent prompt；候选事实只作为人工判断参考。
+          </small>
           <div className="memory-fact-grid">
-            {trustedFacts.length === 0 ? <small>暂无可信角色证据。</small> : trustedFacts.map(factCard)}
+            {trustedFacts.length === 0 ? (
+              <small>暂无可信角色证据。</small>
+            ) : (
+              trustedFacts.map(factCard)
+            )}
           </div>
         </section>
 
         <section className="panel memory-evidence-panel">
           <div className="section-title">设定记忆</div>
-          <small>模型建议和被拒绝事实分开展示，避免错误记忆污染后续 Agent。</small>
+          <small>
+            模型建议和被拒绝事实分开展示，避免错误记忆污染后续 Agent。
+          </small>
           <div className="memory-two-column">
             <div>
               <strong>候选事实</strong>
               <div className="memory-fact-grid">
-                {candidateFacts.length === 0 ? <small>暂无候选事实。</small> : candidateFacts.map(factCard)}
+                {candidateFacts.length === 0 ? (
+                  <small>暂无候选事实。</small>
+                ) : (
+                  candidateFacts.map(factCard)
+                )}
               </div>
             </div>
             <div>
               <strong>已拒绝事实</strong>
               <div className="memory-fact-grid">
-                {rejectedFacts.length === 0 ? <small>暂无已拒绝事实。</small> : rejectedFacts.map(factCard)}
+                {rejectedFacts.length === 0 ? (
+                  <small>暂无已拒绝事实。</small>
+                ) : (
+                  rejectedFacts.map(factCard)
+                )}
               </div>
             </div>
           </div>
@@ -5736,7 +6825,9 @@ function App() {
 
         <section className="panel memory-correction-panel">
           <div className="section-title">用户纠错</div>
-          <small>人工写入默认保存为 user_confirmed，后续 Agent 优先使用。</small>
+          <small>
+            人工写入默认保存为 user_confirmed，后续 Agent 优先使用。
+          </small>
           <div className="memory-correction-grid">
             <input
               placeholder="主体，例如 林舟"
@@ -5844,10 +6935,7 @@ function App() {
           </div>
         </section>
 
-        <section
-          className="panel trace-detail-panel"
-          aria-label="运行审计详情"
-        >
+        <section className="panel trace-detail-panel" aria-label="运行审计详情">
           <div className="section-heading">
             <div>
               <div className="section-title">追踪详情</div>
@@ -5893,7 +6981,7 @@ function App() {
 
           <div className="trace-section">
             <div className="section-title">输入摘要</div>
-            <p>{trace?.input_summary || "暂无输入摘要"}</p>
+            <pre>{formatTraceJson(trace?.input_summary || "暂无输入摘要")}</pre>
           </div>
 
           <div className="trace-section">
@@ -5913,17 +7001,23 @@ function App() {
           <div className="trace-section">
             <div className="section-title">Tool Calls</div>
             {(trace?.tool_calls ?? []).length === 0 ? (
-              <p>暂无工具调用记录：参数摘要、返回摘要、失败原因将在工具执行后显示。</p>
+              <p>
+                暂无工具调用记录：参数摘要、返回摘要、失败原因将在工具执行后显示。
+              </p>
             ) : (
               <div className="tool-call-list" aria-label="工具调用记录">
                 {(trace?.tool_calls ?? []).map((toolCall) => (
-                  <article className="tool-call-card" key={toolCall.tool_call_id}>
+                  <article
+                    className="tool-call-card"
+                    key={toolCall.tool_call_id}
+                  >
                     <div>
                       <strong>{toolCall.tool_name}</strong>
                       <span>{toolCall.status}</span>
                     </div>
                     <small>
-                      {toolCall.permission_scope ?? "project scoped"} · {toolCall.duration_ms ?? 0} ms
+                      {toolCall.permission_scope ?? "project scoped"} ·{" "}
+                      {toolCall.duration_ms ?? 0} ms
                     </small>
                     <dl>
                       <dt>参数摘要</dt>
@@ -5995,7 +7089,7 @@ function App() {
               type="button"
               onClick={() => void testBackendConnection()}
             >
-              测试连接
+              测试连接（后端）
             </button>
           </div>
         </section>
@@ -6055,14 +7149,7 @@ function App() {
               type="button"
               onClick={() => void saveTextModelConfig()}
             >
-              保存模型配置
-            </button>
-            <button
-              className="tool-button sky"
-              type="button"
-              onClick={() => void testBackendConnection()}
-            >
-              测试连接
+              保存文本模型配置
             </button>
             <button
               className="tool-button purple"
@@ -6070,7 +7157,7 @@ function App() {
               disabled={localTtsStarting}
               onClick={() => void testModelApis()}
             >
-              {localTtsStarting ? "测试中" : "测试模型"}
+              {localTtsStarting ? "测试中" : "测试模型 API"}
             </button>
           </div>
         </section>
@@ -6129,7 +7216,7 @@ function App() {
               type="button"
               onClick={() => void saveLocalModelConfig()}
             >
-              保存模型配置
+              保存 TTS 配置
             </button>
             <button
               className="tool-button amber"
@@ -6137,15 +7224,7 @@ function App() {
               disabled={ttsDeployment.status === "running"}
               onClick={() => void deployTtsModels()}
             >
-              {ttsDeployment.status === "running" ? "部署中" : "下载并部署"}
-            </button>
-            <button
-              className="tool-button purple"
-              type="button"
-              disabled={localTtsStarting}
-              onClick={() => void testModelApis()}
-            >
-              {localTtsStarting ? "测试中" : "测试模型"}
+              {ttsDeployment.status === "running" ? "部署中" : "下载并部署 TTS"}
             </button>
           </div>
         </section>
@@ -6166,7 +7245,9 @@ function App() {
             <span>v{APP_VERSION}</span>
           </h1>
           <p className="product-subtitle">
-            基于 Agent 的多人有声书自动配音工作台
+            {isAutomaticMode
+              ? "基于智能编排的多人有声书自动配音工作台"
+              : "纯手动分步配音工作台：角色、台词、配音由人工控制"}
           </p>
         </div>
         <div className="health-strip" aria-label="运行状态">
@@ -6187,14 +7268,24 @@ function App() {
                 className={workflowState.mode === mode ? "active" : ""}
                 key={mode}
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  const nextMode = mode as WorkflowMode;
                   setWorkflowState((current) =>
                     transitionWorkflow(current, {
                       type: "SET_MODE",
-                      mode: mode as WorkflowMode,
+                      mode: nextMode,
                     }),
-                  )
-                }
+                  );
+                  if (nextMode === "step") {
+                    resetAgentRunState();
+                    setPlannerRun(null);
+                    setApiStatus("已切换到分步配音：当前制作台只保留手动操作");
+                  } else {
+                    setApiStatus(
+                      "已切换到自动配音：可使用角色分析与配音编排流程",
+                    );
+                  }
+                }}
               >
                 {label}
               </button>
@@ -6203,6 +7294,7 @@ function App() {
           <nav className="tabbar" aria-label="页面切换">
             {[
               ["main", "制作台"],
+              ["projects", "项目工作区"],
               ["voices", "音色库"],
               ["memory", "项目记忆"],
               ["agent-runs", "运行审计"],
@@ -6220,7 +7312,10 @@ function App() {
           </nav>
         </div>
       </header>
+      <OperationCenter operations={operations} />
+      <NoticeCenter notices={notices} onDismiss={dismissNotice} />
       {page === "main" && renderMainPage()}
+      {page === "projects" && renderProjectWorkspacePage()}
       {page === "voices" && renderVoiceLibraryPage()}
       {page === "memory" && renderMemoryPage()}
       {page === "agent-runs" && renderAgentTracePage()}

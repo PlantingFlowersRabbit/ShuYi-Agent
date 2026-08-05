@@ -65,6 +65,15 @@ def test_v0_64_story_memory_write_rules_and_prompt_context(monkeypatch, tmp_path
         assert [fact["object"] for fact in data["rejected_facts"]] == ["假名"]
         assert "假名" not in str(data["facts_for_prompt"])
 
+        multi_term_context = client.get(
+            f"/api/v1/projects/{project_id}/story-bible/memory-context",
+            params={"query": "林舟 小舟"},
+        )
+        assert multi_term_context.status_code == 200
+        assert [fact["object"] for fact in multi_term_context.json()["facts_for_prompt"]] == [
+            "小舟"
+        ]
+
 
 def test_v0_64_short_term_run_memory_restores_after_restart(monkeypatch, tmp_path):
     """Short-term Run Memory captures goal, plan, tool calls, errors, and final output."""

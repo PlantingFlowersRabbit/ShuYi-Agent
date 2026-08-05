@@ -153,6 +153,44 @@ def test_v0_5_defaults_have_no_bundled_roles_or_voice_resources(monkeypatch):
     assert voices.json()["voices"] == []
 
 
+def test_v0_5_blank_persisted_model_config_does_not_mask_environment(monkeypatch):
+    """Blank saved model fields should not override .env defaults after restart."""
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_NAME", "deepseek-example")
+    monkeypatch.setenv("QWEN3_TTS_BASE_URL", "http://127.0.0.1:7811")
+    import backend.app.api.app as app_module
+
+    config = app_module._normalize_model_config(
+        {
+            "text_model": {"base_url": "", "model": ""},
+            "tts": {"base_url": ""},
+        }
+    )
+
+    assert config["text_model"]["base_url"] == "https://models.example.test/v1"
+    assert config["text_model"]["model"] == "deepseek-example"
+    assert config["tts"]["base_url"] == "http://127.0.0.1:7811"
+
+
+def test_v0_5_text_model_provider_reads_runtime_limit_environment(monkeypatch):
+    """Agent calls should use runtime token and retry limits suitable for larger chapters."""
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_BASE_URL", "https://models.example.test/v1")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_NAME", "deepseek-example")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_MAX_TOKENS", "3072")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_MAX_RETRIES", "1")
+    import backend.app.api.app as app_module
+
+    app = app_module.create_app()
+    provider = app_module._text_model_provider_from_config(app)
+
+    assert provider["base_url"] == "https://models.example.test/v1"
+    assert provider["model"] == "deepseek-example"
+    assert provider["max_tokens"] == 3072
+    assert provider["timeout_seconds"] == 90
+    assert provider["max_retries"] == 1
+
+
 def test_v0_5_text_model_config_is_openai_compatible_and_uses_ephemeral_secret(
     monkeypatch,
     tmp_path,
@@ -215,6 +253,34 @@ def test_v0_5_readiness_returns_503_when_sqlite_ping_fails():
     assert response.status_code == 503
     assert response.json()["status"] == "not_ready"
     assert response.json()["database"] == "not_ready"
+
+
+def test_v0_5_readiness_reports_cached_tts_deployment_without_requiring_tts(monkeypatch):
+    """Readiness summary should not say TTS is unavailable after deployment succeeds."""
+    from backend.app.api.app import create_app
+
+    app = create_app()
+    app.state.tts_deployment = {
+        **app.state.tts_deployment,
+        "status": "succeeded",
+        "stage": "ready",
+        "progress": 100,
+        "health": {
+            "ok": True,
+            "voice_clone": True,
+            "voice_design": True,
+            "voice_design_capable": True,
+            "ready": True,
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["tts"] == "ready"
+    assert response.json()["tts_required"] is False
 
 
 def test_v0_5_legacy_environment_does_not_re_enable_old_api(monkeypatch):

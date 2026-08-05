@@ -156,3 +156,52 @@ def test_v0_70_project_export_api_isolates_package_path_by_project_id(monkeypatc
     with zipfile.ZipFile(export_root / Path(payload["download_url"]).name) as package:
         names = set(package.namelist())
     assert {"manifest.json", "script.csv", "subtitles.srt", "chapter_full.wav"}.issubset(names)
+
+
+def test_v0_70_project_export_resolves_generated_relative_audio_paths(monkeypatch, tmp_path):
+    """Project export accepts the generated audio paths returned to the frontend."""
+    monkeypatch.setenv("SHUYI_DATA_DIR", str(tmp_path))
+    from backend.app.api import app as app_module
+    from backend.app.domain.audio import write_silent_wav
+
+    audio_dir = app_module.OUTPUT_AUDIO_DIR
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    write_silent_wav(audio_dir / "vj-0001.wav", duration_seconds=0.6)
+
+    with TestClient(app_module.create_app()) as client:
+        project = client.post("/api/v1/projects", json={"name": "相对音频路径项目"}).json()[
+            "project"
+        ]
+        project_id = project["project_id"]
+        payload = {
+            "chapter_title": "第一章",
+            "roles": [_role("narrator", "旁白", "voice-narrator")],
+            "utterances_by_paragraph": {
+                "p-0001": [
+                    _utterance(
+                        "p-0001-u-001",
+                        "p-0001",
+                        "第一句。",
+                        "narrator",
+                        Path("outputs/audio/vj-0001.wav"),
+                    )
+                ]
+            },
+            "pause_ms": 300,
+            "export_formats": ["wav"],
+        }
+        payload["utterances_by_paragraph"]["p-0001"][0]["audio_status"] = "succeeded"
+        first = client.post(f"/api/v1/projects/{project_id}/exports/chapter-0001", json=payload)
+        second = client.post(f"/api/v1/projects/{project_id}/exports/chapter-0001", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["missing_count"] == 0
+    assert first.json()["item_count"] == 1
+    assert first.json()["package_files"]["full_audio_wav"] == "chapter_full.wav"
+    assert first.json()["download_url"] != second.json()["download_url"]
+
+    export_root = Path(project["output_roots"]["exports"])
+    with zipfile.ZipFile(export_root / Path(first.json()["download_url"]).name) as package:
+        names = set(package.namelist())
+    assert {"manifest.json", "script.csv", "chapter_full.wav"}.issubset(names)

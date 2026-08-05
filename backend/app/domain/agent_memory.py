@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -144,7 +145,10 @@ def _matches_query(fact: dict[str, Any], query: str) -> bool:
     haystack = " ".join(
         str(fact.get(key) or "") for key in ("subject", "predicate", "object", "notes")
     )
-    return cleaned in haystack
+    if cleaned in haystack:
+        return True
+    terms = [term for term in re.split(r"[\s,，、;；|/]+", cleaned) if term]
+    return bool(terms) and all(term in haystack for term in terms)
 
 
 def _required_text(payload: dict[str, Any], key: str) -> str:

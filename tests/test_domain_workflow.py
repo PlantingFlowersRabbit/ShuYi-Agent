@@ -1107,6 +1107,8 @@ def test_fastapi_app_exposes_v0_4_resource_boundaries():
         ("/api/v1/chapters", "GET"),
         ("/api/v1/chapters/{chapter_id}", "GET"),
         ("/api/v1/chapters/{chapter_id}/paragraphs", "PUT"),
+        ("/api/v1/chapters/{chapter_id}/paragraphs/{paragraph_id}", "PATCH"),
+        ("/api/v1/chapters/{chapter_id}/paragraphs/{paragraph_id}/segment", "POST"),
         ("/api/v1/chapters/{chapter_id}/agent-runs", "POST"),
         ("/api/v1/paragraphs/{paragraph_id}", "PATCH"),
         ("/api/v1/paragraphs/{paragraph_id}/segment", "POST"),
@@ -1896,6 +1898,73 @@ def test_fastapi_segmentation_requires_confirmation_and_real_provider_key(monkey
     missing_key = client.post("/api/v1/paragraphs/p-0001/segment", json={})
     assert missing_key.status_code == 503
     assert "SHUYI_TEXT_MODEL_API_KEY" in missing_key.json()["detail"]
+
+
+def test_fastapi_chapter_scoped_paragraph_routes_disambiguate_repeated_ids(monkeypatch):
+    """Chapter-scoped paragraph APIs must not edit or segment another chapter's p-0001."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from backend.app.api.app import create_app
+    from backend.app.domain.ai_segmentation_agent import LangChainSegmentationSkill
+
+    monkeypatch.setenv("SHUYI_TEXT_MODEL_API_KEY", "test-token")
+    client = TestClient(create_app(), headers={"Authorization": "Bearer test-v0-4-token"})
+    parse_response = client.post(
+        "/api/v1/books/parse",
+        json={"text": "第一章 初遇\n甲正文。\n\n第二章 归来\n乙正文。"},
+    )
+    assert parse_response.status_code == 200
+
+    edited = client.patch(
+        "/api/v1/chapters/chapter-0002/paragraphs/p-0001",
+        json={"text": "第二章已修改。", "confirm_all": True},
+    )
+    assert edited.status_code == 200
+    assert edited.json()["paragraphs"][0]["text"] == "第二章已修改。"
+    assert edited.json()["can_segment"] is True
+
+    first = client.get("/api/v1/chapters/chapter-0001").json()
+    second = client.get("/api/v1/chapters/chapter-0002").json()
+    assert first["paragraphs"][0]["text"] == "甲正文。"
+    assert first["can_segment"] is False
+    assert second["paragraphs"][0]["text"] == "第二章已修改。"
+    assert second["can_segment"] is True
+
+    def fake_segment(self, *, chapter_title, paragraph_id, paragraph_text, known_roles):
+        assert chapter_title == "第二章 归来"
+        assert paragraph_id == "p-0001"
+        assert paragraph_text == "第二章已修改。"
+        return json.dumps(
+            {
+                "paragraph_id": paragraph_id,
+                "utterances": [
+                    {
+                        "utterance_id": "p-0001-u-001",
+                        "speaker_name": "旁白",
+                        "speaker_role_id": None,
+                        "voice_mode": "voice_design",
+                        "text": paragraph_text,
+                        "emotion": "neutral",
+                        "speed": 1.0,
+                        "volume": 1.0,
+                        "design_prompt": "清晰旁白女声",
+                        "confidence": 0.5,
+                        "needs_human_review": True,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    with patch.object(LangChainSegmentationSkill, "segment", fake_segment):
+        segmented = client.post(
+            "/api/v1/chapters/chapter-0002/paragraphs/p-0001/segment",
+            json={},
+        )
+
+    assert segmented.status_code == 200
+    assert segmented.json()["utterances"][0]["text"] == "第二章已修改。"
 
 
 def test_fastapi_role_patch_persists_for_later_reads():

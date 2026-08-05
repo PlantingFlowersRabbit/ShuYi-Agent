@@ -29,7 +29,7 @@ describe("v0.7.1 application shell", () => {
     expect(markup).toContain('aria-pressed="true"');
     expect(markup).not.toContain("访问令牌");
     expect(markup).not.toContain('aria-label="后端访问令牌"');
-    expect(markup).toContain('<div class="novel-preview" aria-label="小说开头预览"></div>');
+    expect(markup).not.toContain("小说开头预览");
   });
 
   it("renders v0.7.1 model configuration with separate backend and model tests", async () => {
@@ -107,8 +107,14 @@ describe("v0.7.1 application shell", () => {
       import("node:fs"),
       import("node:url"),
     ]);
-    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
-    const cssSource = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf-8");
+    const appSource = readFileSync(
+      fileURLToPath(new URL("./App.tsx", import.meta.url)),
+      "utf-8",
+    );
+    const cssSource = readFileSync(
+      fileURLToPath(new URL("./styles.css", import.meta.url)),
+      "utf-8",
+    );
 
     expect(appSource).toContain("划分台词与角色匹配");
     expect(appSource).toContain("添加第一条台词");
@@ -131,10 +137,10 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("未选角色");
     expect(appSource).toContain("未配音");
     expect(appSource).toContain("项目工作区");
-    expect(appSource).toContain("最近项目");
-    expect(appSource).toContain("一键继续制作");
+    expect(appSource).toContain("工作环境列表");
+    expect(appSource).toContain("自动完成到导出");
     expect(appSource).toContain("制作阻塞项");
-    expect(appSource).toContain("智能下一步助手");
+    expect(appSource).toContain("制作建议");
     expect(appSource).toContain("配音失败");
     expect(appSource).toContain("超长台词");
     expect(appSource).toContain("重复音色");
@@ -163,13 +169,15 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("片段间停顿");
     expect(appSource).toContain("头尾静音裁剪");
     expect(appSource).toContain("响度归一化");
-    expect(appSource).toContain("/projects/${encodeURIComponent(projectId)}/exports/");
-    expect(appSource).toContain("智能下一步助手");
+    expect(appSource).toContain(
+      "/projects/${encodeURIComponent(projectId)}/exports/",
+    );
+    expect(appSource).toContain("制作建议");
     expect(appSource).toContain("把当前章节处理到可导出");
-    expect(appSource).toContain("刷新建议");
+    expect(appSource).toContain("生成 / 复盘建议");
     expect(appSource).toContain("planner-step-list");
-    expect(appSource).toContain("章节状态小地图");
-    expect(appSource).toContain("chapter-status-map");
+    expect(appSource).not.toContain("章节状态小地图");
+    expect(appSource).not.toContain("chapter-status-map");
     expect(appSource).toContain("reader-paragraph");
     expect(appSource).toContain("确认已选台词与角色");
     expect(appSource).toContain("mergeApiAudioByUtteranceId");
@@ -178,13 +186,21 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).not.toContain("跳转到未确认");
     expect(appSource).not.toContain("在此后添加语句");
     expect(appSource).not.toContain("划分语句与角色匹配");
-    expect(appSource).toContain("addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)");
-    expect(cssSource).toMatch(/\.chapter-sidebar:not\(\.collapsed\) \.sidebar-toggle\s*{[^}]*position:\s*absolute/s);
-    expect(cssSource).toMatch(/\.role-stack\s*{[^}]*min-height:\s*clamp\(240px, 42vh, 520px\)/s);
+    expect(appSource).toContain(
+      "addUtteranceAfter(utterance.paragraphId, utterance.utteranceId)",
+    );
+    expect(cssSource).toMatch(
+      /\.chapter-sidebar:not\(\.collapsed\) \.sidebar-toggle\s*{[^}]*position:\s*absolute/s,
+    );
+    expect(cssSource).toMatch(
+      /\.role-stack\s*{[^}]*min-height:\s*clamp\(240px, 42vh, 520px\)/s,
+    );
     expect(cssSource).toMatch(/\.empty-state\s*{[^}]*min-height:\s*100%/s);
-    expect(cssSource).toMatch(/\.brand-logo\s*{[^}]*height:\s*clamp\(38px, 5vw, 52px\)/s);
+    expect(cssSource).toMatch(
+      /\.brand-logo\s*{[^}]*height:\s*clamp\(38px, 5vw, 52px\)/s,
+    );
     expect(cssSource).toContain(".reader-paragraph.failed");
-    expect(cssSource).toContain(".chapter-status-map");
+    expect(cssSource).not.toContain(".chapter-status-map");
     expect(cssSource).toContain(".status-filter-bar");
     expect(cssSource).not.toContain(".access-token-field");
   });
@@ -194,7 +210,10 @@ describe("v0.7.1 application shell", () => {
       import("node:fs"),
       import("node:url"),
     ]);
-    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
+    const appSource = readFileSync(
+      fileURLToPath(new URL("./App.tsx", import.meta.url)),
+      "utf-8",
+    );
 
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
@@ -213,7 +232,9 @@ describe("v0.7.1 application shell", () => {
     expect(markup).not.toContain("模型配置</button>");
     expect(markup).not.toContain("加载红楼梦示例项目");
 
-    expect(appSource).toContain("type Page = \"main\" | \"voices\" | \"memory\" | \"agent-runs\" | \"models\"");
+    expect(appSource).toContain(
+      'type Page = "main" | "projects" | "voices" | "memory" | "agent-runs" | "models"',
+    );
     expect(appSource).toContain("renderMemoryPage");
     expect(appSource).toContain("角色证据");
     expect(appSource).toContain("设定记忆");
@@ -227,11 +248,11 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("确认台词与角色");
     expect(appSource).toContain("生成缺失配音");
     expect(appSource).toContain("导出制作包");
-    expect(appSource).toContain("处理阻塞项");
+    expect(appSource).toContain("自动完成到导出");
     expect(appSource).toContain("production-stepper");
     expect(appSource).toContain("后端待检测");
     expect(appSource).toContain("前端本地规则可继续");
-    expect(appSource).toContain("智能下一步助手");
+    expect(appSource).toContain("制作建议");
     expect(appSource).not.toContain(">生成计划</button>");
     expect(appSource).not.toContain(">执行计划</button>");
     expect(appSource).not.toContain(">复盘计划</button>");
@@ -242,7 +263,9 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("推荐操作");
     expect(appSource).toContain("处理状态");
     expect(appSource).not.toContain("质量检查面板");
-    expect(appSource).not.toContain("<div className=\"section-title\">审稿队列</div>");
+    expect(appSource).not.toContain(
+      '<div className="section-title">审稿队列</div>',
+    );
 
     expect(appSource).toContain("bulkRoleTargetId");
     expect(appSource).toContain("bulkRolePreviewArmed");
@@ -257,7 +280,9 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("pause_ms: exportOptions.pauseMs");
     expect(appSource).toContain("speed: exportOptions.speed");
     expect(appSource).toContain("trim_silence: exportOptions.trimSilence");
-    expect(appSource).toContain("normalize_audio: exportOptions.normalizeAudio");
+    expect(appSource).toContain(
+      "normalize_audio: exportOptions.normalizeAudio",
+    );
     expect(appSource).toContain("target_peak: exportOptions.targetPeak");
   });
 
@@ -265,11 +290,31 @@ describe("v0.7.1 application shell", () => {
     const { paragraphDubbingStatus } = await import("./App");
 
     expect(paragraphDubbingStatus([])).toBe("unsegmented");
-    expect(paragraphDubbingStatus([{ roleId: "", audioStatus: "尚未生成" }])).toBe("unselected-role");
-    expect(paragraphDubbingStatus([{ roleId: "hero", audioStatus: "尚未生成" }])).toBe("undubbed");
-    expect(paragraphDubbingStatus([{ roleId: "hero", audioPath: "outputs/audio/u-001.wav" }])).toBe("dubbed");
-    expect(paragraphDubbingStatus([{ roleId: "hero", audioPath: "outputs/audio/u-001.wav", audioError: "TTS error" }])).toBe("failed");
-    expect(paragraphDubbingStatus([{ roleId: "hero", audioStatus: "音频生成失败：文本过长" }])).toBe("failed");
+    expect(
+      paragraphDubbingStatus([{ roleId: "", audioStatus: "尚未生成" }]),
+    ).toBe("unselected-role");
+    expect(
+      paragraphDubbingStatus([{ roleId: "hero", audioStatus: "尚未生成" }]),
+    ).toBe("undubbed");
+    expect(
+      paragraphDubbingStatus([
+        { roleId: "hero", audioPath: "outputs/audio/u-001.wav" },
+      ]),
+    ).toBe("dubbed");
+    expect(
+      paragraphDubbingStatus([
+        {
+          roleId: "hero",
+          audioPath: "outputs/audio/u-001.wav",
+          audioError: "TTS error",
+        },
+      ]),
+    ).toBe("failed");
+    expect(
+      paragraphDubbingStatus([
+        { roleId: "hero", audioStatus: "音频生成失败：文本过长" },
+      ]),
+    ).toBe("failed");
   });
 
   it("checks backend connectivity before sending large document parse payloads", async () => {
@@ -277,13 +322,18 @@ describe("v0.7.1 application shell", () => {
       import("node:fs"),
       import("node:url"),
     ]);
-    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
+    const appSource = readFileSync(
+      fileURLToPath(new URL("./App.tsx", import.meta.url)),
+      "utf-8",
+    );
     const splitFunction = appSource.slice(
       appSource.indexOf("async function runAiChapterSplit()"),
       appSource.indexOf("async function selectChapter"),
     );
 
-    expect(splitFunction).toContain('requestJson<ConnectionTestResponse>("/connection-test")');
+    expect(splitFunction).toContain(
+      'requestJson<ConnectionTestResponse>("/connection-test")',
+    );
     expect(splitFunction.indexOf('"/connection-test"')).toBeLessThan(
       splitFunction.indexOf('"/books/agent-chapter-split"'),
     );
@@ -294,7 +344,10 @@ describe("v0.7.1 application shell", () => {
       import("node:fs"),
       import("node:url"),
     ]);
-    const appSource = readFileSync(fileURLToPath(new URL("./App.tsx", import.meta.url)), "utf-8");
+    const appSource = readFileSync(
+      fileURLToPath(new URL("./App.tsx", import.meta.url)),
+      "utf-8",
+    );
     const roleCard = appSource.slice(
       appSource.indexOf('<article className="role-card"'),
       appSource.indexOf("{aiRoleCandidates.length > 0"),
@@ -303,10 +356,12 @@ describe("v0.7.1 application shell", () => {
     expect(roleCard).not.toContain('aria-label="播放音色"');
     expect(roleCard).not.toContain("onClick={() => playVoicePreview(voice)}");
     expect(roleCard).toContain("<strong>音色匹配</strong>");
-    expect(roleCard.indexOf("<strong>音色匹配</strong>")).toBeLessThan(roleCard.indexOf("删除角色"));
-    expect(roleCard.indexOf("<AuthorizedAudio source={voiceAudioSrc(voice)} />")).toBeLessThan(
+    expect(roleCard.indexOf("<strong>音色匹配</strong>")).toBeLessThan(
       roleCard.indexOf("删除角色"),
     );
+    expect(
+      roleCard.indexOf("<AuthorizedAudio source={voiceAudioSrc(voice)} />"),
+    ).toBeLessThan(roleCard.indexOf("删除角色"));
   });
 
   it("parses numbered SSE frames and keeps an incomplete tail", async () => {
@@ -322,7 +377,8 @@ describe("v0.7.1 application shell", () => {
   });
 
   it("only asks for role unbinding when delete fails with a reference conflict", async () => {
-    const { ApiRequestError, isRoleDeleteReferenceConflict } = await import("./App");
+    const { ApiRequestError, isRoleDeleteReferenceConflict } =
+      await import("./App");
 
     expect(
       isRoleDeleteReferenceConflict(
@@ -331,7 +387,9 @@ describe("v0.7.1 application shell", () => {
         }),
       ),
     ).toBe(true);
-    expect(isRoleDeleteReferenceConflict(new ApiRequestError(500, "Error"))).toBe(false);
+    expect(
+      isRoleDeleteReferenceConflict(new ApiRequestError(500, "Error")),
+    ).toBe(false);
     expect(
       isRoleDeleteReferenceConflict(
         new ApiRequestError(409, {
@@ -342,16 +400,26 @@ describe("v0.7.1 application shell", () => {
   });
 
   it("formats disconnected backend failures as ApiRequestError while keeping reachable API details", async () => {
-    const { ApiRequestError, apiFailureMessage, documentParseFallbackMessage } = await import("./App");
+    const { ApiRequestError, apiFailureMessage, documentParseFallbackMessage } =
+      await import("./App");
 
     const disconnected = new ApiRequestError(0, "后端不可连接");
     const staticHostNotFound = new ApiRequestError(404, "Not Found");
-    const parserInternalError = new ApiRequestError(500, "Internal Server Error");
+    const parserInternalError = new ApiRequestError(
+      500,
+      "Internal Server Error",
+    );
     const reachableFailure = new ApiRequestError(503, "TTS模型尚未就绪");
 
-    expect(apiFailureMessage("音频生成失败", disconnected)).toBe("音频生成失败：后端未连接");
-    expect(apiFailureMessage("测试连接失败", staticHostNotFound)).toBe("测试连接失败：后端未连接");
-    expect(apiFailureMessage("测试模型失败", reachableFailure)).toBe("测试模型失败：TTS模型尚未就绪");
+    expect(apiFailureMessage("音频生成失败", disconnected)).toBe(
+      "音频生成失败：后端未连接",
+    );
+    expect(apiFailureMessage("测试连接失败", staticHostNotFound)).toBe(
+      "测试连接失败：后端未连接",
+    );
+    expect(apiFailureMessage("测试模型失败", reachableFailure)).toBe(
+      "测试模型失败：TTS模型尚未就绪",
+    );
     expect(documentParseFallbackMessage(disconnected)).toBe(
       "后端未连接，已使用前端本地规则解析章节；可继续制作，连接后端后可启用 Agent 规则增强。",
     );

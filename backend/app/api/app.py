@@ -126,6 +126,14 @@ def _service_env(name: str, default: str = "") -> str:
     return str(os.environ.get(name) or default)
 
 
+def _service_env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(_service_env(name, str(default)))
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
 DEFAULT_DATA_ROOT = Path(_service_env("SHUYI_DATA_DIR", str(ROOT / "data")))
 OUTPUT_AUDIO_DIR = DEFAULT_DATA_ROOT / "outputs/audio"
 OUTPUT_VOICE_RESOURCE_DIR = DEFAULT_DATA_ROOT / "blobs/voice-profiles"
@@ -231,6 +239,38 @@ def _resolve_audio_path(path_text: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _resolve_generated_audio_path(path_text: str) -> Path:
+    cleaned = str(path_text or "").strip()
+    download_prefix = "/api/v1/downloads/audio/"
+    if cleaned.startswith(download_prefix):
+        return (OUTPUT_AUDIO_DIR / cleaned.removeprefix(download_prefix)).resolve()
+    for prefix in ("/outputs/audio/", "outputs/audio/"):
+        if cleaned.startswith(prefix):
+            return (OUTPUT_AUDIO_DIR / cleaned.removeprefix(prefix)).resolve()
+    path = Path(cleaned)
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def _normalize_export_audio_paths(
+    utterances_by_paragraph: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for paragraph_id, utterances in utterances_by_paragraph.items():
+        normalized[str(paragraph_id)] = []
+        for utterance in utterances:
+            item = dict(utterance)
+            audio_path = str(item.get("audio_path") or "").strip()
+            if audio_path:
+                item["audio_path"] = str(_resolve_generated_audio_path(audio_path))
+            normalized[str(paragraph_id)].append(item)
+    return normalized
+
+
+def _unique_export_dir(root: Path, chapter_id: str) -> Path:
+    stem = _safe_audio_filename(chapter_id).removesuffix(".wav")
+    return root / f"{stem}-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+
+
 def _is_inside(path: Path, directory: Path) -> bool:
     try:
         path.resolve().relative_to(directory.resolve())
@@ -299,6 +339,17 @@ def _default_model_config() -> dict[str, Any]:
     }
 
 
+def _non_empty_config_updates(config: dict[str, Any], allowed_keys: set[str]) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    for key, value in config.items():
+        if key not in allowed_keys:
+            continue
+        if value is None or str(value).strip() == "":
+            continue
+        updates[key] = value
+    return updates
+
+
 def _normalize_model_config(config: dict[str, Any] | None) -> dict[str, Any]:
     normalized = _default_model_config()
     if not isinstance(config, dict):
@@ -312,19 +363,13 @@ def _normalize_model_config(config: dict[str, Any] | None) -> dict[str, Any]:
     )
     if isinstance(legacy_text_model, dict):
         normalized["text_model"].update(
-            {
-                key: value
-                for key, value in legacy_text_model.items()
-                if key in {"base_url", "model"}
-            }
+            _non_empty_config_updates(legacy_text_model, {"base_url", "model"})
         )
     if isinstance(config.get("tts"), dict):
         normalized["tts"].update(
-            {
-                key: value
-                for key, value in config["tts"].items()
-                if key in {"base_url", "model_path", "voice_design_model_path"}
-            }
+            _non_empty_config_updates(
+                config["tts"], {"base_url", "model_path", "voice_design_model_path"}
+            )
         )
     return normalized
 
@@ -820,15 +865,13 @@ def create_app() -> FastAPI:
         version=SERVICE_VERSION,
     )
     data_root_value = _service_env("SHUYI_DATA_DIR").strip()
-    data_root = Path(data_root_value).expanduser() if data_root_value else None
-    repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3" if data_root else ":memory:")
+    data_root = Path(data_root_value).expanduser() if data_root_value else DEFAULT_DATA_ROOT
+    repository = SQLiteRepository(data_root / "shuyi-agent.sqlite3")
     repository.initialize()
     app.state.repository = repository
-    app.state.data_root = data_root or DEFAULT_DATA_ROOT
+    app.state.data_root = data_root
     app.state.agent_registry = AgentRegistry.default()
-    app.state.chapter_rule_dir = (
-        data_root / "cache/chapter-rules" if data_root else CHAPTER_RULE_DIR
-    )
+    app.state.chapter_rule_dir = data_root / "cache/chapter-rules"
     app.state.startup_ready = True
     app.state.require_tts_ready = _service_env("SHUYI_REQUIRE_TTS_READY", "0") == "1"
     app.state.secret_exchanges = {}
@@ -901,10 +944,12 @@ def create_app() -> FastAPI:
             database_ready = repository.ping()
         except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
             database_ready = False
-        tts_health = (
+        deployment = _get_tts_deployment_status(app)
+        cached_health = deployment.get("health") if isinstance(deployment.get("health"), dict) else {}
+        tts_health = cached_health or (
             _fetch_tts_health(_state(app)["model_config"]["tts"]["base_url"])
             if app.state.require_tts_ready
-            else {"ready": False}
+            else {"ready": False, "required": False}
         )
         tts_ready = bool(tts_health.get("ready"))
         ready = database_ready and (tts_ready or not app.state.require_tts_ready)
@@ -914,6 +959,7 @@ def create_app() -> FastAPI:
             "version": SERVICE_VERSION,
             "database": "ready" if database_ready else "not_ready",
             "tts": "ready" if tts_ready else "not_ready",
+            "tts_required": app.state.require_tts_ready,
         }
         return payload if ready else JSONResponse(status_code=503, content=payload)
 
@@ -1719,9 +1765,9 @@ def create_app() -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    @app.patch("/api/v1/paragraphs/{paragraph_id}")
-    async def update_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        workbench = _find_workbench_for_paragraph(app, paragraph_id)
+    def _update_workbench_paragraph(
+        workbench: ChapterWorkbench, paragraph_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
         if "text" in payload:
             workbench.edit_paragraph(paragraph_id, str(payload["text"]))
         if payload.get("deleted") is True:
@@ -1737,9 +1783,9 @@ def create_app() -> FastAPI:
             "can_segment": workbench.can_segment,
         }
 
-    @app.post("/api/v1/paragraphs/{paragraph_id}/segment")
-    async def segment_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        workbench = _find_workbench_for_paragraph(app, paragraph_id)
+    async def _segment_workbench_paragraph(
+        workbench: ChapterWorkbench, paragraph_id: str
+    ) -> dict[str, Any]:
         if not workbench.can_segment:
             raise HTTPException(status_code=409, detail="开始配音片段划分前必须先确认段落")
         paragraph = workbench.get_paragraph(paragraph_id)
@@ -1775,6 +1821,30 @@ def create_app() -> FastAPI:
                 "trace": agent_result.trace,
             },
         }
+
+    @app.patch("/api/v1/paragraphs/{paragraph_id}")
+    async def update_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        workbench = _find_workbench_for_paragraph(app, paragraph_id)
+        return _update_workbench_paragraph(workbench, paragraph_id, payload)
+
+    @app.patch("/api/v1/chapters/{chapter_id}/paragraphs/{paragraph_id}")
+    async def update_chapter_paragraph(
+        chapter_id: str, paragraph_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        workbench = _find_workbench_for_chapter_paragraph(app, chapter_id, paragraph_id)
+        return _update_workbench_paragraph(workbench, paragraph_id, payload)
+
+    @app.post("/api/v1/paragraphs/{paragraph_id}/segment")
+    async def segment_paragraph(paragraph_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        workbench = _find_workbench_for_paragraph(app, paragraph_id)
+        return await _segment_workbench_paragraph(workbench, paragraph_id)
+
+    @app.post("/api/v1/chapters/{chapter_id}/paragraphs/{paragraph_id}/segment")
+    async def segment_chapter_paragraph(
+        chapter_id: str, paragraph_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        workbench = _find_workbench_for_chapter_paragraph(app, chapter_id, paragraph_id)
+        return await _segment_workbench_paragraph(workbench, paragraph_id)
 
     async def roles(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         collection = _state(app)["roles"]
@@ -2441,13 +2511,12 @@ def create_app() -> FastAPI:
         chapter_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
         roles = _roles_for_export_payload(app, payload or {})
-        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+        utterances_by_paragraph = _normalize_export_audio_paths(
+            _utterances_by_paragraph_from_payload(payload or {})
+        )
         chapter_title = str((payload or {}).get("chapter_title") or chapter_id)
         export_options = _export_options_from_payload(payload or {})
-        export_dir = (
-            OUTPUT_EXPORT_DIR
-            / f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
-        )
+        export_dir = _unique_export_dir(OUTPUT_EXPORT_DIR, chapter_id)
         report = await asyncio.to_thread(
             export_chapter_audio,
             chapter_id=chapter_id,
@@ -2480,12 +2549,12 @@ def create_app() -> FastAPI:
         export_root = Path(project["output_roots"]["exports"])
         export_root.mkdir(parents=True, exist_ok=True)
         roles = _roles_for_export_payload(app, payload or {})
-        utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload or {})
+        utterances_by_paragraph = _normalize_export_audio_paths(
+            _utterances_by_paragraph_from_payload(payload or {})
+        )
         chapter_title = str((payload or {}).get("chapter_title") or chapter_id)
         export_options = _export_options_from_payload(payload or {})
-        export_dir = export_root / (
-            f"{_safe_audio_filename(chapter_id).removesuffix('.wav')}-{int(time.time())}"
-        )
+        export_dir = _unique_export_dir(export_root, chapter_id)
         report = await asyncio.to_thread(
             export_chapter_audio,
             chapter_id=chapter_id,
@@ -3348,6 +3417,19 @@ def _find_workbench_for_paragraph(app: FastAPI, paragraph_id: str) -> ChapterWor
     raise HTTPException(status_code=404, detail="段落不存在")
 
 
+def _find_workbench_for_chapter_paragraph(
+    app: FastAPI, chapter_id: str, paragraph_id: str
+) -> ChapterWorkbench:
+    workbench = _state(app)["workbenches"].get(chapter_id)
+    if workbench is None:
+        raise HTTPException(status_code=404, detail="章节不存在")
+    try:
+        workbench.get_paragraph(paragraph_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="段落不存在") from exc
+    return workbench
+
+
 def _required_text(payload: dict[str, Any], field: str) -> str:
     value = payload.get(field)
     if not isinstance(value, str) or not value.strip():
@@ -3377,6 +3459,16 @@ def _text_model_provider_from_config(app: FastAPI) -> dict[str, Any]:
     config = _normalize_model_config(_state(app)["model_config"])["text_model"]
     provider["base_url"] = config.get("base_url") or provider["base_url"]
     provider["model"] = config.get("model") or provider["model"]
+    provider["timeout_seconds"] = _service_env_int(
+        "SHUYI_TEXT_MODEL_TIMEOUT_SECONDS",
+        int(provider.get("timeout_seconds") or 120),
+    )
+    provider["max_tokens"] = _service_env_int("SHUYI_TEXT_MODEL_MAX_TOKENS", 4096)
+    provider["max_retries"] = _service_env_int(
+        "SHUYI_TEXT_MODEL_MAX_RETRIES",
+        int(provider.get("max_retries") or 2),
+        minimum=0,
+    )
     return provider
 
 
