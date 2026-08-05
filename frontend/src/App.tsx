@@ -3,6 +3,7 @@ import {
   createWorkflowState,
   transitionWorkflow,
   type WorkflowMode,
+  type WorkflowState,
 } from "./features/agent-workflow/workflowMachine";
 import {
   APP_BRAND,
@@ -374,6 +375,44 @@ type ProjectWorkspace = {
   updated_at?: string;
 };
 
+type ProjectWorkspaceState = {
+  schema_version: string;
+  saved_at: string;
+  novel_text: string;
+  novel_preview: string;
+  uploaded_novel_file: UploadedNovelFile | null;
+  chapters: Chapter[];
+  active_chapter_id: string;
+  paragraphs: ParagraphModule[];
+  has_split_chapters: boolean;
+  confirmed: boolean;
+  roles: RoleCard[];
+  utterances_by_paragraph: Record<string, UtteranceDraft[]>;
+  ignored_paragraph_ids: Record<string, boolean>;
+  chapter_backend_synced: boolean;
+  workflow_state: WorkflowState;
+  quality_report: QualityCheckResponse;
+  review_queue: ReviewQueueResponse;
+  planner_goal: string;
+  planner_run: PlannerRun | null;
+  planner_status: string;
+  export_preset: ExportPreset;
+  export_options: ExportOptions;
+  progress: {
+    upload: number;
+    chapter_split: number;
+    role_matching: number;
+    voice_generation: number;
+  };
+  api_status: string;
+};
+
+type ProjectWorkspaceStateResponse = {
+  project_id: string;
+  workspace_state: ProjectWorkspaceState | null;
+  updated_at?: string;
+};
+
 type QualitySummary = Record<
   | "unsegmented"
   | "unselected_role"
@@ -685,6 +724,8 @@ const defaultServiceHealth: ServiceHealth = {
 };
 
 const PROJECT_STORAGE_KEY = "shuyi-agent.recent-projects.v0.6.1";
+const PROJECT_WORKSPACE_STATE_STORAGE_PREFIX =
+  "shuyi-agent.project-workspace-state.v0.7.2.";
 
 const defaultQualitySummary: QualitySummary = {
   unsegmented: 0,
@@ -1921,6 +1962,53 @@ function forgetRecentProject(projectId: string) {
   );
 }
 
+function projectWorkspaceStateStorageKey(projectId: string) {
+  return `${PROJECT_WORKSPACE_STATE_STORAGE_PREFIX}${projectId}`;
+}
+
+function readLocalProjectWorkspaceState(
+  projectId: string,
+): ProjectWorkspaceState | null {
+  const storage = projectStorage();
+  if (!storage) return null;
+  try {
+    const value = JSON.parse(
+      storage.getItem(projectWorkspaceStateStorageKey(projectId)) ?? "null",
+    );
+    return value && typeof value === "object"
+      ? (value as ProjectWorkspaceState)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalProjectWorkspaceState(
+  projectId: string,
+  state: ProjectWorkspaceState,
+) {
+  const storage = projectStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(
+      projectWorkspaceStateStorageKey(projectId),
+      JSON.stringify(state),
+    );
+  } catch {
+    // 浏览器存储容量不足时仍允许后端快照继续保存。
+  }
+}
+
+function deleteLocalProjectWorkspaceState(projectId: string) {
+  const storage = projectStorage();
+  if (!storage) return;
+  try {
+    storage.removeItem(projectWorkspaceStateStorageKey(projectId));
+  } catch {
+    // 忽略本地清理失败。
+  }
+}
+
 function sortProjectsByRecent(
   projects: ProjectWorkspace[],
 ): ProjectWorkspace[] {
@@ -1953,6 +2041,9 @@ function App() {
   const chapterPlayerRef = useRef<HTMLAudioElement>(null);
   const chapterPlaybackQueueRef = useRef<UtteranceDraft[]>([]);
   const chapterPlaybackIndexRef = useRef(0);
+  const workspaceRestoreReadyRef = useRef(false);
+  const workspaceSaveTimerRef = useRef<number | null>(null);
+  const projectWorkspaceControlsRolesRef = useRef(false);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState("");
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -2542,6 +2633,145 @@ function App() {
     setQualityStatus("制作阻塞项等待当前项目数据。");
   }
 
+  function captureProjectWorkspaceState(projectId: string): ProjectWorkspaceState {
+    return {
+      schema_version: "v0.7.2",
+      saved_at: new Date().toISOString(),
+      novel_text: fullNovelTextRef.current,
+      novel_preview: novelPreview,
+      uploaded_novel_file: uploadedNovelFileRef.current,
+      chapters,
+      active_chapter_id: activeChapterId,
+      paragraphs,
+      has_split_chapters: hasSplitChapters,
+      confirmed,
+      roles,
+      utterances_by_paragraph: utterancesByParagraph,
+      ignored_paragraph_ids: ignoredParagraphIds,
+      chapter_backend_synced: chapterBackendSynced,
+      workflow_state: workflowState,
+      quality_report: { ...qualityReport, project_id: projectId },
+      review_queue: { ...reviewQueue, project_id: projectId },
+      planner_goal: plannerGoal,
+      planner_run: plannerRun,
+      planner_status: plannerStatus,
+      export_preset: exportPreset,
+      export_options: exportOptions,
+      progress: {
+        upload: uploadProgress,
+        chapter_split: chapterSplitProgress,
+        role_matching: roleMatchingProgress,
+        voice_generation: voiceGenerationProgress,
+      },
+      api_status: apiStatus,
+    };
+  }
+
+  async function saveProjectWorkspaceState(
+    projectId = activeProjectId,
+    options: { silent?: boolean } = {},
+  ) {
+    if (!projectId) return null;
+    const state = captureProjectWorkspaceState(projectId);
+    writeLocalProjectWorkspaceState(projectId, state);
+    try {
+      const data = await requestJson<ProjectWorkspaceStateResponse>(
+        `/projects/${encodeURIComponent(projectId)}/workspace-state`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ workspace_state: state }),
+        },
+      );
+      if (!options.silent) {
+        setResourceStatus(`工作区状态已保存：${projectId}`);
+      }
+      return data.workspace_state;
+    } catch (error) {
+      if (!options.silent) {
+        setResourceStatus(
+          `工作区状态已保存到浏览器，本次后端同步失败：${apiFailureDetail(error)}`,
+        );
+      }
+      return state;
+    }
+  }
+
+  function applyProjectWorkspaceState(
+    projectId: string,
+    projectName: string,
+    state: ProjectWorkspaceState,
+  ) {
+    fullNovelTextRef.current = state.novel_text ?? "";
+    uploadedNovelFileRef.current = state.uploaded_novel_file ?? null;
+    automaticDubbingStartedRef.current = false;
+    automaticRoleMatchingAttemptedRef.current = false;
+    autoPipelineRequestedRef.current = false;
+    dubbingInFlightRef.current = false;
+    queuedUtteranceIdsRef.current.clear();
+    chapterPlaybackQueueRef.current = [];
+    chapterPlaybackIndexRef.current = 0;
+    chapterPlayerRef.current?.pause();
+    setNovelPreview(state.novel_preview ?? "");
+    setChapters(state.chapters ?? []);
+    setActiveChapterId(state.active_chapter_id ?? "");
+    setParagraphs(state.paragraphs ?? []);
+    setHasSplitChapters(Boolean(state.has_split_chapters));
+    setConfirmed(Boolean(state.confirmed));
+    setRoles(state.roles ?? []);
+    setUtterancesByParagraph(state.utterances_by_paragraph ?? {});
+    setIgnoredParagraphIds(state.ignored_paragraph_ids ?? {});
+    setChapterBackendSynced(Boolean(state.chapter_backend_synced));
+    setUploadProgress(state.progress?.upload ?? 0);
+    setChapterSplitProgress(state.progress?.chapter_split ?? 0);
+    setRoleMatchingProgress(state.progress?.role_matching ?? 0);
+    setVoiceGenerationProgress(state.progress?.voice_generation ?? 0);
+    setGeneratingUtteranceIds({});
+    setHighlightUtteranceId("");
+    setHighlightParagraphId("");
+    setActiveParagraphStatusFilter("");
+    setChapterPlaybackState("idle");
+    setChapterPlaybackUtteranceId("");
+    setChapterPlaybackTime(0);
+    setChapterPlaybackDuration(0);
+    const restoredWorkflow = state.workflow_state ?? createWorkflowState("automatic");
+    setWorkflowState(
+      restoredWorkflow.status === "running"
+        ? { ...restoredWorkflow, status: "awaiting_confirmation" }
+        : restoredWorkflow,
+    );
+    setQualityReport(
+      state.quality_report
+        ? { ...state.quality_report, project_id: projectId }
+        : createEmptyQualityReport(projectId),
+    );
+    setReviewQueue(
+      state.review_queue
+        ? { ...state.review_queue, project_id: projectId }
+        : createEmptyReviewQueue(projectId),
+    );
+    setPlannerGoal(state.planner_goal || "把当前章节处理到可导出");
+    setPlannerRun(state.planner_run ?? null);
+    setPlannerStatus(
+      state.planner_status ||
+        "制作建议会根据当前章节状态生成计划或复盘，不会自动执行。",
+    );
+    setExportPreset(state.export_preset ?? "delivery");
+    setExportOptions(state.export_options ?? EXPORT_PRESETS.delivery);
+    setStoryBibleFacts([]);
+    setMemoryContext(null);
+    setMemoryQuery("");
+    setMemoryStatus(`已恢复 ${projectName}；项目记忆可刷新。`);
+    setAgentTraces([]);
+    setSelectedAgentTrace(null);
+    setAgentTraceStatus(`已恢复 ${projectName}；运行审计可刷新。`);
+    resetAgentRunState();
+    projectWorkspaceControlsRolesRef.current = true;
+    setApiStatus(
+      state.api_status || `已恢复工作环境：${projectName}，可从上次步骤继续`,
+    );
+    setQualityStatus(`已恢复工作区进度：${projectName}`);
+  }
+
   function resetCurrentProjectSession(projectId: string, projectName: string) {
     fullNovelTextRef.current = "";
     uploadedNovelFileRef.current = null;
@@ -2585,8 +2815,36 @@ function App() {
     setSelectedAgentTrace(null);
     setAgentTraceStatus(`已切换到 ${projectName}；运行审计等待刷新。`);
     resetAgentRunState();
+    projectWorkspaceControlsRolesRef.current = true;
     resetProjectQualityState(projectId);
-    setApiStatus(`已切换到工作环境：${projectName}，请上传或解析该环境的小说`);
+    setApiStatus(`已打开工作环境：${projectName}，暂无已保存的制作进度`);
+  }
+
+  async function restoreProjectWorkspaceSession(project: ProjectWorkspace) {
+    const projectId = project.project_id;
+    workspaceRestoreReadyRef.current = false;
+    let state = readLocalProjectWorkspaceState(projectId);
+    try {
+      const data = await requestJson<ProjectWorkspaceStateResponse>(
+        `/projects/${encodeURIComponent(projectId)}/workspace-state`,
+      );
+      if (data.workspace_state) {
+        state = data.workspace_state;
+        writeLocalProjectWorkspaceState(projectId, data.workspace_state);
+      }
+    } catch (error) {
+      setResourceStatus(
+        state
+          ? `后端工作区状态读取失败，已使用浏览器快照：${apiFailureDetail(error)}`
+          : `工作区状态读取失败：${apiFailureDetail(error)}`,
+      );
+    }
+    if (state) {
+      applyProjectWorkspaceState(projectId, project.name, state);
+    } else {
+      resetCurrentProjectSession(projectId, project.name);
+    }
+    workspaceRestoreReadyRef.current = true;
   }
 
   function projectQualityPayload(
@@ -2635,6 +2893,9 @@ function App() {
       if (preferredProject) {
         setActiveProjectId(preferredProject.project_id);
         rememberRecentProject(preferredProject.project_id);
+        void restoreProjectWorkspaceSession(preferredProject);
+      } else {
+        workspaceRestoreReadyRef.current = true;
       }
       setQualityStatus(
         preferredProject
@@ -2678,9 +2939,14 @@ function App() {
           ),
         ]),
       );
+      if (workspaceRestoreReadyRef.current) {
+        await saveProjectWorkspaceState(activeProjectId, { silent: true });
+      }
       setActiveProjectId(data.project.project_id);
       setNewProjectName("");
       resetCurrentProjectSession(data.project.project_id, data.project.name);
+      workspaceRestoreReadyRef.current = true;
+      void saveProjectWorkspaceState(data.project.project_id, { silent: true });
       setQualityStatus(`项目工作区已创建：${data.project.name}`);
     } catch (error) {
       setQualityStatus(apiFailureMessage("项目创建失败", error));
@@ -2700,6 +2966,7 @@ function App() {
         },
       );
       forgetRecentProject(projectId);
+      deleteLocalProjectWorkspaceState(projectId);
       setProjects((current) => {
         const remaining = current.filter(
           (project) => project.project_id !== projectId,
@@ -2709,10 +2976,9 @@ function App() {
           if (nextProject) {
             setActiveProjectId(nextProject.project_id);
             rememberRecentProject(nextProject.project_id);
-            resetCurrentProjectSession(
-              nextProject.project_id,
-              nextProject.name,
-            );
+            void restoreProjectWorkspaceSession(nextProject);
+          } else {
+            workspaceRestoreReadyRef.current = true;
           }
         }
         return remaining;
@@ -2723,14 +2989,21 @@ function App() {
     }
   }
 
-  function selectProject(projectId: string) {
+  async function selectProject(projectId: string) {
     const project = projects.find((item) => item.project_id === projectId);
     if (!project) return;
+    if (projectId === activeProjectId) {
+      setQualityStatus(`当前已在工作环境：${project.name}`);
+      return;
+    }
+    if (workspaceRestoreReadyRef.current) {
+      await saveProjectWorkspaceState(activeProjectId, { silent: true });
+    }
     rememberRecentProject(projectId);
     setActiveProjectId(projectId);
     setProjects((current) => sortProjectsByRecent(current));
-    resetCurrentProjectSession(projectId, project.name);
-    setQualityStatus(`已切换到最近项目：${project.name}；制作台已清空`);
+    await restoreProjectWorkspaceSession(project);
+    setQualityStatus(`已切换到最近项目：${project.name}；已恢复制作进度`);
   }
 
   async function runQualityCheck(
@@ -3447,6 +3720,7 @@ function App() {
 
     requestJson<{ roles: ApiRoleCard[] }>("/characters")
       .then((data) => {
+        if (projectWorkspaceControlsRolesRef.current) return;
         setRoles(data.roles.map(fromApiRole));
         setServiceHealth({
           state: "connected",
@@ -3477,6 +3751,47 @@ function App() {
     if (page === "agent-runs") void loadAgentRunHistory();
     if (page === "memory") void loadStoryBible();
   }, [activeProjectId, page]);
+
+  useEffect(() => {
+    if (!workspaceRestoreReadyRef.current || !activeProjectId) return undefined;
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+    }
+    workspaceSaveTimerRef.current = window.setTimeout(() => {
+      void saveProjectWorkspaceState(activeProjectId, { silent: true });
+    }, 900);
+    return () => {
+      if (workspaceSaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceSaveTimerRef.current);
+        workspaceSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    activeChapterId,
+    activeProjectId,
+    apiStatus,
+    chapterBackendSynced,
+    chapterSplitProgress,
+    chapters,
+    confirmed,
+    exportOptions,
+    exportPreset,
+    hasSplitChapters,
+    ignoredParagraphIds,
+    novelPreview,
+    paragraphs,
+    plannerGoal,
+    plannerRun,
+    plannerStatus,
+    qualityReport,
+    reviewQueue,
+    roleMatchingProgress,
+    roles,
+    uploadProgress,
+    utterancesByParagraph,
+    voiceGenerationProgress,
+    workflowState,
+  ]);
 
   useEffect(() => {
     if (ttsDeployment.status !== "running") return undefined;
@@ -4676,6 +4991,7 @@ function App() {
           output_path?: string;
           provider?: string;
           response_format?: string;
+          synthesis_segments?: string[] | null;
         };
         warning?: string;
       }>(`/dubbing-segments/${utterance.utteranceId}/dubbing-jobs`, {
@@ -4691,6 +5007,8 @@ function App() {
       const audioStatus =
         result.voice_job.status === "substitute"
           ? "本地 TTS 未启动，已生成可播放占位音频"
+          : (result.voice_job.synthesis_segments?.length ?? 0) > 1
+            ? "音频生成完成（已拆分短开头防吞字）"
           : "音频生成完成";
       setUtterancesByParagraph((current) => ({
         ...current,
@@ -6451,7 +6769,7 @@ function App() {
               <div className="section-title">项目工作区</div>
               <h2>{activeProject?.name ?? "default"}</h2>
               <small>
-                选择工作环境会切换当前项目的质量检查、记忆检索和导出根目录。
+                选择工作环境会保存当前进度，并恢复目标项目上次制作到的步骤。
               </small>
             </div>
             <button
@@ -6517,7 +6835,7 @@ function App() {
                 >
                   <button
                     type="button"
-                    onClick={() => selectProject(project.project_id)}
+                    onClick={() => void selectProject(project.project_id)}
                   >
                     <strong>{project.name}</strong>
                     <span>{project.project_id}</span>
@@ -6527,7 +6845,7 @@ function App() {
                       className="tool-button sky"
                       type="button"
                       disabled={project.project_id === activeProjectId}
-                      onClick={() => selectProject(project.project_id)}
+                      onClick={() => void selectProject(project.project_id)}
                     >
                       切换环境
                     </button>

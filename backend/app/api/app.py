@@ -47,7 +47,9 @@ from backend.app.domain.audio import (
     export_chapter_audio,
     generate_chapter_audio_batch,
     synthesize_local_qwen3,
+    synthesize_local_qwen3_guarded,
     synthesize_voice_design_qwen3,
+    tts_synthesis_segments,
 )
 from backend.app.domain.dubbing_workflow import (
     AiSegmentationService,
@@ -82,6 +84,7 @@ from backend.app.domain.project_workspace import (
     build_review_queue,
     default_project,
     project_from_payload,
+    project_workspace_state_from_payload,
     safe_project_id,
     with_output_roots,
 )
@@ -1051,6 +1054,41 @@ def create_app() -> FastAPI:
         if project is None:
             raise HTTPException(status_code=404, detail="项目不存在")
         return {"project": with_output_roots(project, app.state.data_root)}
+
+    @app.get("/api/v1/projects/{project_id}/workspace-state")
+    async def get_project_workspace_state(project_id: str) -> dict[str, Any]:
+        safe_id = _require_project(repository, project_id)
+        project = repository.get_project(safe_id) or {}
+        state = project.get("workspace_state")
+        return {
+            "project_id": safe_id,
+            "workspace_state": state if isinstance(state, dict) else None,
+            "updated_at": project.get("workspace_state_updated_at"),
+        }
+
+    @app.put("/api/v1/projects/{project_id}/workspace-state")
+    async def put_project_workspace_state(
+        project_id: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        safe_id = _require_project(repository, project_id)
+        project = repository.get_project(safe_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        try:
+            state = project_workspace_state_from_payload(payload or {})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updated_project = {
+            **project,
+            "workspace_state": state,
+            "workspace_state_updated_at": state["updated_at"],
+        }
+        repository.save_project(updated_project)
+        return {
+            "project_id": safe_id,
+            "workspace_state": state,
+            "updated_at": state["updated_at"],
+        }
 
     @app.delete("/api/v1/projects/{project_id}")
     async def delete_project(project_id: str) -> dict[str, Any]:
@@ -2389,6 +2427,7 @@ def create_app() -> FastAPI:
             language=str(request.get("language", "Auto")),
             other_control_text=request.get("other_control_text"),
             x_vector_only=bool(request.get("x_vector_only", False)),
+            synthesis_segments=tts_synthesis_segments(request["input"]),
         )
         try:
             duration_seconds = await asyncio.to_thread(
@@ -3376,10 +3415,11 @@ def _synthesize_local_qwen3_serialized(
     output_path: Path,
 ) -> float:
     with app.state.tts_synthesis_lock:
-        return synthesize_local_qwen3(
+        return synthesize_local_qwen3_guarded(
             request,
             output_path=output_path,
             service_base_url=_state(app)["model_config"]["tts"].get("base_url"),
+            synthesize_one=synthesize_local_qwen3,
         )
 
 

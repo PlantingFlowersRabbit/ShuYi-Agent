@@ -81,6 +81,7 @@ class VoiceJob:
     language: str = "Auto"
     other_control_text: str | None = None
     x_vector_only: bool = False
+    synthesis_segments: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -400,6 +401,78 @@ def synthesize_local_qwen3(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(audio_bytes)
     return validate_wav_duration(output_path)
+
+
+def tts_synthesis_segments(text: str) -> list[str]:
+    """Split only risky short-leading exclamations to avoid TTS swallowing them.
+
+    Qwen3-TTS voice cloning can occasionally skip a very short opening clause when
+    the same phrase appears again later in the same utterance, especially for
+    shouted dialogue like "放开我！...快放开我！".  Splitting that opening clause
+    into its own synthesis request preserves the spoken text while keeping the
+    user-facing script and manifest unchanged.
+    """
+
+    normalized = _strip_wrapping_dialogue_quotes(text.strip())
+    if not normalized:
+        return []
+    parts = [part for part in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", normalized) if part]
+    if len(parts) < 2:
+        return [normalized]
+    first = parts[0].strip()
+    first_core = re.sub(r"[。！？!?；;\s]+$", "", first)
+    remainder = "".join(parts[1:]).strip()
+    if (
+        first.endswith(("！", "!", "？", "?"))
+        and 1 <= len(first_core) <= 8
+        and first_core in re.sub(r"[\s。！？!?；;，,、]+", "", remainder)
+    ):
+        return [first, remainder]
+    return [normalized]
+
+
+def synthesize_local_qwen3_guarded(
+    request_payload: dict[str, Any],
+    *,
+    output_path: Path,
+    service_base_url: str | None = None,
+    synthesize_one: Callable[..., float] = synthesize_local_qwen3,
+) -> float:
+    segments = tts_synthesis_segments(str(request_payload.get("input") or ""))
+    if len(segments) <= 1:
+        guarded_payload = {**request_payload, "input": segments[0] if segments else ""}
+        return synthesize_one(
+            guarded_payload,
+            output_path=output_path,
+            service_base_url=service_base_url,
+        )
+
+    part_paths = [
+        output_path.with_name(f"{output_path.stem}-part-{index + 1}{output_path.suffix}")
+        for index in range(len(segments))
+    ]
+    try:
+        for segment, part_path in zip(segments, part_paths, strict=True):
+            synthesize_one(
+                {**request_payload, "input": segment},
+                output_path=part_path,
+                service_base_url=service_base_url,
+            )
+        _concatenate_wavs(part_paths, output_path, pause_ms=120)
+        return validate_wav_duration(output_path)
+    finally:
+        for part_path in part_paths:
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
+
+
+def _strip_wrapping_dialogue_quotes(text: str) -> str:
+    quote_pairs = {"“": "”", "‘": "’", "\"": "\"", "'": "'"}
+    while len(text) >= 2 and text[0] in quote_pairs and text[-1] == quote_pairs[text[0]]:
+        text = text[1:-1].strip()
+    return text
 
 
 def synthesize_voice_design_qwen3(

@@ -72,11 +72,24 @@ def project_from_payload(payload: dict[str, Any], data_root: Path) -> dict[str, 
 
 def with_output_roots(project: dict[str, Any], data_root: Path) -> dict[str, Any]:
     project_id = safe_project_id(str(project.get("project_id") or DEFAULT_PROJECT_ID))
+    public_project = {
+        key: value for key, value in project.items() if key != "workspace_state"
+    }
     return {
-        **project,
+        **public_project,
         "project_id": project_id,
         "output_roots": project_output_roots(data_root, project_id),
     }
+
+
+def project_workspace_state_from_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    raw_state: Any = (payload or {}).get("workspace_state", payload or {})
+    if not isinstance(raw_state, dict):
+        raise ValueError("workspace_state 必须是对象")
+    state = dict(raw_state)
+    state.setdefault("schema_version", "v0.7.1")
+    state["updated_at"] = utc_now_iso()
+    return state
 
 
 def build_quality_report(

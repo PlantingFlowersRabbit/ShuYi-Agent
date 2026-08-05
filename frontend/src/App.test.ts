@@ -262,11 +262,13 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("影响");
     expect(appSource).toContain("推荐操作");
     expect(appSource).toContain("处理状态");
-    expect(appSource).toContain("resetCurrentProjectSession");
+    expect(appSource).toContain("restoreProjectWorkspaceSession");
+    expect(appSource).toContain("saveProjectWorkspaceState");
     expect(appSource).toContain("local-review:");
     expect(appSource).toContain("将先执行角色分析 Agent");
     expect(appSource).toContain("请点阻塞项定位");
-    expect(appSource).toContain("制作台已清空");
+    expect(appSource).toContain("已恢复制作进度");
+    expect(appSource).toContain("已拆分短开头防吞字");
     expect(appSource).not.toContain("质量检查面板");
     expect(appSource).not.toContain(
       '<div className="section-title">审稿队列</div>',
@@ -291,7 +293,7 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("target_peak: exportOptions.targetPeak");
   });
 
-  it("keeps project switches scoped and lets automatic production run agents before manual blockers", async () => {
+  it("saves and restores project switches before running automatic blockers", async () => {
     const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
       import("node:fs"),
       import("node:url"),
@@ -309,8 +311,9 @@ describe("v0.7.1 application shell", () => {
       appSource.indexOf("function focusQualityIssue"),
     );
 
-    expect(selectProjectFunction).toContain("resetCurrentProjectSession");
-    expect(selectProjectFunction).toContain("制作台已清空");
+    expect(selectProjectFunction).toContain("saveProjectWorkspaceState");
+    expect(selectProjectFunction).toContain("restoreProjectWorkspaceSession");
+    expect(selectProjectFunction).toContain("已恢复制作进度");
     expect(appSource).toContain(
       "`/agent-runs?project_id=${encodeURIComponent(projectId)}`",
     );
