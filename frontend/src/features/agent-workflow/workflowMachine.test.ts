@@ -10,8 +10,10 @@ describe("v0.4 agent workflow modes", () => {
     const { createWorkflowState, transitionWorkflow } = await import("./workflowMachine");
     const automatic = createWorkflowState("automatic");
     const step = transitionWorkflow(automatic, { type: "SET_MODE", mode: "step" });
+    const manual = transitionWorkflow(step, { type: "SET_MODE", mode: "manual" });
 
     expect(step).toEqual({ ...automatic, mode: "step" });
+    expect(manual).toEqual({ ...automatic, mode: "manual" });
   });
 
   it("automatic mode advances directly to the next agent", async () => {
@@ -59,6 +61,20 @@ describe("v0.4 agent workflow modes", () => {
     expect(transitionWorkflow(paused, { type: "SET_MODE", mode: "automatic" })).toMatchObject({
       mode: "automatic",
       status: "running",
+      activeAgent: "role_analyzer",
+    });
+  });
+
+  it("manual mode is reserved for pure human-controlled production", async () => {
+    const { createWorkflowState, transitionWorkflow } = await import("./workflowMachine");
+    const idle = createWorkflowState("manual");
+    const parsing = transitionWorkflow(idle, { type: "START" });
+    const paused = transitionWorkflow(parsing, { type: "AGENT_COMPLETED" });
+
+    expect(idle.mode).toBe("manual");
+    expect(paused).toMatchObject({
+      mode: "manual",
+      status: "awaiting_confirmation",
       activeAgent: "role_analyzer",
     });
   });

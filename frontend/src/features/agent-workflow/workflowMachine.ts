@@ -1,7 +1,7 @@
 export const WORKFLOW_AGENTS = ["novel_parser", "role_analyzer", "dubbing_director"] as const;
 
 export type WorkflowAgent = (typeof WORKFLOW_AGENTS)[number];
-export type WorkflowMode = "automatic" | "step";
+export type WorkflowMode = "automatic" | "step" | "manual";
 export type WorkflowStatus = "idle" | "running" | "awaiting_confirmation" | "completed";
 
 export type WorkflowState = {

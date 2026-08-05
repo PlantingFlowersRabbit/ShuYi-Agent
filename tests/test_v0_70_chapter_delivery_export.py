@@ -44,7 +44,7 @@ def _utterance(
 
 
 def test_v0_70_export_package_contains_manifest_scripts_subtitles_and_role_assets(tmp_path):
-    """v0.7.1 delivery exports include complete production package metadata."""
+    """v0.7.2 delivery exports include complete production package metadata."""
     from backend.app.domain.audio import export_chapter_audio, write_silent_wav
 
     first = tmp_path / "first.wav"
@@ -83,7 +83,7 @@ def test_v0_70_export_package_contains_manifest_scripts_subtitles_and_role_asset
     assert Path(report.full_audio_path or "").name == "chapter_full.wav"
     assert Path(report.full_mp3_path or "").name == "chapter_full.mp3"
     assert encoded_mp3 == [(export_dir / "chapter_full.wav", export_dir / "chapter_full.mp3")]
-    assert manifest["package_version"] == "v0.7.1"
+    assert manifest["package_version"] == "v0.7.2"
     assert manifest["project_artifact_type"] == "chapter_delivery_package"
     assert manifest["post_processing"] == {
         "pause_ms": 450,

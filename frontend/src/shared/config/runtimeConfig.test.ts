@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-describe("v0.7.1 runtime configuration", () => {
+describe("v0.7.2 runtime configuration", () => {
   it("publishes the release brand and version", async () => {
     const { APP_BRAND, APP_VERSION } = await import("./runtimeConfig");
 
     expect(APP_BRAND).toBe("书弈 Agent");
-    expect(APP_VERSION).toBe("0.7.1");
+    expect(APP_VERSION).toBe("0.7.2");
   });
 
   it("keeps the Pages base separate from the versioned API base", async () => {

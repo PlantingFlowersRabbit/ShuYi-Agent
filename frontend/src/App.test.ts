@@ -2,14 +2,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-describe("v0.7.1 application shell", () => {
+describe("v0.7.2 application shell", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.resetModules();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("renders the v0.7.1 shell with the SVG brand and no access token field", async () => {
+  it("renders the v0.7.2 shell with three production modes", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -20,9 +20,10 @@ describe("v0.7.1 application shell", () => {
     const markup = renderToStaticMarkup(createElement(App));
 
     expect(markup).toContain('src="/shuyi-agent-zh.svg"');
-    expect(markup).toContain("v0.7.1");
+    expect(markup).toContain("v0.7.2");
     expect(markup).toContain("自动配音");
     expect(markup).toContain("分步配音");
+    expect(markup).toContain("纯人工模式");
     expect(markup).toContain("文档解析");
     expect(markup).toContain("上传小说后点击左侧“文档解析”");
     expect(markup).not.toContain("上传小说后点击左侧“文本模型”");
@@ -32,7 +33,7 @@ describe("v0.7.1 application shell", () => {
     expect(markup).not.toContain("小说开头预览");
   });
 
-  it("renders v0.7.1 model configuration with separate backend and model tests", async () => {
+  it("renders v0.7.2 model configuration with separate backend and model tests", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -61,7 +62,7 @@ describe("v0.7.1 application shell", () => {
     expect(markup).toContain('aria-label="TTS模型下载并部署进度"');
   });
 
-  it("renders v0.7.1 voice library naming without bundled resource prompts", async () => {
+  it("renders v0.7.2 voice library naming without bundled resource prompts", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -77,7 +78,7 @@ describe("v0.7.1 application shell", () => {
     expect(markup).toContain("生成音色");
   });
 
-  it("renders v0.7.1 run audit history with agent trace fields", async () => {
+  it("renders v0.7.2 run audit history with agent trace fields", async () => {
     vi.stubEnv("VITE_API_BASE_URL", "https://api.example.test/api/v1/");
     Object.defineProperty(globalThis, "window", {
       configurable: true,
@@ -205,7 +206,7 @@ describe("v0.7.1 application shell", () => {
     expect(cssSource).not.toContain(".access-token-field");
   });
 
-  it("renders v0.7.1 guided production controls, memory, blockers, export presets, and safer bulk role edits", async () => {
+  it("renders v0.7.2 guided production controls, memory, blockers, export presets, and safer bulk role edits", async () => {
     const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
       import("node:fs"),
       import("node:url"),
@@ -249,6 +250,10 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("生成缺失配音");
     expect(appSource).toContain("导出制作包");
     expect(appSource).toContain("自动完成到导出");
+    expect(appSource).toContain("分步配音");
+    expect(appSource).toContain("纯人工模式");
+    expect(appSource).toContain("isStepMode");
+    expect(appSource).toContain("isPureManualMode");
     expect(appSource).toContain("production-stepper");
     expect(appSource).toContain("后端待检测");
     expect(appSource).toContain("前端本地规则可继续");
@@ -266,7 +271,9 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("saveProjectWorkspaceState");
     expect(appSource).toContain("local-review:");
     expect(appSource).toContain("将先执行角色分析 Agent");
-    expect(appSource).toContain("请点阻塞项定位");
+    expect(appSource).toContain("人工审核/修改角色与音色");
+    expect(appSource).toContain("自动配音将自动确认台词与角色");
+    expect(appSource).toContain("recoverAssistedDubbingFailures");
     expect(appSource).toContain("已恢复制作进度");
     expect(appSource).toContain("已拆分短开头防吞字");
     expect(appSource).not.toContain("质量检查面板");
@@ -376,6 +383,31 @@ describe("v0.7.1 application shell", () => {
     expect(splitFunction.indexOf('"/connection-test"')).toBeLessThan(
       splitFunction.indexOf('"/books/agent-chapter-split"'),
     );
+  });
+
+  it("routes failed AI chapter parsing through manual regex before local fallback", async () => {
+    const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
+      import("node:fs"),
+      import("node:url"),
+    ]);
+    const appSource = readFileSync(
+      fileURLToPath(new URL("./App.tsx", import.meta.url)),
+      "utf-8",
+    );
+    const splitFunction = appSource.slice(
+      appSource.indexOf("async function runAiChapterSplit()"),
+      appSource.indexOf("async function selectChapter"),
+    );
+    const manualRuleFunction = appSource.slice(
+      appSource.indexOf("function applyManualChapterRule"),
+      appSource.indexOf("async function selectChapter"),
+    );
+
+    expect(appSource).toContain("人工输入划分规则（正则表达式）");
+    expect(appSource).toContain("manualChapterRulePattern");
+    expect(appSource).toContain("runManualChapterRuleSplit");
+    expect(splitFunction).toContain("setAwaitingManualChapterRule(true)");
+    expect(manualRuleFunction).toContain("parseChapterIndex(fullNovelTextRef.current)");
   });
 
   it("places role deletion after voice matching details and removes the inline voice play button", async () => {

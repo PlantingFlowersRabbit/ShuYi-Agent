@@ -29,7 +29,7 @@ v0.6.1 新增项目工作区和 Human-in-the-loop 质量 API：
 
 ## 整章导出与音频制作
 
-v0.7.1 保持项目级整章导出 API，并随前端导出预设继续接收停顿、语速、静音裁剪和响度归一化参数；该能力由 v0.7.0 首次引入：
+v0.7.2 保持项目级整章导出 API，并随前端导出预设继续接收停顿、语速、静音裁剪和响度归一化参数；该能力由 v0.7.0 首次引入：
 
 - `POST /api/v1/projects/{project_id}/exports/{chapter_id}`：生成隔离在 `outputs/{project_id}/exports/` 下的章节交付制作包。
 - `GET /api/v1/projects/{project_id}/downloads/exports/{filename}`：只允许下载该项目 export root 内的压缩包。

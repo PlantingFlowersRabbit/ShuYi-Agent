@@ -386,6 +386,9 @@ type ProjectWorkspaceState = {
   novel_text: string;
   novel_preview: string;
   uploaded_novel_file: UploadedNovelFile | null;
+  awaiting_manual_chapter_rule?: boolean;
+  manual_chapter_rule_pattern?: string;
+  manual_chapter_rule_error?: string;
   chapters: Chapter[];
   active_chapter_id: string;
   paragraphs: ParagraphModule[];
@@ -1042,6 +1045,54 @@ function parseChapterIndex(text: string): Chapter[] {
       title: match.title,
       body: "",
       bodyStart: match.index + match.text.length,
+      bodyEnd: next?.index ?? text.length,
+    };
+  });
+}
+
+function normalizeManualChapterRulePattern(pattern: string): {
+  source: string;
+  flags: string;
+} {
+  const trimmed = pattern.trim();
+  if (!trimmed) throw new Error("人工输入划分规则（正则表达式）不能为空");
+  const literal = trimmed.match(/^\/(.+)\/([dgimsuvy]*)$/);
+  const source = literal ? literal[1] : trimmed;
+  const flags = new Set((literal?.[2] || "").replace(/[gy]/g, "").split(""));
+  flags.add("g");
+  flags.add("m");
+  return { source, flags: [...flags].join("") };
+}
+
+function parseChaptersWithManualRule(text: string, pattern: string): Chapter[] {
+  const { source, flags } = normalizeManualChapterRulePattern(pattern);
+  const regex = new RegExp(source, flags);
+  const matches: ChapterHeadingMatch[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    if (match[0] === "") {
+      throw new Error("人工章节正则不能匹配空字符串");
+    }
+    matches.push({
+      index: match.index,
+      text: match[0],
+      title: String(match[1] ?? match[0]).trim(),
+    });
+  }
+  if (matches.length === 0) {
+    throw new Error("人工章节正则没有匹配到任何章节标题");
+  }
+  return matches.map((item, index) => {
+    const next = matches[index + 1];
+    const bodyStart = item.index + item.text.length;
+    return {
+      chapterId: `chapter-${String(index + 1).padStart(4, "0")}`,
+      title: item.title || `章节 ${index + 1}`,
+      body: text
+        .slice(bodyStart, next?.index ?? text.length)
+        .replace(/^-{3,}\s*/, "")
+        .trim(),
+      bodyStart,
       bodyEnd: next?.index ?? text.length,
     };
   });
@@ -1860,6 +1911,12 @@ function splitRetryUtterances(
   );
 }
 
+function isLongDubbingFailure(message: string): boolean {
+  return /长台词|超长|过长|长度|字符|限制|limit|length|max|maximum|too long/i.test(
+    message,
+  );
+}
+
 function normalizeModelConfig(
   config: Partial<ModelConfig> & {
     llm?: Partial<ModelConfig["text_model"]>;
@@ -2138,6 +2195,10 @@ function App() {
   const agentTraceRefreshInFlightRef = useRef<Promise<void> | null>(null);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState("");
+  const [awaitingManualChapterRule, setAwaitingManualChapterRule] =
+    useState(false);
+  const [manualChapterRulePattern, setManualChapterRulePattern] = useState("");
+  const [manualChapterRuleError, setManualChapterRuleError] = useState("");
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [activeChapterId, setActiveChapterId] = useState("");
   const [paragraphs, setParagraphs] = useState<ParagraphModule[]>([]);
@@ -2378,7 +2439,9 @@ function App() {
     projects[0] ??
     null;
   const isAutomaticMode = workflowState.mode === "automatic";
-  const isManualMode = workflowState.mode === "step";
+  const isStepMode = workflowState.mode === "step";
+  const isPureManualMode = workflowState.mode === "manual";
+  const isAssistedMode = isAutomaticMode || isStepMode;
 
   function updateServiceHealthFromError(error: unknown) {
     const detail = apiFailureDetail(error);
@@ -2456,18 +2519,20 @@ function App() {
       utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
   );
   const needsAutomaticRoleAnalysis =
-    isAutomaticMode &&
+    isAssistedMode &&
     !agentRunThreadId &&
     (roles.length === 0 ||
       flattenedUtterances.length === 0 ||
       hasPendingHumanReview);
   const needsAutomaticRoleMatching =
-    isAutomaticMode && Boolean(agentRunWaitingForRoles && agentRunThreadId);
+    isAssistedMode && Boolean(agentRunWaitingForRoles && agentRunThreadId);
   const shouldSurfaceLocalHumanReview =
-    isManualMode ||
-    (!needsAutomaticRoleAnalysis &&
-      !needsAutomaticRoleMatching &&
-      !agentRunRunning);
+    !isAutomaticMode &&
+    (isPureManualMode ||
+      isStepMode ||
+      (!needsAutomaticRoleAnalysis &&
+        !needsAutomaticRoleMatching &&
+        !agentRunRunning));
   const localHumanReviewItems = useMemo<QualityIssue[]>(() => {
     if (!shouldSurfaceLocalHumanReview) return [];
     return flattenedUtterances
@@ -2506,13 +2571,20 @@ function App() {
     flattenedUtterances,
     shouldSurfaceLocalHumanReview,
   ]);
-  const pendingHumanReviewCount = localHumanReviewItems.length;
   const hasUnselectedRoleUtterance =
     paragraphStatusCounts["unselected-role"] > 0;
   const hasUngeneratedAudioUtterance = paragraphStatusCounts.undubbed > 0;
+  const hasFailedAudioUtterance =
+    paragraphStatusCounts.failed > 0 ||
+    flattenedUtterances.some((utterance) => Boolean(utterance.audioError));
   const hasGeneratedAudioUtterance = flattenedUtterances.some((utterance) =>
     Boolean(utteranceAudioSource(utterance)),
   );
+  const hasAllAudioGenerated =
+    flattenedUtterances.length > 0 &&
+    hasGeneratedAudioUtterance &&
+    !hasUngeneratedAudioUtterance &&
+    !hasFailedAudioUtterance;
   const playableChapterQueue = useMemo(
     () =>
       flattenedUtterances.filter((utterance) =>
@@ -2609,6 +2681,14 @@ function App() {
     roles.length,
   ]);
   const productionPrimaryAction = useMemo(() => {
+    if (awaitingManualChapterRule) {
+      return {
+        label: "应用章节规则",
+        detail:
+          "人工输入划分规则（正则表达式）后继续；若仍失败，将进入前端本地规则 fallback。",
+        disabled: false,
+      };
+    }
     if (!hasSplitChapters) {
       return {
         label: novelPreview ? "继续解析章节" : "开始制作",
@@ -2625,11 +2705,11 @@ function App() {
         disabled: chapters.length === 0,
       };
     }
-    if (isManualMode) {
+    if (isPureManualMode) {
       if (roles.length === 0) {
         return {
           label: "新增角色",
-          detail: "分步配音为纯手动模式：先手动创建角色并绑定音色。",
+          detail: "纯人工模式：先人工创建角色，再人工绑定或上传音色。",
           disabled: false,
         };
       }
@@ -2669,24 +2749,75 @@ function App() {
         };
       }
     }
+    if (isStepMode) {
+      if (needsAutomaticRoleAnalysis) {
+        return {
+          label: "角色分析 Agent",
+          detail: "将先执行角色分析 Agent，自动创建角色并绑定音色。",
+          disabled: agentRunRunning,
+        };
+      }
+      if (needsAutomaticRoleMatching) {
+        return {
+          label: "配音编排 Agent",
+          detail: "人工审核/修改角色与音色后，继续执行配音编排 Agent。",
+          disabled: agentRunRunning,
+        };
+      }
+      if (hasPendingHumanReview || !confirmed) {
+        return {
+          label: "确认台词与角色",
+          detail: "人工审核/修改台词与角色，确认后进入配音合成。",
+          disabled: flattenedUtterances.length === 0,
+        };
+      }
+      if (hasFailedAudioUtterance) {
+        return {
+          label: "恢复失败配音",
+          detail:
+            "AI 将检查失败原因；长台词会自动拆分后重试，直到全部台词完成。",
+          disabled: dubbingInFlightRef.current,
+        };
+      }
+      if (hasUngeneratedAudioUtterance) {
+        return {
+          label: "生成缺失配音",
+          detail:
+            "批量生成当前章节缺失配音；失败项由 AI 自动拆分或调参重试。",
+          disabled: false,
+        };
+      }
+      if (hasAllAudioGenerated) {
+        return {
+          label: "导出制作包",
+          detail: "人工审核/修改全部配音后，点击导出制作包。",
+          disabled: false,
+        };
+      }
+    }
+    if (hasAllAudioGenerated) {
+      return {
+        label: "导出制作包",
+        detail: "全部台词配音完成；仅导出制作包需要人工点击一下。",
+        disabled: false,
+      };
+    }
     return {
       label: "自动完成到导出",
       detail:
         needsAutomaticRoleAnalysis
-          ? "将先执行角色分析 Agent，再继续配音编排、配音生成与导出。"
+          ? "将先执行角色分析 Agent，再继续配音编排与配音生成。"
           : needsAutomaticRoleMatching
-            ? "将从配音编排 Agent 继续，完成后自动生成配音。"
-            : blockerItems.length > 0
-              ? `先定位 ${blockerItems.length} 个需要人工处理的问题。`
-              : hasPendingHumanReview
-                ? `还有 ${Math.max(pendingHumanReviewCount, 1)} 条台词需要人工复核；请点阻塞项定位。`
-                : !confirmed
-                  ? "将先确认已完整的台词与角色，再继续生成配音。"
-                  : hasUngeneratedAudioUtterance
-                    ? "将批量生成缺失配音，完成后自动导出制作包。"
-                    : hasGeneratedAudioUtterance
-                      ? "当前已有音频，将直接导出制作包。"
-                      : "将刷新制作状态并选择下一步。",
+            ? "将从配音编排 Agent 继续；自动配音将自动确认台词与角色。"
+            : hasPendingHumanReview || !confirmed
+              ? "自动配音将自动确认台词与角色，然后继续生成配音。"
+              : hasFailedAudioUtterance
+                ? "将由 AI 检查失败原因，自动拆分长台词或调整参数并重试。"
+                : hasUngeneratedAudioUtterance
+                  ? "将批量生成缺失配音；全部完成后等待人工点击导出制作包。"
+                  : hasGeneratedAudioUtterance
+                    ? "当前已有音频，将刷新状态并等待人工点击导出制作包。"
+                    : "将刷新制作状态并选择下一步。",
       disabled: agentRunRunning || dubbingInFlightRef.current,
     };
   }, [
@@ -2694,19 +2825,22 @@ function App() {
     agentRunRunning,
     agentRunThreadId,
     agentRunWaitingForRoles,
+    awaitingManualChapterRule,
     blockerItems.length,
     chapters.length,
     confirmed,
     flattenedUtterances.length,
+    hasAllAudioGenerated,
+    hasFailedAudioUtterance,
     hasGeneratedAudioUtterance,
     hasPendingHumanReview,
     hasSplitChapters,
     hasUngeneratedAudioUtterance,
-    isManualMode,
+    isPureManualMode,
+    isStepMode,
     needsAutomaticRoleAnalysis,
     needsAutomaticRoleMatching,
     novelPreview,
-    pendingHumanReviewCount,
     qualityParagraphs.length,
     roles.length,
     visibleParagraphs.length,
@@ -2734,6 +2868,9 @@ function App() {
       novel_text: fullNovelTextRef.current,
       novel_preview: novelPreview,
       uploaded_novel_file: uploadedNovelFileRef.current,
+      awaiting_manual_chapter_rule: awaitingManualChapterRule,
+      manual_chapter_rule_pattern: manualChapterRulePattern,
+      manual_chapter_rule_error: manualChapterRuleError,
       chapters,
       active_chapter_id: activeChapterId,
       paragraphs,
@@ -2806,6 +2943,9 @@ function App() {
     chapterPlaybackIndexRef.current = 0;
     chapterPlayerRef.current?.pause();
     setNovelPreview(state.novel_preview ?? "");
+    setAwaitingManualChapterRule(Boolean(state.awaiting_manual_chapter_rule));
+    setManualChapterRulePattern(state.manual_chapter_rule_pattern ?? "");
+    setManualChapterRuleError(state.manual_chapter_rule_error ?? "");
     setChapters(state.chapters ?? []);
     setActiveChapterId(state.active_chapter_id ?? "");
     setParagraphs(state.paragraphs ?? []);
@@ -2878,6 +3018,9 @@ function App() {
     chapterPlaybackIndexRef.current = 0;
     chapterPlayerRef.current?.pause();
     setNovelPreview("");
+    setAwaitingManualChapterRule(false);
+    setManualChapterRulePattern("");
+    setManualChapterRuleError("");
     setChapters([]);
     setActiveChapterId("");
     setParagraphs([]);
@@ -3251,9 +3394,13 @@ function App() {
   }
 
   async function handleProductionPrimaryAction() {
+    if (awaitingManualChapterRule) {
+      await runManualChapterRuleSplit();
+      return;
+    }
     if (!hasSplitChapters) {
       if (uploadedNovelFileRef.current || fullNovelTextRef.current.trim()) {
-        if (isManualMode && fullNovelTextRef.current.trim()) {
+        if (isPureManualMode && fullNovelTextRef.current.trim()) {
           await importNovelText(fullNovelTextRef.current);
         } else {
           await runAiChapterSplit();
@@ -3268,7 +3415,7 @@ function App() {
       setApiStatus("请先选择一个章节，再继续制作");
       return;
     }
-    if (isManualMode) {
+    if (isPureManualMode) {
       if (roles.length === 0) {
         await addRole();
         return;
@@ -3291,6 +3438,11 @@ function App() {
         await generateChapterDubbing();
         return;
       }
+      if (hasFailedAudioUtterance) {
+        await runQualityCheck("generate");
+        setApiStatus("纯人工模式：请人工查看失败原因，调整文本/角色/音色后重试");
+        return;
+      }
       if (hasGeneratedAudioUtterance) {
         await exportChapterAudio();
         return;
@@ -3298,20 +3450,44 @@ function App() {
       await runQualityCheck("generate");
       return;
     }
-    autoPipelineRequestedRef.current = true;
+    autoPipelineRequestedRef.current = isAutomaticMode;
     if (agentRunRunning || dubbingInFlightRef.current) {
-      setApiStatus("自动完成已在运行，请稍等当前任务结束");
+      setApiStatus(
+        isAutomaticMode
+          ? "自动配音已在运行，请稍等当前任务结束"
+          : "分步配音当前任务运行中，请稍等",
+      );
       return;
     }
     if (needsAutomaticRoleAnalysis) {
-      await runAiRoleAnalysis({ autoContinue: true });
+      await runAiRoleAnalysis({ autoContinue: isAutomaticMode });
       return;
     }
     if (needsAutomaticRoleMatching) {
-      await runAiRoleMatching({ autoContinue: true });
+      await runAiRoleMatching({ autoContinue: isAutomaticMode });
       return;
     }
-    if (blockerItems.length > 0) {
+    if (isStepMode) {
+      if (hasPendingHumanReview || !confirmed) {
+        confirmAllReadyUtterances();
+        return;
+      }
+      if (hasFailedAudioUtterance) {
+        await recoverAssistedDubbingFailures(utterancesByParagraph, [], 0);
+        return;
+      }
+      if (hasUngeneratedAudioUtterance) {
+        await generateChapterDubbing(false, { autoContinue: true });
+        return;
+      }
+      if (hasAllAudioGenerated) {
+        await exportChapterAudio();
+        return;
+      }
+      await runQualityCheck("generate");
+      return;
+    }
+    if (!isAutomaticMode && blockerItems.length > 0) {
       const latestQuality = await runQualityCheck("generate");
       const latestIssue =
         latestQuality?.issues.find(
@@ -3322,38 +3498,22 @@ function App() {
       else setApiStatus("制作阻塞项已刷新，请再次点击自动完成到导出");
       return;
     }
-    if (hasPendingHumanReview) {
-      const pending = firstPendingUtterance();
-      if (pending) {
-        focusUtterance(
-          pending,
-          `请先人工确认台词与角色：${pending.utteranceId}`,
-        );
-      } else {
-        confirmAllReadyUtterances();
+    if (hasPendingHumanReview || !confirmed) {
+      confirmAllReadyUtterances();
+      if (hasUngeneratedAudioUtterance) {
+        await generateChapterDubbing(true, { autoContinue: true });
       }
       return;
     }
-    if (!confirmed) {
-      const pending = firstPendingUtterance();
-      if (pending) {
-        focusUtterance(
-          pending,
-          `请先人工确认台词与角色：${pending.utteranceId}`,
-        );
-      } else {
-        confirmAllReadyUtterances();
-        if (hasUngeneratedAudioUtterance) {
-          await generateChapterDubbing(true, { autoContinue: true });
-        }
-      }
+    if (hasFailedAudioUtterance) {
+      await recoverAssistedDubbingFailures(utterancesByParagraph, [], 0);
       return;
     }
     if (hasUngeneratedAudioUtterance) {
       await generateChapterDubbing(false, { autoContinue: true });
       return;
     }
-    if (hasGeneratedAudioUtterance) {
+    if (hasAllAudioGenerated || hasGeneratedAudioUtterance) {
       await exportChapterAudio();
       autoPipelineRequestedRef.current = false;
       return;
@@ -3599,6 +3759,117 @@ function App() {
       );
     } catch (error) {
       setQualityStatus(apiFailureMessage("一键拆分长台词失败", error));
+    }
+  }
+
+  async function recoverAssistedDubbingFailures(
+    groups: Record<string, UtteranceDraft[]> = utterancesByParagraph,
+    errors: { statement_id: string; message: string }[] = [],
+    recoveryAttempt = 0,
+  ) {
+    if (!isAssistedMode) return;
+    const errorByUtteranceId = new Map(
+      errors.map((error) => [error.statement_id, error.message]),
+    );
+    const failedUtterances = Object.values(groups)
+      .flat()
+      .filter((utterance) => {
+        const message =
+          errorByUtteranceId.get(utterance.utteranceId) ??
+          utterance.audioError ??
+          utterance.audioStatus ??
+          "";
+        return (
+          errorByUtteranceId.has(utterance.utteranceId) ||
+          Boolean(utterance.audioError) ||
+          String(message).includes("失败")
+        );
+      });
+    if (failedUtterances.length === 0) {
+      const message = isStepMode
+        ? "全部台词配音完成，请人工审核/修改全部配音后点击导出制作包"
+        : "全部台词配音完成，请人工点击导出制作包";
+      setApiStatus(message);
+      setQualityStatus(message);
+      return;
+    }
+    if (recoveryAttempt >= 3) {
+      setApiStatus(
+        `AI 已重试 ${recoveryAttempt} 次，仍有 ${failedUtterances.length} 条台词失败，请查看制作阻塞项`,
+      );
+      await runQualityCheck("generate");
+      return;
+    }
+
+    setApiStatus(
+      `AI 检查失败原因并重新生成：第 ${recoveryAttempt + 1} 次，${failedUtterances.length} 条台词`,
+    );
+    let currentGroups = groups;
+    const retryUtterances: UtteranceDraft[] = [];
+    const projectId = activeProject?.project_id ?? activeProjectId;
+
+    try {
+      for (const utterance of failedUtterances) {
+        const message =
+          errorByUtteranceId.get(utterance.utteranceId) ??
+          utterance.audioError ??
+          utterance.audioStatus ??
+          "";
+        if (isLongDubbingFailure(String(message))) {
+          const data = await requestJson<UtteranceEditResponse>(
+            `/projects/${encodeURIComponent(projectId)}/utterances/${encodeURIComponent(
+              utterance.utteranceId,
+            )}/split-long-text`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                ...projectQualityPayload(),
+                utterances_by_paragraph: utteranceGroupsToApi(currentGroups),
+              }),
+            },
+          );
+          currentGroups = fromApiUtteranceEditGroups(
+            data.utterances_by_paragraph,
+            paragraphs,
+            roles,
+          );
+          retryUtterances.push(
+            ...splitRetryUtterances(
+              currentGroups,
+              data.split_report?.source_utterance_id ?? utterance.utteranceId,
+              data.split_report?.paragraph_id ?? utterance.paragraphId,
+            ),
+          );
+        } else {
+          retryUtterances.push({
+            ...utterance,
+            audioError: undefined,
+            audioStatus: "AI 调整参数并重新生成",
+          });
+        }
+      }
+      setUtterancesByParagraph(currentGroups);
+      setConfirmed(true);
+      const retryResults = await Promise.all(
+        retryUtterances.map((utterance) => generateAudio(utterance)),
+      );
+      const failedRetryCount = retryResults.filter((result) => !result).length;
+      if (failedRetryCount > 0) {
+        const message = `AI 已重试失败配音，仍有 ${failedRetryCount} 条台词未完成；将保留在制作阻塞项`;
+        setApiStatus(message);
+        setQualityStatus(message);
+        await runQualityCheck("generate");
+        return;
+      }
+      setApiStatus(
+        isStepMode
+          ? "AI 已完成失败配音恢复；请人工审核/修改全部配音后点击导出制作包"
+          : "AI 已完成失败配音恢复；全部完成后请人工点击导出制作包",
+      );
+      void runQualityCheck("export", { silent: true });
+    } catch (error) {
+      setApiStatus(apiFailureMessage("AI 自动恢复配音失败", error));
+      setQualityStatus(apiFailureMessage("AI 自动恢复配音失败", error));
     }
   }
 
@@ -4105,6 +4376,8 @@ function App() {
     setActiveChapterId("");
     setParagraphs([]);
     setHasSplitChapters(parsed.length > 0);
+    setAwaitingManualChapterRule(false);
+    setManualChapterRuleError("");
     setConfirmed(false);
     setChapterBackendSynced(false);
     setUtterancesByParagraph({});
@@ -4132,6 +4405,9 @@ function App() {
     fullNovelTextRef.current = upload.text;
     uploadedNovelFileRef.current = upload.uploadedFile;
     setNovelPreview(upload.preview);
+    setAwaitingManualChapterRule(false);
+    setManualChapterRulePattern("");
+    setManualChapterRuleError("");
     setChapters([]);
     setActiveChapterId("");
     setParagraphs([]);
@@ -4219,12 +4495,46 @@ function App() {
     } catch (error) {
       setChapterSplitProgress(76);
       updateServiceHealthFromError(error);
-      const parsed = parseChapterIndex(fullNovelTextRef.current);
-      applyChapters(parsed, documentParseFallbackMessage(error));
+      const detail = apiFailureDetail(error);
+      setAwaitingManualChapterRule(true);
+      setManualChapterRuleError(detail);
+      setApiStatus(
+        `文档解析失败：${detail}；请人工输入划分规则（正则表达式）后继续。`,
+      );
       failOperation(operationId, "文档解析", error);
     } finally {
       setChapterSplitProgress(100);
     }
+  }
+
+  function applyManualChapterRule() {
+    try {
+      const parsed = parseChaptersWithManualRule(
+        fullNovelTextRef.current,
+        manualChapterRulePattern,
+      );
+      applyChapters(
+        parsed,
+        `人工章节规则已通过：识别 ${parsed.length} 个章节；请选择章节继续制作`,
+      );
+      completeOperation("chapter-split", "人工章节规则解析完成", "文档解析");
+    } catch (error) {
+      const parsed = parseChapterIndex(fullNovelTextRef.current);
+      applyChapters(parsed, documentParseFallbackMessage(error));
+      pushNotice(
+        "warning",
+        "文档解析",
+        "人工章节规则失败，已使用前端本地规则 fallback",
+        apiFailureDetail(error),
+      );
+    }
+  }
+
+  async function runManualChapterRuleSplit() {
+    setChapterSplitProgress(88);
+    setApiStatus("正在应用人工输入划分规则（正则表达式）");
+    applyManualChapterRule();
+    setChapterSplitProgress(100);
   }
 
   async function selectChapter(chapterId: string) {
@@ -4237,7 +4547,7 @@ function App() {
     setConfirmed(false);
     setChapterBackendSynced(false);
     setUtterancesByParagraph(
-      isAutomaticMode ? makeWholeParagraphUtteranceGroups(nextParagraphs) : {},
+      isAssistedMode ? makeWholeParagraphUtteranceGroups(nextParagraphs) : {},
     );
     setIgnoredParagraphIds({});
     setRoleMatchingProgress(0);
@@ -4756,21 +5066,43 @@ function App() {
     }
     if (event.event === "completed") {
       const data = event.data as DubbingArrangementResponse;
+      const arrangedGroups = apiUtterancesToGroups(
+        data.utterances_by_paragraph,
+        paragraphs,
+        roles,
+      );
+      const autoConfirmedGroups = Object.fromEntries(
+        Object.entries(arrangedGroups).map(([paragraphId, utterances]) => [
+          paragraphId,
+          utterances.map((utterance) => ({
+            ...utterance,
+            needsHumanReview: false,
+            audioStatus: utterance.roleId
+              ? "AI已选择角色"
+              : utterance.audioStatus,
+          })),
+        ]),
+      );
       setUtterancesByParagraph(
-        apiUtterancesToGroups(data.utterances_by_paragraph, paragraphs, roles),
+        isAutomaticMode ? autoConfirmedGroups : arrangedGroups,
       );
       const requiresHumanReview =
-        data.status === "needs_human_review" ||
-        data.role_selection_events.some((item) => item.needs_human_review);
-      setConfirmed(!requiresHumanReview);
+        !isAutomaticMode &&
+        (data.status === "needs_human_review" ||
+          data.role_selection_events.some((item) => item.needs_human_review));
+      setConfirmed(isAutomaticMode || !requiresHumanReview);
       setChapterBackendSynced(true);
       setAgentRunWaitingForRoles(false);
       setRoleMatchingProgress(100);
-      setApiStatus(data.message);
+      setApiStatus(
+        isAutomaticMode
+          ? `${data.message}；自动配音将自动确认台词与角色。`
+          : data.message,
+      );
       setWorkflowState((current) =>
         transitionWorkflow(current, {
           type:
-            data.status === "needs_human_review" ? "PAUSE" : "AGENT_COMPLETED",
+            requiresHumanReview ? "PAUSE" : "AGENT_COMPLETED",
         }),
       );
       completeOperation("dubbing-arrangement", data.message, "配音编排 Agent");
@@ -5155,8 +5487,8 @@ function App() {
     playChapterFromStart();
   }
 
-  async function generateAudio(utterance: UtteranceDraft) {
-    if (queuedUtteranceIdsRef.current.has(utterance.utteranceId)) return;
+  async function generateAudio(utterance: UtteranceDraft): Promise<boolean> {
+    if (queuedUtteranceIdsRef.current.has(utterance.utteranceId)) return false;
     queuedUtteranceIdsRef.current.add(utterance.utteranceId);
     setGeneratingUtteranceIds((current) => ({
       ...current,
@@ -5172,11 +5504,11 @@ function App() {
     const task = dubbingQueueRef.current.then(() =>
       generateAudioNow(utterance),
     );
-    dubbingQueueRef.current = task.catch(() => undefined);
-    await task;
+    dubbingQueueRef.current = task.then(() => undefined, () => undefined);
+    return await task;
   }
 
-  async function generateAudioNow(utterance: UtteranceDraft) {
+  async function generateAudioNow(utterance: UtteranceDraft): Promise<boolean> {
     const role = roles.find((item) => item.roleId === utterance.roleId);
     if (!role) {
       updateUtterance(
@@ -5190,7 +5522,7 @@ function App() {
         ...current,
         [utterance.utteranceId]: false,
       }));
-      return;
+      return false;
     }
     updateUtterance(
       utterance.paragraphId,
@@ -5246,6 +5578,7 @@ function App() {
         ),
       }));
       setVoiceGenerationProgress(100);
+      return true;
     } catch (error) {
       const message = apiFailureMessage("音频生成失败", error);
       setUtterancesByParagraph((current) => ({
@@ -5262,6 +5595,7 @@ function App() {
         ),
       }));
       setVoiceGenerationProgress(100);
+      return false;
     } finally {
       queuedUtteranceIdsRef.current.delete(utterance.utteranceId);
       setGeneratingUtteranceIds((current) => ({
@@ -5273,10 +5607,10 @@ function App() {
 
   async function generateChapterDubbing(
     forceConfirmed = false,
-    options: { autoContinue?: boolean } = {},
+    options: { autoContinue?: boolean; recoveryAttempt?: number } = {},
   ) {
     if (dubbingInFlightRef.current) return;
-    const shouldAutoExport = Boolean(
+    const shouldAssistRecover = Boolean(
       options.autoContinue ?? autoPipelineRequestedRef.current,
     );
     if (options.autoContinue !== undefined) {
@@ -5359,13 +5693,22 @@ function App() {
           transitionWorkflow(current, { type: "AGENT_COMPLETED" }),
         );
       }
-      if (shouldAutoExport) {
+      if (shouldAssistRecover) {
         if (data.failed_count > 0) {
-          autoPipelineRequestedRef.current = false;
-          void runQualityCheck("export");
+          window.setTimeout(() => {
+            void recoverAssistedDubbingFailures(
+              nextGroupsForExport,
+              data.errors,
+              options.recoveryAttempt ?? 0,
+            );
+          }, 0);
         } else {
-          await exportChapterAudio(nextGroupsForExport);
           autoPipelineRequestedRef.current = false;
+          setApiStatus(
+            isStepMode
+              ? "全部台词配音完成，请人工审核/修改全部配音后点击导出制作包"
+              : "全部台词配音完成，请人工点击导出制作包",
+          );
         }
       }
     } catch (error) {
@@ -5844,7 +6187,7 @@ function App() {
                   label="小说格式解析进度"
                   value={chapterSplitProgress}
                 />
-                {isAutomaticMode && (
+                {isAssistedMode && (
                   <ProgressBar
                     label="配音编排 Agent 进度"
                     value={roleMatchingProgress}
@@ -5855,6 +6198,31 @@ function App() {
                   value={voiceGenerationProgress}
                 />
                 <small>{apiStatus}</small>
+                {awaitingManualChapterRule && (
+                  <div className="manual-rule-panel">
+                    <label>
+                      人工输入划分规则（正则表达式）
+                      <input
+                        value={manualChapterRulePattern}
+                        placeholder="例如：^第[一二三四五六七八九十百千0-9]+章.*$"
+                        onChange={(event) =>
+                          setManualChapterRulePattern(event.target.value)
+                        }
+                      />
+                    </label>
+                    <button
+                      className="tool-button amber"
+                      type="button"
+                      disabled={!manualChapterRulePattern.trim()}
+                      onClick={() => void runManualChapterRuleSplit()}
+                    >
+                      应用规则
+                    </button>
+                    {manualChapterRuleError && (
+                      <small>Agent 复核章节划分失败：{manualChapterRuleError}</small>
+                    )}
+                  </div>
+                )}
                 <div className="chapter-list" aria-label="章节列表">
                   {chapters.map((chapter) => (
                     <button
@@ -5875,16 +6243,22 @@ function App() {
                 <div className="section-heading">
                   <div>
                     <div className="section-title">
-                      {isAutomaticMode ? "自动完成流程" : "手动制作步骤"}
+                      {isAutomaticMode
+                        ? "自动完成流程"
+                        : isStepMode
+                          ? "自动配音流程"
+                          : "纯人工模式"}
                     </div>
                     <small>
                       {isAutomaticMode
-                        ? "只在点击“自动完成到导出”时串联执行；高级操作按钮彼此独立。"
-                        : "分步配音只保留手动创建角色、添加台词、配音和导出。"}
+                        ? "自动串联章节选择后的角色分析、配音编排和配音合成；导出制作包仍由人工点击。"
+                        : isStepMode
+                          ? "保留人工选择章节、审核角色音色、审核台词角色和审核全部配音。"
+                          : "纯人工控制角色、音色、台词、角色匹配、失败处理和导出。"}
                     </small>
                   </div>
                   <span className="production-step-badge">
-                    {isAutomaticMode ? "自动" : "分步"}
+                    {isAutomaticMode ? "自动" : isStepMode ? "分步" : "人工"}
                   </span>
                 </div>
                 <div className="production-stepper" aria-label="制作步骤">
@@ -6307,7 +6681,7 @@ function App() {
                     );
                   })}
                 </div>
-                {isAutomaticMode && aiRoleCandidates.length > 0 && (
+                {isAssistedMode && aiRoleCandidates.length > 0 && (
                   <div
                     className="role-analysis-panel"
                     aria-label="角色分析建议"
@@ -6364,7 +6738,7 @@ function App() {
               <div className="section-title">当前章节</div>
               <h2>请选择小说章节</h2>
               <p>
-                {isAutomaticMode
+                {isAssistedMode
                   ? "选择某个章节后，左侧显示完整正文，右侧显示配音编排后的台词。"
                   : "选择某个章节后，左侧显示完整正文，右侧手动添加台词并匹配角色。"}
               </p>
@@ -6400,7 +6774,7 @@ function App() {
                         自动完成到导出
                       </button>
                     )}
-                    {isAutomaticMode && (
+                    {isAssistedMode && (
                       <>
                         <button
                           className="tool-button purple"
@@ -6460,8 +6834,10 @@ function App() {
                       {confirmed && !hasPendingHumanReview
                         ? "台词已确认，可以批量配音或导出"
                         : isAutomaticMode
-                          ? "请完成角色分析、配音编排并确认所有配音片段"
-                          : "请手动补齐台词、角色并确认所有配音片段"}
+                          ? "自动配音将自动确认台词与角色"
+                          : isStepMode
+                            ? "请人工审核/修改台词与角色后继续"
+                            : "请手动补齐台词、角色并确认所有配音片段"}
                     </span>
                   </div>
                 </details>
@@ -6793,9 +7169,9 @@ function App() {
                   {flattenedUtterances.length === 0 ? (
                     <div className="statement-empty">
                       <span>
-                        {isAutomaticMode
+                        {isAssistedMode
                           ? "当前章节可手动添加台词、选择角色并生成配音；也可以使用自动编排辅助。"
-                          : "当前章节处于纯手动分步配音：请从左侧正文添加台词，非台词原文可忽略。"}
+                          : "当前章节处于纯人工模式：请从左侧正文添加台词，非台词原文可忽略。"}
                       </span>
                       {primaryStatementParagraphId && (
                         <button
@@ -7958,7 +8334,9 @@ function App() {
           <p className="product-subtitle">
             {isAutomaticMode
               ? "基于智能编排的多人有声书自动配音工作台"
-              : "纯手动分步配音工作台：角色、台词、配音由人工控制"}
+              : isStepMode
+                ? "自动配音流程：人工选择章节并审核关键制作节点"
+                : "纯人工模式：角色、台词、配音由人工控制"}
           </p>
         </div>
         <div className="health-strip" aria-label="运行状态">
@@ -7973,6 +8351,7 @@ function App() {
             {[
               ["automatic", "自动配音"],
               ["step", "分步配音"],
+              ["manual", "纯人工模式"],
             ].map(([mode, label]) => (
               <button
                 aria-pressed={workflowState.mode === mode}
@@ -7987,13 +8366,18 @@ function App() {
                       mode: nextMode,
                     }),
                   );
-                  if (nextMode === "step") {
+                  if (nextMode === "manual") {
                     resetAgentRunState();
                     setPlannerRun(null);
-                    setApiStatus("已切换到分步配音：当前制作台只保留手动操作");
+                    setApiStatus("已切换到纯人工模式：角色、台词、配音均由人工控制");
+                  } else if (nextMode === "step") {
+                    autoPipelineRequestedRef.current = false;
+                    setApiStatus(
+                      "已切换到分步配音：角色分析与配音编排由 Agent 执行，审核点由人工确认",
+                    );
                   } else {
                     setApiStatus(
-                      "已切换到自动配音：可使用角色分析与配音编排流程",
+                      "已切换到自动配音：人工选择章节后自动确认台词与角色，完成后等待导出点击",
                     );
                   }
                 }}

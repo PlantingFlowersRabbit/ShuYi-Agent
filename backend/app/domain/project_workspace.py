@@ -87,7 +87,7 @@ def project_workspace_state_from_payload(payload: dict[str, Any] | None) -> dict
     if not isinstance(raw_state, dict):
         raise ValueError("workspace_state 必须是对象")
     state = dict(raw_state)
-    state.setdefault("schema_version", "v0.7.1")
+    state.setdefault("schema_version", "v0.7.2")
     state["updated_at"] = utc_now_iso()
     return state
 
