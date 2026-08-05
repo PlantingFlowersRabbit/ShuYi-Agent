@@ -262,6 +262,11 @@ describe("v0.7.1 application shell", () => {
     expect(appSource).toContain("影响");
     expect(appSource).toContain("推荐操作");
     expect(appSource).toContain("处理状态");
+    expect(appSource).toContain("resetCurrentProjectSession");
+    expect(appSource).toContain("local-review:");
+    expect(appSource).toContain("将先执行角色分析 Agent");
+    expect(appSource).toContain("请点阻塞项定位");
+    expect(appSource).toContain("制作台已清空");
     expect(appSource).not.toContain("质量检查面板");
     expect(appSource).not.toContain(
       '<div className="section-title">审稿队列</div>',
@@ -284,6 +289,37 @@ describe("v0.7.1 application shell", () => {
       "normalize_audio: exportOptions.normalizeAudio",
     );
     expect(appSource).toContain("target_peak: exportOptions.targetPeak");
+  });
+
+  it("keeps project switches scoped and lets automatic production run agents before manual blockers", async () => {
+    const [{ readFileSync }, { fileURLToPath }] = await Promise.all([
+      import("node:fs"),
+      import("node:url"),
+    ]);
+    const appSource = readFileSync(
+      fileURLToPath(new URL("./App.tsx", import.meta.url)),
+      "utf-8",
+    );
+    const selectProjectFunction = appSource.slice(
+      appSource.indexOf("function selectProject"),
+      appSource.indexOf("async function runQualityCheck"),
+    );
+    const productionAction = appSource.slice(
+      appSource.indexOf("async function handleProductionPrimaryAction"),
+      appSource.indexOf("function focusQualityIssue"),
+    );
+
+    expect(selectProjectFunction).toContain("resetCurrentProjectSession");
+    expect(selectProjectFunction).toContain("制作台已清空");
+    expect(appSource).toContain(
+      "`/agent-runs?project_id=${encodeURIComponent(projectId)}`",
+    );
+    expect(productionAction.indexOf("needsAutomaticRoleAnalysis")).toBeLessThan(
+      productionAction.indexOf("blockerItems.length > 0"),
+    );
+    expect(productionAction.indexOf("needsAutomaticRoleMatching")).toBeLessThan(
+      productionAction.indexOf("blockerItems.length > 0"),
+    );
   });
 
   it("classifies paragraph heatmap status with failure and completion priority", async () => {

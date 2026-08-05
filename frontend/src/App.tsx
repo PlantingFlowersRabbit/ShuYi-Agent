@@ -731,6 +731,24 @@ const PRODUCTION_STEP_LABELS = [
   "导出",
 ] as const;
 
+function createEmptyQualityReport(projectId: string): QualityCheckResponse {
+  return {
+    project_id: projectId,
+    summary: { ...defaultQualitySummary },
+    issues: [],
+    can_generate: false,
+    can_export: false,
+  };
+}
+
+function createEmptyReviewQueue(projectId: string): ReviewQueueResponse {
+  return {
+    project_id: projectId,
+    items: [],
+    total_count: 0,
+  };
+}
+
 const EXPORT_PRESETS: Record<
   ExportPreset,
   {
@@ -2018,18 +2036,12 @@ function App() {
   const [projects, setProjects] = useState<ProjectWorkspace[]>([]);
   const [activeProjectId, setActiveProjectId] = useState("default");
   const [newProjectName, setNewProjectName] = useState("");
-  const [qualityReport, setQualityReport] = useState<QualityCheckResponse>({
-    project_id: "default",
-    summary: defaultQualitySummary,
-    issues: [],
-    can_generate: false,
-    can_export: false,
-  });
-  const [reviewQueue, setReviewQueue] = useState<ReviewQueueResponse>({
-    project_id: "default",
-    items: [],
-    total_count: 0,
-  });
+  const [qualityReport, setQualityReport] = useState<QualityCheckResponse>(
+    () => createEmptyQualityReport("default"),
+  );
+  const [reviewQueue, setReviewQueue] = useState<ReviewQueueResponse>(() =>
+    createEmptyReviewQueue("default"),
+  );
   const [qualityStatus, setQualityStatus] =
     useState("制作阻塞项等待当前项目数据。");
   const [bulkRoleTargetId, setBulkRoleTargetId] = useState("");
@@ -2258,6 +2270,58 @@ function App() {
     (utterance) =>
       utterance.needsHumanReview || !utterance.roleId || !utterance.text.trim(),
   );
+  const needsAutomaticRoleAnalysis =
+    isAutomaticMode &&
+    !agentRunThreadId &&
+    (roles.length === 0 ||
+      flattenedUtterances.length === 0 ||
+      hasPendingHumanReview);
+  const needsAutomaticRoleMatching =
+    isAutomaticMode && Boolean(agentRunWaitingForRoles && agentRunThreadId);
+  const shouldSurfaceLocalHumanReview =
+    isManualMode ||
+    (!needsAutomaticRoleAnalysis &&
+      !needsAutomaticRoleMatching &&
+      !agentRunRunning);
+  const localHumanReviewItems = useMemo<QualityIssue[]>(() => {
+    if (!shouldSurfaceLocalHumanReview) return [];
+    return flattenedUtterances
+      .filter(
+        (utterance) =>
+          utterance.needsHumanReview ||
+          !utterance.roleId ||
+          !utterance.text.trim(),
+      )
+      .map((utterance) => {
+        const issueType: keyof QualitySummary = !utterance.text.trim()
+          ? "unsegmented"
+          : !utterance.roleId
+            ? "unselected_role"
+            : "needs_human_review";
+        const message =
+          issueType === "unsegmented"
+            ? "台词文本为空，请补齐文本或忽略该原文段落"
+            : issueType === "unselected_role"
+              ? "台词尚未选择角色，请选择角色后确认"
+              : "AI 标记该台词需要人工复核，请确认文本和角色";
+        return {
+          issue_id: `local-review:${utterance.utteranceId}:${issueType}`,
+          issue_type: issueType,
+          severity: "warning",
+          chapter_id: activeChapterId,
+          paragraph_id: utterance.paragraphId,
+          utterance_id: utterance.utteranceId,
+          role_id: utterance.roleId || undefined,
+          message,
+          actions: ["jump_to_utterance", "confirm_after_fix"],
+        };
+      });
+  }, [
+    activeChapterId,
+    flattenedUtterances,
+    shouldSurfaceLocalHumanReview,
+  ]);
+  const pendingHumanReviewCount = localHumanReviewItems.length;
   const hasUnselectedRoleUtterance =
     paragraphStatusCounts["unselected-role"] > 0;
   const hasUngeneratedAudioUtterance = paragraphStatusCounts.undubbed > 0;
@@ -2301,18 +2365,27 @@ function App() {
     const source =
       reviewQueue.items.length > 0 ? reviewQueue.items : qualityReport.issues;
     const seen = new Set<string>();
-    return source.filter((item) => {
+    return [...source, ...localHumanReviewItems].filter((item) => {
       if (item.paragraph_id && ignoredParagraphIds[item.paragraph_id]) {
         return false;
       }
-      const id =
-        item.issue_id ||
-        `${item.issue_type}:${item.utterance_id ?? item.paragraph_id ?? item.role_id ?? item.message}`;
+      const id = item.utterance_id
+        ? `${item.issue_type}:utterance:${item.utterance_id}`
+        : item.paragraph_id
+          ? `${item.issue_type}:paragraph:${item.paragraph_id}`
+          : item.role_id
+            ? `${item.issue_type}:role:${item.role_id}`
+            : item.issue_id || `${item.issue_type}:${item.message}`;
       if (seen.has(id)) return false;
       seen.add(id);
       return true;
     });
-  }, [ignoredParagraphIds, qualityReport.issues, reviewQueue.items]);
+  }, [
+    ignoredParagraphIds,
+    localHumanReviewItems,
+    qualityReport.issues,
+    reviewQueue.items,
+  ]);
   const visibleBlockerItems = blockerItems.slice(0, 3);
   const hiddenBlockerCount = Math.max(
     0,
@@ -2323,7 +2396,9 @@ function App() {
     if (!activeChapter) return 1;
     if (
       blockerItems.length > 0 ||
-      hasPendingHumanReview ||
+      (!needsAutomaticRoleAnalysis &&
+        !needsAutomaticRoleMatching &&
+        hasPendingHumanReview) ||
       roles.length === 0 ||
       flattenedUtterances.length === 0 ||
       agentRunWaitingForRoles ||
@@ -2343,6 +2418,8 @@ function App() {
     hasPendingHumanReview,
     hasSplitChapters,
     hasUngeneratedAudioUtterance,
+    needsAutomaticRoleAnalysis,
+    needsAutomaticRoleMatching,
     novelPreview,
     roles.length,
   ]);
@@ -2410,19 +2487,21 @@ function App() {
     return {
       label: "自动完成到导出",
       detail:
-        blockerItems.length > 0 || hasPendingHumanReview
-          ? `先定位 ${Math.max(blockerItems.length, 1)} 个需要人工处理的问题。`
-          : roles.length === 0 || flattenedUtterances.length === 0
-            ? "将依次执行角色分析、配音编排、配音生成与导出。"
-            : agentRunWaitingForRoles && agentRunThreadId
-              ? "将从配音编排 Agent 继续，完成后自动生成配音。"
-              : !confirmed
-                ? "将先确认已完整的台词与角色，再继续生成配音。"
-                : hasUngeneratedAudioUtterance
-                  ? "将批量生成缺失配音，完成后自动导出制作包。"
-                  : hasGeneratedAudioUtterance
-                    ? "当前已有音频，将直接导出制作包。"
-                    : "将刷新制作状态并选择下一步。",
+        needsAutomaticRoleAnalysis
+          ? "将先执行角色分析 Agent，再继续配音编排、配音生成与导出。"
+          : needsAutomaticRoleMatching
+            ? "将从配音编排 Agent 继续，完成后自动生成配音。"
+            : blockerItems.length > 0
+              ? `先定位 ${blockerItems.length} 个需要人工处理的问题。`
+              : hasPendingHumanReview
+                ? `还有 ${Math.max(pendingHumanReviewCount, 1)} 条台词需要人工复核；请点阻塞项定位。`
+                : !confirmed
+                  ? "将先确认已完整的台词与角色，再继续生成配音。"
+                  : hasUngeneratedAudioUtterance
+                    ? "将批量生成缺失配音，完成后自动导出制作包。"
+                    : hasGeneratedAudioUtterance
+                      ? "当前已有音频，将直接导出制作包。"
+                      : "将刷新制作状态并选择下一步。",
       disabled: agentRunRunning || dubbingInFlightRef.current,
     };
   }, [
@@ -2439,7 +2518,10 @@ function App() {
     hasSplitChapters,
     hasUngeneratedAudioUtterance,
     isManualMode,
+    needsAutomaticRoleAnalysis,
+    needsAutomaticRoleMatching,
     novelPreview,
+    pendingHumanReviewCount,
     qualityParagraphs.length,
     roles.length,
     visibleParagraphs.length,
@@ -2450,6 +2532,61 @@ function App() {
     setAgentRunThreadId("");
     setAgentRunWaitingForRoles(false);
     setAgentRunRunning(false);
+  }
+
+  function resetProjectQualityState(
+    projectId = activeProject?.project_id ?? activeProjectId,
+  ) {
+    setQualityReport(createEmptyQualityReport(projectId));
+    setReviewQueue(createEmptyReviewQueue(projectId));
+    setQualityStatus("制作阻塞项等待当前项目数据。");
+  }
+
+  function resetCurrentProjectSession(projectId: string, projectName: string) {
+    fullNovelTextRef.current = "";
+    uploadedNovelFileRef.current = null;
+    automaticDubbingStartedRef.current = false;
+    automaticRoleMatchingAttemptedRef.current = false;
+    autoPipelineRequestedRef.current = false;
+    dubbingInFlightRef.current = false;
+    queuedUtteranceIdsRef.current.clear();
+    chapterPlaybackQueueRef.current = [];
+    chapterPlaybackIndexRef.current = 0;
+    chapterPlayerRef.current?.pause();
+    setNovelPreview("");
+    setChapters([]);
+    setActiveChapterId("");
+    setParagraphs([]);
+    setHasSplitChapters(false);
+    setConfirmed(false);
+    setRoles([]);
+    setUtterancesByParagraph({});
+    setIgnoredParagraphIds({});
+    setChapterBackendSynced(false);
+    setUploadProgress(0);
+    setChapterSplitProgress(0);
+    setRoleMatchingProgress(0);
+    setVoiceGenerationProgress(0);
+    setGeneratingUtteranceIds({});
+    setHighlightUtteranceId("");
+    setHighlightParagraphId("");
+    setActiveParagraphStatusFilter("");
+    setChapterPlaybackState("idle");
+    setChapterPlaybackUtteranceId("");
+    setChapterPlaybackTime(0);
+    setChapterPlaybackDuration(0);
+    setPlannerRun(null);
+    setPlannerStatus("制作建议会根据当前章节状态生成计划或复盘，不会自动执行。");
+    setStoryBibleFacts([]);
+    setMemoryContext(null);
+    setMemoryQuery("");
+    setMemoryStatus(`已切换到 ${projectName}；项目记忆等待刷新。`);
+    setAgentTraces([]);
+    setSelectedAgentTrace(null);
+    setAgentTraceStatus(`已切换到 ${projectName}；运行审计等待刷新。`);
+    resetAgentRunState();
+    resetProjectQualityState(projectId);
+    setApiStatus(`已切换到工作环境：${projectName}，请上传或解析该环境的小说`);
   }
 
   function projectQualityPayload(
@@ -2543,17 +2680,7 @@ function App() {
       );
       setActiveProjectId(data.project.project_id);
       setNewProjectName("");
-      setQualityReport({
-        ...qualityReport,
-        project_id: data.project.project_id,
-        summary: defaultQualitySummary,
-        issues: [],
-      });
-      setReviewQueue({
-        project_id: data.project.project_id,
-        items: [],
-        total_count: 0,
-      });
+      resetCurrentProjectSession(data.project.project_id, data.project.name);
       setQualityStatus(`项目工作区已创建：${data.project.name}`);
     } catch (error) {
       setQualityStatus(apiFailureMessage("项目创建失败", error));
@@ -2577,10 +2704,16 @@ function App() {
         const remaining = current.filter(
           (project) => project.project_id !== projectId,
         );
-        const nextProject = remaining[0] ?? null;
-        if (nextProject) {
-          setActiveProjectId(nextProject.project_id);
-          rememberRecentProject(nextProject.project_id);
+        if (projectId === activeProjectId) {
+          const nextProject = remaining[0] ?? null;
+          if (nextProject) {
+            setActiveProjectId(nextProject.project_id);
+            rememberRecentProject(nextProject.project_id);
+            resetCurrentProjectSession(
+              nextProject.project_id,
+              nextProject.name,
+            );
+          }
         }
         return remaining;
       });
@@ -2596,15 +2729,8 @@ function App() {
     rememberRecentProject(projectId);
     setActiveProjectId(projectId);
     setProjects((current) => sortProjectsByRecent(current));
-    setQualityReport({
-      project_id: projectId,
-      summary: defaultQualitySummary,
-      issues: [],
-      can_generate: false,
-      can_export: false,
-    });
-    setReviewQueue({ project_id: projectId, items: [], total_count: 0 });
-    setQualityStatus(`已切换到最近项目：${project.name}`);
+    resetCurrentProjectSession(projectId, project.name);
+    setQualityStatus(`已切换到最近项目：${project.name}；制作台已清空`);
   }
 
   async function runQualityCheck(
@@ -2803,6 +2929,14 @@ function App() {
       setApiStatus("自动完成已在运行，请稍等当前任务结束");
       return;
     }
+    if (needsAutomaticRoleAnalysis) {
+      await runAiRoleAnalysis({ autoContinue: true });
+      return;
+    }
+    if (needsAutomaticRoleMatching) {
+      await runAiRoleMatching({ autoContinue: true });
+      return;
+    }
     if (blockerItems.length > 0) {
       const latestQuality = await runQualityCheck("generate");
       const latestIssue =
@@ -2824,14 +2958,6 @@ function App() {
       } else {
         confirmAllReadyUtterances();
       }
-      return;
-    }
-    if (roles.length === 0 || flattenedUtterances.length === 0) {
-      await runAiRoleAnalysis({ autoContinue: true });
-      return;
-    }
-    if (agentRunWaitingForRoles && agentRunThreadId) {
-      await runAiRoleMatching({ autoContinue: true });
       return;
     }
     if (!confirmed) {
@@ -3141,16 +3267,20 @@ function App() {
     }
   }
 
-  async function loadAgentRunHistory() {
+  async function loadAgentRunHistory(projectIdOverride?: string) {
+    const projectId =
+      projectIdOverride ?? activeProject?.project_id ?? activeProjectId;
     setAgentTraceStatus("正在读取 Agent Run History");
     try {
-      const data = await requestJson<AgentTraceHistoryResponse>("/agent-runs");
+      const data = await requestJson<AgentTraceHistoryResponse>(
+        `/agent-runs?project_id=${encodeURIComponent(projectId)}`,
+      );
       setAgentTraces(data.runs);
-      setSelectedAgentTrace((current) => current ?? data.runs[0] ?? null);
+      setSelectedAgentTrace(data.runs[0] ?? null);
       setAgentTraceStatus(
         data.runs.length
-          ? `已载入 ${data.runs.length} 条 运行审计`
-          : "暂无 Agent run 记录",
+          ? `已载入 ${data.runs.length} 条运行审计：${projectId}`
+          : `当前环境暂无 Agent run 记录：${projectId}`,
       );
     } catch (error) {
       setAgentTraceStatus(apiFailureMessage("运行审计读取失败", error));
@@ -3169,8 +3299,9 @@ function App() {
     }
   }
 
-  async function loadStoryBible() {
-    const projectId = activeProject?.project_id ?? activeProjectId;
+  async function loadStoryBible(projectIdOverride?: string) {
+    const projectId =
+      projectIdOverride ?? activeProject?.project_id ?? activeProjectId;
     setMemoryStatus("正在读取项目记忆");
     try {
       const data = await requestJson<StoryBibleResponse>(
@@ -3179,8 +3310,8 @@ function App() {
       setStoryBibleFacts(data.facts);
       setMemoryStatus(
         data.facts.length
-          ? `已载入 ${data.facts.length} 条项目记忆`
-          : "项目记忆为空，可先索引正文或手动写入用户纠错",
+          ? `已载入 ${data.facts.length} 条项目记忆：${projectId}`
+          : `当前环境项目记忆为空：${projectId}，可先索引正文或手动写入用户纠错`,
       );
     } catch (error) {
       setMemoryStatus(apiFailureMessage("项目记忆读取失败", error));
@@ -3345,7 +3476,7 @@ function App() {
   useEffect(() => {
     if (page === "agent-runs") void loadAgentRunHistory();
     if (page === "memory") void loadStoryBible();
-  }, [page]);
+  }, [activeProjectId, page]);
 
   useEffect(() => {
     if (ttsDeployment.status !== "running") return undefined;
@@ -3455,6 +3586,8 @@ function App() {
     setUtterancesByParagraph({});
     setIgnoredParagraphIds({});
     setGeneratingUtteranceIds({});
+    resetProjectQualityState();
+    setPlannerRun(null);
     resetAgentRunState();
     setApiStatus(status);
   }
@@ -3485,6 +3618,10 @@ function App() {
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
     setIgnoredParagraphIds({});
+    setConfirmed(false);
+    setUtterancesByParagraph({});
+    resetProjectQualityState();
+    setPlannerRun(null);
     resetAgentRunState();
     setUploadProgress(62);
     setApiStatus("小说已上传，完整文本已保留；点击“文档解析”生成章节目录");
@@ -3582,6 +3719,8 @@ function App() {
     setRoleMatchingProgress(0);
     setVoiceGenerationProgress(0);
     setGeneratingUtteranceIds({});
+    resetProjectQualityState();
+    setPlannerRun(null);
     resetAgentRunState();
     setApiStatus(`已加载章节：${chapter.title}`);
   }
@@ -4194,11 +4333,16 @@ function App() {
 
   function focusUtterance(utterance: UtteranceDraft, statusMessage: string) {
     setHighlightUtteranceId(utterance.utteranceId);
-    document
-      .querySelector(`[data-utterance-id="${utterance.utteranceId}"]`)
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const target = document.querySelector(
+      `[data-utterance-id="${utterance.utteranceId}"]`,
+    );
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
     window.setTimeout(() => setHighlightUtteranceId(""), 1600);
-    setApiStatus(statusMessage);
+    const message = target
+      ? statusMessage
+      : `${statusMessage}；请先确认当前章节已展开并选择该章节`;
+    setApiStatus(message);
+    setQualityStatus(message);
   }
 
   function focusParagraphStatusItem(
@@ -4220,6 +4364,7 @@ function App() {
       if (item.firstUtteranceId) setHighlightUtteranceId("");
     }, 1600);
     setApiStatus(statusMessage);
+    setQualityStatus(statusMessage);
   }
 
   function toggleParagraphStatusFilter(status: ParagraphDubbingStatus) {
