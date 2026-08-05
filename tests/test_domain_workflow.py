@@ -1862,6 +1862,13 @@ def test_fastapi_v0_25_dubbing_workflow_returns_candidates_and_streams_role_even
         == auto_role_id
     )
 
+    persisted_events = client.get(f"/api/v1/agent-runs/{start_data['thread_id']}/events")
+    assert persisted_events.status_code == 200
+    persisted_data = persisted_events.json()
+    assert persisted_data["run_id"] == start_data["thread_id"]
+    assert persisted_data["events"][0]["event"] == "role_selected"
+    assert persisted_data["events"][-1]["event"] == "completed"
+
     resumed = client.post(
         f"/api/v1/agent-runs/{start_data['thread_id']}/events",
         headers={"Last-Event-ID": "1"},

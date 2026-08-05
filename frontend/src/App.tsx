@@ -364,6 +364,11 @@ type AgentTraceDetailResponse = {
   trace: AgentTrace;
 };
 
+type AgentRunEventsResponse = {
+  run_id: string;
+  events: AgentStreamEvent[];
+};
+
 type ProjectWorkspace = {
   project_id: string;
   name: string;
@@ -787,6 +792,39 @@ function createEmptyReviewQueue(projectId: string): ReviewQueueResponse {
     project_id: projectId,
     items: [],
     total_count: 0,
+  };
+}
+
+const REVIEW_ACTIONS: Record<string, string[]> = {
+  dubbing_failed: ["jump", "retry_dubbing"],
+  unselected_role: ["jump", "change_role"],
+  long_utterance: ["jump", "split_text", "confirm"],
+  needs_human_review: ["jump", "confirm", "change_role"],
+};
+
+function reviewQueueFromQualityReport(
+  report: QualityCheckResponse,
+  issueType?: keyof QualitySummary,
+): ReviewQueueResponse {
+  const items = report.issues
+    .filter((issue) =>
+      [
+        "needs_human_review",
+        "unselected_role",
+        "dubbing_failed",
+        "long_utterance",
+      ].includes(issue.issue_type),
+    )
+    .filter((issue) => !issueType || issue.issue_type === issueType)
+    .map((issue) => ({
+      ...issue,
+      actions: issue.actions ?? REVIEW_ACTIONS[issue.issue_type] ?? ["jump"],
+    }));
+  return {
+    project_id: report.project_id,
+    items,
+    total_count: items.length,
+    filters: issueType ? { issue_type: issueType } : undefined,
   };
 }
 
@@ -1315,6 +1353,25 @@ function fallbackWaveform(seed: string): number[] {
   });
 }
 
+const waveformPeaksCache = new Map<string, number[]>();
+
+function scheduleWaveformDecode(callback: () => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (
+      callback: () => void,
+      options?: { timeout?: number },
+    ) => number;
+    cancelIdleCallback?: (handle: number) => void;
+  };
+  if (idleWindow.requestIdleCallback) {
+    const handle = idleWindow.requestIdleCallback(callback, { timeout: 1200 });
+    return () => idleWindow.cancelIdleCallback?.(handle);
+  }
+  const handle = window.setTimeout(callback, 120);
+  return () => window.clearTimeout(handle);
+}
+
 function drawWaveformCanvas(
   canvas: HTMLCanvasElement | null,
   peaks: number[],
@@ -1350,11 +1407,13 @@ function drawWaveformCanvas(
 function WaveformCanvas({
   source,
   active = false,
+  decode = false,
   progress = 0,
   onSeek,
 }: {
   source: string;
   active?: boolean;
+  decode?: boolean;
   progress?: number;
   onSeek?: (ratio: number) => void;
 }) {
@@ -1366,45 +1425,62 @@ function WaveformCanvas({
       setPeaks(fallbackWaveform(""));
       return undefined;
     }
+    const url = mediaRequestUrl(source);
+    const cached = waveformPeaksCache.get(url);
+    if (cached) {
+      setPeaks(cached);
+      return undefined;
+    }
+    setPeaks(fallbackWaveform(source));
+    if (!decode) return undefined;
     let cancelled = false;
-    fetch(mediaRequestUrl(source))
-      .then((response) => {
-        if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
-        return response.arrayBuffer();
-      })
-      .then(async (arrayBuffer) => {
-        const AudioContextCtor =
-          window.AudioContext || (window as any).webkitAudioContext;
-        if (!AudioContextCtor) throw new Error("浏览器不支持 AudioContext");
-        const audioContext = new AudioContextCtor();
-        const decoded = await audioContext.decodeAudioData(
-          arrayBuffer.slice(0),
-        );
-        const channel = decoded.getChannelData(0);
-        const bucketCount = 88;
-        const bucketSize = Math.max(
-          1,
-          Math.floor(channel.length / bucketCount),
-        );
-        const nextPeaks = Array.from({ length: bucketCount }, (_, index) => {
-          const start = index * bucketSize;
-          const end = Math.min(channel.length, start + bucketSize);
-          let max = 0;
-          for (let cursor = start; cursor < end; cursor += 1) {
-            max = Math.max(max, Math.abs(channel[cursor] ?? 0));
+    const controller = new AbortController();
+    const cancelIdle = scheduleWaveformDecode(() => {
+      fetch(url, { cache: "force-cache", signal: controller.signal })
+        .then((response) => {
+          if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
+          return response.arrayBuffer();
+        })
+        .then(async (arrayBuffer) => {
+          const AudioContextCtor =
+            window.AudioContext || (window as any).webkitAudioContext;
+          if (!AudioContextCtor) throw new Error("浏览器不支持 AudioContext");
+          const audioContext = new AudioContextCtor();
+          try {
+            const decoded = await audioContext.decodeAudioData(
+              arrayBuffer.slice(0),
+            );
+            const channel = decoded.getChannelData(0);
+            const bucketCount = 88;
+            const bucketSize = Math.max(
+              1,
+              Math.floor(channel.length / bucketCount),
+            );
+            const nextPeaks = Array.from({ length: bucketCount }, (_, index) => {
+              const start = index * bucketSize;
+              const end = Math.min(channel.length, start + bucketSize);
+              let max = 0;
+              for (let cursor = start; cursor < end; cursor += 1) {
+                max = Math.max(max, Math.abs(channel[cursor] ?? 0));
+              }
+              return Math.min(1, Math.max(0.08, max * 1.8));
+            });
+            waveformPeaksCache.set(url, nextPeaks);
+            if (!cancelled) setPeaks(nextPeaks);
+          } finally {
+            await audioContext.close();
           }
-          return Math.min(1, Math.max(0.08, max * 1.8));
+        })
+        .catch(() => {
+          if (!cancelled) setPeaks(fallbackWaveform(source));
         });
-        await audioContext.close();
-        if (!cancelled) setPeaks(nextPeaks);
-      })
-      .catch(() => {
-        if (!cancelled) setPeaks(fallbackWaveform(source));
-      });
+    });
     return () => {
       cancelled = true;
+      controller.abort();
+      cancelIdle();
     };
-  }, [source]);
+  }, [decode, source]);
 
   useEffect(() => {
     drawWaveformCanvas(canvasRef.current, peaks, progress, active);
@@ -1450,82 +1526,82 @@ export function parseAgentSseBuffer(buffer: string): {
   return { events, remainder };
 }
 
+function mergeAgentStreamEvents(
+  current: AgentStreamEvent[],
+  incoming: AgentStreamEvent[],
+): AgentStreamEvent[] {
+  const byKey = new Map(
+    current.map((event) => [`${event.id}:${event.event}`, event]),
+  );
+  incoming.forEach((event) => {
+    byKey.set(`${event.id}:${event.event}`, event);
+  });
+  return [...byKey.values()].sort((left, right) => left.id - right.id);
+}
+
 function AuthorizedAudio({ source }: { source: string }) {
   const [playableUrl, setPlayableUrl] = useState("");
+  const [audioElementUrl, setAudioElementUrl] = useState("");
   const [loadState, setLoadState] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [loadError, setLoadError] = useState("");
   const [playing, setPlaying] = useState(false);
+  const [waveformDecodeEnabled, setWaveformDecodeEnabled] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const objectUrlRef = useRef("");
 
   useEffect(() => {
     setPlaying(false);
+    setWaveformDecodeEnabled(false);
+    setAudioElementUrl("");
     setCurrentTime(0);
     setDuration(0);
     setLoadError("");
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = "";
-    }
     if (!source) {
       setPlayableUrl("");
       setLoadState("idle");
       return undefined;
     }
-    if (/^(blob:|data:)/.test(source)) {
-      setPlayableUrl(source);
-      setLoadState("ready");
-      return undefined;
-    }
-    setPlayableUrl("");
-    setLoadState("idle");
-    return () => {
-      if (objectUrlRef.current) {
-        URL.revokeObjectURL(objectUrlRef.current);
-        objectUrlRef.current = "";
-      }
-    };
+    setPlayableUrl(mediaRequestUrl(source));
+    setLoadState("ready");
+    return undefined;
   }, [source]);
 
-  async function ensurePlayableUrl(): Promise<string> {
+  function ensurePlayableUrl(): string {
     if (playableUrl) return playableUrl;
     if (!source) return "";
-    setLoadState("loading");
-    setLoadError("");
-    try {
-      const response = await fetch(mediaRequestUrl(source));
-      if (!response.ok) throw new Error(`音频读取失败：${response.status}`);
-      const blob = await response.blob();
-      const nextUrl = URL.createObjectURL(blob);
-      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = nextUrl;
-      setPlayableUrl(nextUrl);
-      setLoadState("ready");
-      return nextUrl;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setPlayableUrl("");
-      setLoadError(message);
-      setLoadState("error");
-      return "";
-    }
+    const nextUrl = mediaRequestUrl(source);
+    setPlayableUrl(nextUrl);
+    setLoadState("ready");
+    return nextUrl;
   }
 
   async function playPreview(fromStart = false) {
-    const nextUrl = await ensurePlayableUrl();
+    const nextUrl = ensurePlayableUrl();
     if (!nextUrl) return;
     const player = audioRef.current;
     if (!player) return;
-    if (player.src !== nextUrl) player.src = nextUrl;
-    if (fromStart) player.currentTime = 0;
-    player
-      .play()
-      .then(() => setPlaying(true))
-      .catch(() => setPlaying(false));
+    setWaveformDecodeEnabled(true);
+    setLoadError("");
+    setLoadState("loading");
+    try {
+      if (player.getAttribute("src") !== nextUrl) {
+        setAudioElementUrl(nextUrl);
+        player.src = nextUrl;
+        player.load();
+      }
+      if (fromStart) player.currentTime = 0;
+      await player.play();
+      setLoadState("ready");
+      setPlaying(true);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setLoadError(message);
+      setLoadState("error");
+      setPlaying(false);
+    }
   }
 
   async function togglePreview() {
@@ -1544,8 +1620,9 @@ function AuthorizedAudio({ source }: { source: string }) {
     <div className="waveform-player">
       <WaveformCanvas
         active={playing}
+        decode={waveformDecodeEnabled}
         progress={duration > 0 ? currentTime / duration : 0}
-        source={playableUrl}
+        source={playableUrl || source}
         onSeek={(ratio) => {
           const player = audioRef.current;
           if (!player || !Number.isFinite(player.duration)) return;
@@ -1556,7 +1633,7 @@ function AuthorizedAudio({ source }: { source: string }) {
       <div className="waveform-controls">
         <button
           type="button"
-          disabled={loadState === "loading"}
+          disabled={!source}
           onClick={() => void togglePreview()}
         >
           {playing ? "暂停" : loadState === "loading" ? "加载中" : "试听"}
@@ -1578,18 +1655,29 @@ function AuthorizedAudio({ source }: { source: string }) {
       <audio
         aria-label="隐藏音频播放器"
         className="audio-element-hidden"
+        onCanPlay={() => setLoadState("ready")}
         onDurationChange={(event) =>
           setDuration(event.currentTarget.duration || 0)
         }
         onEnded={() => setPlaying(false)}
+        onError={(event) => {
+          setLoadState("error");
+          setLoadError(event.currentTarget.error?.message || "音频无法播放");
+          setPlaying(false);
+        }}
+        onLoadedMetadata={(event) => {
+          setDuration(event.currentTarget.duration || 0);
+          setLoadState("ready");
+        }}
         onPause={() => setPlaying(false)}
         onPlay={() => setPlaying(true)}
         onTimeUpdate={(event) =>
           setCurrentTime(event.currentTarget.currentTime)
         }
-        preload="none"
+        onWaiting={() => setLoadState("loading")}
+        preload="metadata"
         ref={audioRef}
-        src={playableUrl || undefined}
+        src={audioElementUrl || undefined}
       />
     </div>
   );
@@ -2044,6 +2132,10 @@ function App() {
   const workspaceRestoreReadyRef = useRef(false);
   const workspaceSaveTimerRef = useRef<number | null>(null);
   const projectWorkspaceControlsRolesRef = useRef(false);
+  const qualityRefreshTimerRef = useRef<number | null>(null);
+  const qualityRefreshInFlightRef =
+    useRef<Promise<QualityCheckResponse | null> | null>(null);
+  const agentTraceRefreshInFlightRef = useRef<Promise<void> | null>(null);
   const [page, setPage] = useState<Page>(() => initialPageFromUrl());
   const [novelPreview, setNovelPreview] = useState("");
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -2124,6 +2216,8 @@ function App() {
   const [agentTraceStatus, setAgentTraceStatus] = useState(
     "Run History 会在完成一次 Agent run 后显示。",
   );
+  const [agentRunEvents, setAgentRunEvents] = useState<AgentStreamEvent[]>([]);
+  const [agentRunEventsRunId, setAgentRunEventsRunId] = useState("");
   const [projects, setProjects] = useState<ProjectWorkspace[]>([]);
   const [activeProjectId, setActiveProjectId] = useState("default");
   const [newProjectName, setNewProjectName] = useState("");
@@ -3008,56 +3102,63 @@ function App() {
 
   async function runQualityCheck(
     purpose: "generate" | "export" = "generate",
+    options: { silent?: boolean; issueType?: keyof QualitySummary } = {},
   ): Promise<QualityCheckResponse | null> {
     const projectId = activeProject?.project_id ?? activeProjectId;
-    setQualityStatus(
-      purpose === "export" ? "正在刷新导出阻塞项" : "正在刷新制作阻塞项",
-    );
-    try {
-      const data = await requestJson<QualityCheckResponse>(
-        `/projects/${encodeURIComponent(projectId)}/quality-check`,
-        {
-          method: "POST",
-          body: JSON.stringify(projectQualityPayload()),
-        },
-      );
-      setQualityReport(data);
-      setQualityStatus(
-        purpose === "export"
-          ? data.can_export
-            ? "导出阻塞项已清空"
-            : `导出仍有 ${data.issues.length} 个阻塞项`
-          : data.can_generate
-            ? "制作阻塞项已清空，可以继续生成"
-            : `制作仍有 ${data.issues.length} 个阻塞项`,
-      );
-      void loadReviewQueue();
-      return data;
-    } catch (error) {
-      setQualityStatus(apiFailureMessage("制作阻塞项刷新失败", error));
-      return null;
+    if (qualityRefreshInFlightRef.current) {
+      if (!options.silent) setQualityStatus("制作阻塞项正在刷新，请稍候");
+      return qualityRefreshInFlightRef.current;
     }
+    if (!options.silent) {
+      setQualityStatus(
+        purpose === "export" ? "正在刷新导出阻塞项" : "正在刷新制作阻塞项",
+      );
+    }
+    const request = requestJson<QualityCheckResponse>(
+      `/projects/${encodeURIComponent(projectId)}/quality-check`,
+      {
+        method: "POST",
+        body: JSON.stringify(projectQualityPayload()),
+      },
+    )
+      .then((data) => {
+        setQualityReport(data);
+        setReviewQueue(reviewQueueFromQualityReport(data, options.issueType));
+        if (!options.silent) {
+          setQualityStatus(
+            purpose === "export"
+              ? data.can_export
+                ? "导出阻塞项已清空"
+                : `导出仍有 ${data.issues.length} 个阻塞项`
+              : data.can_generate
+                ? "制作阻塞项已清空，可以继续生成"
+                : `制作仍有 ${data.issues.length} 个阻塞项`,
+          );
+        }
+        return data;
+      })
+      .catch((error) => {
+        if (!options.silent) {
+          setQualityStatus(apiFailureMessage("制作阻塞项刷新失败", error));
+        }
+        return null;
+      })
+      .finally(() => {
+        qualityRefreshInFlightRef.current = null;
+      });
+    qualityRefreshInFlightRef.current = request;
+    return request;
   }
 
   async function loadReviewQueue(issueType?: keyof QualitySummary) {
-    const projectId = activeProject?.project_id ?? activeProjectId;
-    try {
-      const data = await requestJson<ReviewQueueResponse>(
-        `/projects/${encodeURIComponent(projectId)}/review-queue`,
-        {
-          method: "POST",
-          body: JSON.stringify(
-            projectQualityPayload(
-              issueType ? { issue_type: issueType } : undefined,
-            ),
-          ),
-        },
-      );
-      setReviewQueue(data);
-      if (issueType)
-        setQualityStatus(`制作阻塞项已筛选：${QUALITY_LABELS[issueType]}`);
-    } catch (error) {
-      setQualityStatus(apiFailureMessage("制作阻塞项读取失败", error));
+    const latest = await runQualityCheck("generate", {
+      silent: true,
+      issueType,
+    });
+    const source = latest ?? qualityReport;
+    setReviewQueue(reviewQueueFromQualityReport(source, issueType));
+    if (issueType) {
+      setQualityStatus(`制作阻塞项已筛选：${QUALITY_LABELS[issueType]}`);
     }
   }
 
@@ -3540,28 +3641,55 @@ function App() {
     }
   }
 
-  async function loadAgentRunHistory(projectIdOverride?: string) {
+  async function loadAgentRunHistory(
+    projectIdOverride?: string,
+    options: { quiet?: boolean } = {},
+  ) {
     const projectId =
       projectIdOverride ?? activeProject?.project_id ?? activeProjectId;
-    setAgentTraceStatus("正在读取 Agent Run History");
-    try {
-      const data = await requestJson<AgentTraceHistoryResponse>(
-        `/agent-runs?project_id=${encodeURIComponent(projectId)}`,
-      );
-      setAgentTraces(data.runs);
-      setSelectedAgentTrace(data.runs[0] ?? null);
-      setAgentTraceStatus(
-        data.runs.length
-          ? `已载入 ${data.runs.length} 条运行审计：${projectId}`
-          : `当前环境暂无 Agent run 记录：${projectId}`,
-      );
-    } catch (error) {
-      setAgentTraceStatus(apiFailureMessage("运行审计读取失败", error));
+    if (agentTraceRefreshInFlightRef.current) {
+      return agentTraceRefreshInFlightRef.current;
     }
+    if (!options.quiet) setAgentTraceStatus("正在读取 Agent Run History");
+    const request = requestJson<AgentTraceHistoryResponse>(
+      `/agent-runs?project_id=${encodeURIComponent(projectId)}`,
+    )
+      .then((data) => {
+        setAgentTraces(data.runs);
+        setSelectedAgentTrace((current) => {
+          if (current) {
+            const refreshed = data.runs.find(
+              (item) =>
+                item.run_id === current.run_id &&
+                item.agent_id === current.agent_id,
+            );
+            if (refreshed) return refreshed;
+          }
+          return data.runs[0] ?? null;
+        });
+        setAgentTraceStatus(
+          data.runs.length
+            ? `实时审计已同步：${data.runs.length} 条记录 · ${projectId}`
+            : agentRunRunning
+              ? `Agent 正在运行，审计记录生成后会自动出现：${projectId}`
+              : `当前环境暂无 Agent run 记录：${projectId}`,
+        );
+      })
+      .catch((error) => {
+        if (!options.quiet) {
+          setAgentTraceStatus(apiFailureMessage("运行审计读取失败", error));
+        }
+      })
+      .finally(() => {
+        agentTraceRefreshInFlightRef.current = null;
+      });
+    agentTraceRefreshInFlightRef.current = request;
+    return request;
   }
 
   async function selectAgentTrace(trace: AgentTrace) {
     setSelectedAgentTrace(trace);
+    void loadAgentRunEvents(trace.run_id);
     try {
       const data = await requestJson<AgentTraceDetailResponse>(
         `/agent-runs/${trace.run_id}?agent_id=${encodeURIComponent(trace.agent_id)}`,
@@ -3569,6 +3697,24 @@ function App() {
       setSelectedAgentTrace(data.trace);
     } catch (error) {
       setAgentTraceStatus(apiFailureMessage("运行审计详情读取失败", error));
+    }
+  }
+
+  async function loadAgentRunEvents(
+    runId = agentRunThreadId || selectedAgentTrace?.run_id || "",
+    options: { quiet?: boolean } = {},
+  ) {
+    if (!runId) return;
+    try {
+      const data = await requestJson<AgentRunEventsResponse>(
+        `/agent-runs/${runId}/events`,
+      );
+      setAgentRunEventsRunId(data.run_id);
+      setAgentRunEvents(data.events);
+    } catch (error) {
+      if (!options.quiet) {
+        setAgentTraceStatus(apiFailureMessage("实时事件读取失败", error));
+      }
     }
   }
 
@@ -3753,13 +3899,84 @@ function App() {
   }, [activeProjectId, page]);
 
   useEffect(() => {
+    const runId =
+      agentRunThreadId || (page === "agent-runs" ? selectedAgentTrace?.run_id : "") || "";
+    const shouldPoll =
+      page === "agent-runs" || agentRunRunning || Boolean(agentRunThreadId);
+    if (!shouldPoll) return undefined;
+    let cancelled = false;
+    const poll = () => {
+      if (cancelled) return;
+      void loadAgentRunHistory(undefined, { quiet: true });
+      if (runId) void loadAgentRunEvents(runId, { quiet: true });
+    };
+    poll();
+    const timer = window.setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    activeProjectId,
+    agentRunRunning,
+    agentRunThreadId,
+    page,
+    selectedAgentTrace?.run_id,
+  ]);
+
+  useEffect(() => {
+    if (
+      !workspaceRestoreReadyRef.current ||
+      !activeProjectId ||
+      !hasSplitChapters ||
+      !activeChapterId
+    )
+      return undefined;
+    if (qualityRefreshTimerRef.current !== null) {
+      window.clearTimeout(qualityRefreshTimerRef.current);
+    }
+    qualityRefreshTimerRef.current = window.setTimeout(() => {
+      void runQualityCheck("generate", { silent: true });
+    }, 1100);
+    return () => {
+      if (qualityRefreshTimerRef.current !== null) {
+        window.clearTimeout(qualityRefreshTimerRef.current);
+        qualityRefreshTimerRef.current = null;
+      }
+    };
+  }, [
+    activeChapterId,
+    activeProjectId,
+    confirmed,
+    hasSplitChapters,
+    ignoredParagraphIds,
+    paragraphs,
+    roles,
+    utterancesByParagraph,
+  ]);
+
+  useEffect(() => {
+    if (
+      !workspaceRestoreReadyRef.current ||
+      !activeProjectId ||
+      !hasSplitChapters ||
+      !activeChapterId
+    )
+      return undefined;
+    const timer = window.setInterval(() => {
+      void runQualityCheck("generate", { silent: true });
+    }, 7000);
+    return () => window.clearInterval(timer);
+  }, [activeChapterId, activeProjectId, hasSplitChapters]);
+
+  useEffect(() => {
     if (!workspaceRestoreReadyRef.current || !activeProjectId) return undefined;
     if (workspaceSaveTimerRef.current !== null) {
       window.clearTimeout(workspaceSaveTimerRef.current);
     }
     workspaceSaveTimerRef.current = window.setTimeout(() => {
       void saveProjectWorkspaceState(activeProjectId, { silent: true });
-    }, 900);
+    }, 2200);
     return () => {
       if (workspaceSaveTimerRef.current !== null) {
         window.clearTimeout(workspaceSaveTimerRef.current);
@@ -3769,9 +3986,7 @@ function App() {
   }, [
     activeChapterId,
     activeProjectId,
-    apiStatus,
     chapterBackendSynced,
-    chapterSplitProgress,
     chapters,
     confirmed,
     exportOptions,
@@ -3782,14 +3997,8 @@ function App() {
     paragraphs,
     plannerGoal,
     plannerRun,
-    plannerStatus,
-    qualityReport,
-    reviewQueue,
-    roleMatchingProgress,
     roles,
-    uploadProgress,
     utterancesByParagraph,
-    voiceGenerationProgress,
     workflowState,
   ]);
 
@@ -4450,6 +4659,8 @@ function App() {
     );
     setAgentRunWaitingForRoles(false);
     setRoleMatchingProgress(45);
+    setAgentRunEventsRunId(agentRunThreadId);
+    setAgentRunEvents([]);
     setApiStatus("配音编排 Agent 正在划分台词并为未绑定台词选择角色");
     try {
       const readyUtterances = await ensureChapterStatementsReady();
@@ -4492,6 +4703,12 @@ function App() {
             });
             const parsed = parseAgentSseBuffer(buffer);
             buffer = parsed.remainder;
+            if (parsed.events.length > 0) {
+              setAgentRunEventsRunId(agentRunThreadId);
+              setAgentRunEvents((current) =>
+                mergeAgentStreamEvents(current, parsed.events),
+              );
+            }
             for (const event of parsed.events) {
               lastEventId = Math.max(lastEventId, event.id);
               handleAgentRunStreamEvent(event);
@@ -5705,7 +5922,7 @@ function App() {
                   <div>
                     <div className="section-title">制作阻塞项</div>
                     <small>
-                      汇总生成、导出和人工复核问题；每条都给出影响和推荐操作。
+                      自动同步生成、导出和人工复核问题；按钮仅用于立即检查。
                     </small>
                   </div>
                   <strong className="blocker-count">
@@ -5715,10 +5932,11 @@ function App() {
                 <div className="toolbar-row">
                   <button
                     className="tool-button teal"
+                    aria-label="刷新阻塞项"
                     type="button"
                     onClick={() => void runQualityCheck("generate")}
                   >
-                    刷新阻塞项
+                    立即刷新
                   </button>
                   <button
                     className="tool-button amber"
@@ -7347,6 +7565,14 @@ function App() {
 
   function renderAgentTracePage() {
     const trace = selectedAgentTrace ?? agentTraces[0] ?? null;
+    const liveRunId = agentRunThreadId || trace?.run_id || "";
+    const liveEvents =
+      agentRunEventsRunId === liveRunId ? agentRunEvents : [];
+    const activeAgentOperations = operations.filter(
+      (operation) =>
+        operation.status === "running" &&
+        ["role_analysis", "dubbing_arrangement"].includes(operation.type),
+    );
     return (
       <main className="trace-page">
         <section className="panel trace-list-panel">
@@ -7440,6 +7666,28 @@ function App() {
               <span>最终决策</span>
               <strong>{trace?.final_decision ?? "未运行"}</strong>
             </div>
+          </div>
+
+          <div className="trace-section">
+            <div className="section-title">实时事件</div>
+            <pre>
+              {formatTraceJson(
+                liveEvents.length > 0
+                  ? liveEvents
+                  : activeAgentOperations.length > 0
+                    ? activeAgentOperations.map((operation) => ({
+                        label: operation.label,
+                        status: operation.status,
+                        progress: operation.progress,
+                        message: operation.message,
+                        duration: formatOperationDuration(
+                          operation.startedAt,
+                          operation.updatedAt,
+                        ),
+                      }))
+                    : "暂无实时事件；页面会每 2 秒自动同步运行审计。",
+              )}
+            </pre>
           </div>
 
           <div className="trace-section">

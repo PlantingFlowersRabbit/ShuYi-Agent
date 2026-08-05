@@ -1500,6 +1500,13 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Agent 运行追踪不存在")
         return {"trace": trace}
 
+    @app.get("/api/v1/agent-runs/{run_id}/events")
+    async def list_agent_run_events(run_id: str, after_sequence: int = 0) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "events": repository.list_events(run_id, after_sequence=max(0, after_sequence)),
+        }
+
     @app.get("/api/v1/chapters/{chapter_id}")
     async def get_chapter(chapter_id: str) -> dict[str, Any]:
         state = _state(app)
@@ -1574,7 +1581,8 @@ def create_app() -> FastAPI:
         existing_roles = [role.to_dict() for role in state["roles"].list()]
         started_at = time.perf_counter()
         try:
-            result = workflow.start_role_analysis(
+            result = await asyncio.to_thread(
+                workflow.start_role_analysis,
                 chapter_id=chapter_id,
                 chapter_title=workbench.chapter.title,
                 paragraphs=paragraphs,
@@ -1647,7 +1655,8 @@ def create_app() -> FastAPI:
         utterances_by_paragraph = _utterances_by_paragraph_from_payload(payload)
         started_at = time.perf_counter()
         try:
-            result = workflow.resume_after_roles(
+            result = await asyncio.to_thread(
+                workflow.resume_after_roles,
                 thread_id=thread_id,
                 roles=roles,
                 existing_utterances_by_paragraph=utterances_by_paragraph,
